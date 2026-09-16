@@ -331,3 +331,29 @@ func TestDataPlaneRetriesRetiredAttachments(t *testing.T) {
 type closerFunc func() error
 
 func (f closerFunc) Close() error { return f() }
+
+// The purge deletes by name, and Android's tethering-offload programs sit on
+// the same hooks, so the predicate has to be exact rather than a bare "sb"
+// prefix -- deleting one of those silently turns off forwarding acceleration.
+func TestOwnedTCFilterNameMatchesOnlyOurOwn(t *testing.T) {
+	for _, name := range []string{
+		"sb_tc_local", "sb_tc_shared", "sb_tc_deliver",
+		"sb_share_in", "sb_share_out",
+		"sb_icmp_local", "sb_icmp_shared", "sb_icmp_share",
+		"sbi1", "sbo1", "sbc1", "sbifff", "sboa2c",
+	} {
+		if !ownedTCFilterName(name) {
+			t.Errorf("own filter %q was not recognised, so a restart leaks it", name)
+		}
+	}
+	for _, name := range []string{
+		"", "sb", "sbi", "sbo", "sbc",
+		"sbix", "sbo-1", "sbc 1",
+		"sb_tc", "sb_tc_localx", "xsb_tc_local",
+		"offload", "sched_cls_tether_downstream6_ether", "bpf_prog",
+	} {
+		if ownedTCFilterName(name) {
+			t.Errorf("foreign filter %q would be deleted by the startup purge", name)
+		}
+	}
+}

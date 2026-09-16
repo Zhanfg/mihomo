@@ -416,6 +416,10 @@ func joinStringList(values []string) string {
 }
 
 func (i *Inbound) start() error {
+	// Before anything attaches: a previous run that died without detaching left
+	// its classic filters behind, and an orphan on an interface this run does
+	// not attach to is never revisited. Once per process, not per inbound.
+	tcPurgeOnce.Do(purgeStaleTCFilters)
 	if i.localEnabled && i.androidUIDOptions != nil {
 		if err := i.resolveAndroidUIDPolicy(); err != nil {
 			return E.Cause(err, "resolve Android UID policy")
