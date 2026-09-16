@@ -4,6 +4,7 @@ package sing_ebpf
 
 import (
 	"net/netip"
+	"slices"
 
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -62,9 +63,9 @@ func (i *Inbound) updateBypassRuleSet(P.RuleProvider) {
 		return
 	}
 	if err := i.refreshBypassCIDRsLocked(); err != nil {
-		if backend := i.tcBackend(); backend != nil {
-			log.Errorln("[EBPF] refresh TC eBPF bypass_rule_set; keeping previous policy: %s", err.Error())
-		}
+		// Logged regardless of which data planes are running: a cgroup-only or
+		// shared-only inbound used to fail here in complete silence.
+		log.Errorln("[EBPF] refresh eBPF bypass_rule_set; keeping previous policy: %s", err.Error())
 		// A rule-provider update is the only thing that would otherwise ever
 		// ask for this refresh again: nothing about this rule set is
 		// guaranteed to change a second time, so a transient failure here
@@ -126,6 +127,50 @@ func (i *Inbound) bypassRuleSetBackendRequiresRebuildLocked() bool {
 	return false
 }
 
+// bypassPolicyStep is one data plane's share of installing a compiled bypass
+// policy, paired with how to put the previous one back.
+type bypassPolicyStep struct {
+	name   string
+	apply  func() error
+	revert func() error
+}
+
+// applyBypassPolicySteps installs a policy across every data plane, or none of
+// them. Applying in sequence and stopping at the first error is what left the
+// planes disagreeing about what to bypass -- TC proxying a CIDR cgroup lets
+// past, or the reverse -- silently and for good, since nothing revisits a rule
+// set that does not change again.
+//
+// A revert that itself fails is reported alongside the original error rather
+// than replacing it: the cause of the outage is the first failure, and the
+// backend whose rollback failed marks itself as needing a rebuild, which the
+// retry scheduler reads to stop retrying it.
+func applyBypassPolicySteps(steps []bypassPolicyStep) error {
+	var applied []bypassPolicyStep
+	for _, step := range steps {
+		if err := step.apply(); err != nil {
+			err = E.Cause(err, "apply ", step.name, " bypass policy")
+			for _, undo := range slices.Backward(applied) {
+				if undoErr := undo.revert(); undoErr != nil {
+					err = E.Errors(err, E.Cause(undoErr, "restore ", undo.name, " bypass policy"))
+				}
+			}
+			return err
+		}
+		applied = append(applied, step)
+	}
+	return nil
+}
+
+// sharedRewriteBackend is the shared packet-rewrite backend, or nil when that
+// data plane is not running.
+func (i *Inbound) sharedRewriteBackend() *ECommon.SharedNetworkBackend {
+	if i.sharedRewrite == nil {
+		return nil
+	}
+	return i.sharedRewrite.sharedBackendInstance()
+}
+
 func (i *Inbound) refreshBypassCIDRsLocked() error {
 	var prefixes []netip.Prefix
 	for _, ruleSet := range i.bypassRuleSet {
@@ -147,29 +192,54 @@ func (i *Inbound) refreshBypassCIDRsLocked() error {
 	if err != nil {
 		return err
 	}
-	i.bypassRuleSetPolicy = policy
-	i.bypassCIDR = policy.Prefixes()
+	// One policy has to reach every data plane or none of them. Applying in
+	// sequence and returning on the first error leaves the planes disagreeing
+	// about what to bypass -- TC proxying a CIDR cgroup lets past, or the
+	// reverse -- silently and permanently, since nothing revisits a rule set
+	// that did not change again. So each write records how to undo itself, and
+	// a failure puts the previous policy back before reporting.
+	previousPolicy, previousCIDR := i.bypassRuleSetPolicy, i.bypassCIDR
+	var steps []bypassPolicyStep
 	if backend := i.tcBackend(); backend != nil {
-		if _, err = backend.UpdateCompiledBypassCIDR(policy); err != nil {
-			return err
-		}
+		steps = append(steps, bypassPolicyStep{
+			name:   "TC",
+			apply:  func() error { _, applyErr := backend.UpdateCompiledBypassCIDR(policy); return applyErr },
+			revert: func() error { _, undoErr := backend.UpdateCompiledBypassCIDR(previousPolicy); return undoErr },
+		})
 	}
 	if backend := i.cgroupBackendInstance(); backend != nil {
-		if _, err = backend.UpdateCompiledBypassCIDR(policy); err != nil {
-			return err
+		previousIPv4, previousIPv6 := backend.BypassCIDRCount()
+		steps = append(steps, bypassPolicyStep{
+			name:   "cgroup",
+			apply:  func() error { _, applyErr := backend.UpdateCompiledBypassCIDR(policy); return applyErr },
+			revert: func() error { _, undoErr := backend.UpdateCompiledBypassCIDR(previousPolicy); return undoErr },
+		})
+		if shared := i.sharedRewriteBackend(); shared != nil {
+			steps = append(steps, bypassPolicyStep{
+				name: "shared packet-rewrite",
+				// The shared plane mirrors the cgroup's counts rather than
+				// compiling its own copy, so this reads them after the cgroup
+				// step has installed the new policy.
+				apply: func() error {
+					ipv4Count, ipv6Count := backend.BypassCIDRCount()
+					return shared.SetBypassCIDRState(ipv4Count, ipv6Count)
+				},
+				revert: func() error { return shared.SetBypassCIDRState(previousIPv4, previousIPv6) },
+			})
 		}
+	} else if shared := i.sharedRewriteBackend(); shared != nil {
+		steps = append(steps, bypassPolicyStep{
+			name:   "shared packet-rewrite",
+			apply:  func() error { _, applyErr := shared.UpdateCompiledBypassCIDR(policy); return applyErr },
+			revert: func() error { _, undoErr := shared.UpdateCompiledBypassCIDR(previousPolicy); return undoErr },
+		})
 	}
-	if i.sharedRewrite != nil {
-		if backend := i.sharedRewrite.sharedBackendInstance(); backend != nil {
-			if cgroupBackend := i.cgroupBackendInstance(); cgroupBackend != nil {
-				ipv4Count, ipv6Count := cgroupBackend.BypassCIDRCount()
-				if err = backend.SetBypassCIDRState(ipv4Count, ipv6Count); err != nil {
-					return err
-				}
-			} else if _, err = backend.UpdateCompiledBypassCIDR(policy); err != nil {
-				return err
-			}
-		}
+
+	i.bypassRuleSetPolicy = policy
+	i.bypassCIDR = policy.Prefixes()
+	if err = applyBypassPolicySteps(steps); err != nil {
+		i.bypassRuleSetPolicy, i.bypassCIDR = previousPolicy, previousCIDR
+		return err
 	}
 	// Recompute the set the DNS fake-ip middleware consults, so domains whose
 	// real addresses fall inside it keep their real IP and the kernel eBPF
