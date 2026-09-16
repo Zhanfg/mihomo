@@ -13,6 +13,21 @@ import (
 
 const udpIdleSweepBudget = 1024
 
+// udpReplySocketMaxIdle bounds how long an unused transparent reply socket is
+// kept. It is deliberately far below udp-timeout: a reply socket is keyed by
+// original destination, and destinations cluster on a handful of well-known
+// ports, so holding them for a session's whole lifetime is what fills the
+// 16x64 pool on a gateway. A flow that is still exchanging packets keeps its
+// socket regardless -- sweepIdle never touches a leased entry, which is what
+// makes a short idle bound safe rather than merely cheap.
+const udpReplySocketMaxIdle = 30 * time.Second
+
+// udpReplySocketIdleTimeout keeps the bound under udp-timeout, so lowering that
+// still lowers this.
+func (i *Inbound) udpReplySocketIdleTimeout() time.Duration {
+	return min(udpReplySocketMaxIdle, i.udpTimeout)
+}
+
 var udpActivityEpoch = time.Now()
 
 func udpActivityNow() int64 { return time.Since(udpActivityEpoch).Nanoseconds() }
@@ -182,7 +197,7 @@ func (i *Inbound) expireUDP(cutoff int64, round *udpSweepRound) bool {
 	// lease, which lease() installs under that same shard lock. Taking the
 	// exclusive lock would block the inbound's single UDP read loop while the
 	// sweep walks the table and closes sockets.
-	_ = i.udpReplySockets.sweepIdle(time.Now(), i.udpTimeout)
+	_ = i.udpReplySockets.sweepIdle(time.Now(), i.udpReplySocketIdleTimeout())
 	if s := i.sharedRewrite; s != nil {
 		progress := &round.shared
 		roundLimit := progress.limit
