@@ -606,7 +606,11 @@ func probeSharedCapabilities(report *KernelProbeReport, plane KernelProbeDataPla
 func probeFakeIPICMPCapabilities(report *KernelProbeReport) {
 	const scope = "fakeip_icmp"
 	report.Add(KernelProbePass, scope, KernelProbeRequired, "fakeip_icmp reply facilities",
-		"Answers FakeIP-destined ICMP Echo Requests in place on the same TC classifiers local/shared interception already attaches; no additional program type or map is required beyond ordinary TC classifier support.")
+		"Answers FakeIP-destined ICMP Echo Requests in place on the same TC classifiers local/shared interception already attaches.")
+	probeMapType(report, scope, KernelProbeRequired, CiliumEBPF.PerCPUArray,
+		"Provides per-CPU packet scratch storage and reply counters.")
+	probeProgramHelper(report, scope, KernelProbeRequired, CiliumEBPF.SchedCLS, asm.FnSkbStoreBytes, "bpf_skb_store_bytes",
+		"Writes the swapped addresses and the Echo Reply type into packet data.")
 	probeProgramHelper(report, scope, KernelProbeRequired, CiliumEBPF.SchedCLS, asm.FnL3CsumReplace, "bpf_l3_csum_replace",
 		"Patches the IPv4 header checksum after swapping source and destination for a reply.")
 	probeProgramHelper(report, scope, KernelProbeRequired, CiliumEBPF.SchedCLS, asm.FnL4CsumReplace, "bpf_l4_csum_replace",
