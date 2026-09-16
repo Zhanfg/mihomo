@@ -3,8 +3,6 @@ package smart
 import (
 	"errors"
 	"math"
-	"os"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,7 +10,6 @@ import (
 
 	"github.com/metacubex/bbolt"
 	"github.com/metacubex/mihomo/common/atomic"
-	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/log"
 
 	"golang.org/x/net/publicsuffix"
@@ -380,52 +377,12 @@ func GetBatchSaveThreshold() int {
 }
 
 // 获取系统内存使用情况
+//
+// systemMemoryUsage is provided per platform; when it cannot read the system
+// figures we fall back to a neutral 0.5 so cache sizing stays in its mid range.
 func GetSystemMemoryUsage() float64 {
-	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
-		if usage, ok := readProcMemoryUsage(os.ReadFile); ok {
-			return usage
-		}
-		return 0.5
-	}
-
-	var total float64 = 0.0
-	var available float64 = 0.0
-	var output string
-	var err error
-
-	// 获取总内存
-	if runtime.GOOS == "windows" {
-		output, err = cmd.ExecCmd("wmic OS get TotalVisibleMemorySize")
-		if err == nil {
-			lines := strings.Split(output, "\n")
-			if len(lines) >= 2 {
-				memStr := strings.TrimSpace(lines[1])
-				memKB, parseErr := strconv.ParseFloat(memStr, 64)
-				if parseErr == nil {
-					total = memKB / 1024.0
-				}
-			}
-		}
-	}
-
-	// 获取可用内存
-	if runtime.GOOS == "windows" {
-		output, err = cmd.ExecCmd("wmic OS get FreePhysicalMemory")
-		if err == nil {
-			lines := strings.Split(output, "\n")
-			if len(lines) >= 2 {
-				memStr := strings.TrimSpace(lines[1])
-				memKB, parseErr := strconv.ParseFloat(memStr, 64)
-				if parseErr == nil {
-					available = memKB / 1024.0
-				}
-			}
-		}
-	}
-
-	if total > 0 {
-		used := total - available
-		return math.Max(0, math.Min(used/total, 1.0))
+	if usage, ok := systemMemoryUsage(); ok {
+		return usage
 	}
 	return 0.5
 }
