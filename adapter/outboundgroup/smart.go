@@ -61,15 +61,58 @@ const (
 	floodWindow    = 2 * time.Second
 	floodThreshold = 50
 
-	hostRecoveryProbeBudget  = 8
-	hostRecoveryActiveWindow = 15 * time.Minute
+	// Blocking a (host, node) pair is a hard exclusion at dial time, not a
+	// ranking penalty, and the store drops the pair on its own only after
+	// HostFailureNodeTTL (24h). Recovery probing therefore has to get all the
+	// way round the blocked set well inside that window: at 64 per tick a group
+	// with 400 blocked pairs is fully swept in ~3h.
+	hostRecoveryProbeBudget = 64
+	// Must be at least one tick, otherwise a group used in short regular bursts
+	// can land in the "wrong" half of every cycle and deterministically never
+	// probe - the scheduler's jitter is computed once at start, so its phase is
+	// fixed for the process lifetime.
+	hostRecoveryActiveWindow = 2 * hostStatusCheckInterval
 	hostRecoveryBackoffBase  = 2 * hostStatusCheckInterval
-	hostRecoveryBackoffMax   = 8 * time.Hour
+	// The store already refuses to re-offer a pair for its own retry window
+	// (4h), so backing off past that only delays recovery without saving work,
+	// and unlike the store's gate this one is lost on restart.
+	hostRecoveryBackoffMax = 4 * time.Hour
 )
 
+// A failed attempt downloads ASN.mmdb with a 90s timeout, and InitSmart runs
+// inline on the config-parse path, so retries have to be spaced out: without
+// this every smart group in the config would pay that timeout again on every
+// reload.
+const asnInitRetryAfter = 5 * time.Minute
+
 var (
-	initASNSmartOnce sync.Once
+	asnInitAccess    sync.Mutex
+	asnInitDone      bool
+	asnInitLastTried time.Time
 )
+
+// initASNDatabase loads the ASN database once, but only latches on success. The
+// usual failure is that the download could not run yet - no connectivity at
+// boot is routine on mobile - and a later config reload has to be able to retry
+// it. Latching on failure left prefer-asn silently degraded, with getASNCode
+// returning "" for the rest of the process lifetime.
+func initASNDatabase() {
+	asnInitAccess.Lock()
+	defer asnInitAccess.Unlock()
+	if asnInitDone {
+		return
+	}
+	if now := time.Now(); asnInitLastTried.IsZero() || now.Sub(asnInitLastTried) >= asnInitRetryAfter {
+		asnInitLastTried = now
+	} else {
+		return
+	}
+	if err := geodata.InitASN(); err != nil {
+		log.Warnln("[Smart] Failed to load ASN database: %v", err)
+		return
+	}
+	asnInitDone = true
+}
 
 type SmartOption struct {
 	PolicyPriority string  `group:"policy-priority,omitempty"`
@@ -924,11 +967,7 @@ func (s *Smart) InitSmart() {
 	s.recoveryBackoff = make(map[string]hostRecoveryState)
 
 	if s.preferASN {
-		initASNSmartOnce.Do(func() {
-			if err := geodata.InitASN(); err != nil {
-				log.Warnln("[Smart] Failed to load ASN database: %v", err)
-			}
-		})
+		initASNDatabase()
 	}
 
 	s.global = globalSmartTasks.acquire(s)
