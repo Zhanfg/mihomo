@@ -69,6 +69,7 @@ type Inbound struct {
 	sharedBypassPort    []ECommon.PortRange
 	fakeIPIPv4Prefix    netip.Prefix
 	fakeIPIPv6Prefix    netip.Prefix
+	fakeIPICMPReply     bool
 	redirectIPv4Prefix  netip.Prefix
 	redirectIPv6Prefix  netip.Prefix
 	androidUIDOptions   *androidUIDOptions
@@ -217,6 +218,10 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	if err != nil {
 		return nil, err
 	}
+	fakeIPICMPReply, err := normalizeFakeIPICMP(options.FakeIPICMP)
+	if err != nil {
+		return nil, E.Cause(err, "parse fakeip_icmp")
+	}
 	sharedIncludeMAC, err := parseSharedMACAddresses(
 		"include_mac_address",
 		sharedOptions.IncludeMACAddress,
@@ -262,6 +267,7 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 		sharedBypassPrivate: options.Shared.BypassPrivateAddress == nil || *options.Shared.BypassPrivateAddress,
 		localBypassPort:     localBypassPort,
 		sharedBypassPort:    sharedBypassPort,
+		fakeIPICMPReply:     fakeIPICMPReply,
 		tcPriority:          options.TCPriority,
 		sharedOptions:       sharedOptions,
 		sharedIncludeMAC:    sharedIncludeMAC,
@@ -293,6 +299,14 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	inbound.bypassPublisher = resolver.NewEBPFBypassPublisher()
 	inbound.fakeIPIPv4Prefix, inbound.fakeIPIPv6Prefix = resolver.FakeIPRanges()
 	if err = inbound.normalizeFakeIPPrefixes(); err != nil {
+		return nil, err
+	}
+	if err = validateFakeIPICMP(
+		inbound.fakeIPICMPReply,
+		inbound.fakeIPIPv4Prefix, inbound.fakeIPIPv6Prefix,
+		inbound.localEnabled, inbound.localDataPlane,
+		inbound.sharedEnabled, inbound.sharedDataPlane,
+	); err != nil {
 		return nil, err
 	}
 	if inbound.localCgroupEnabled() || inbound.sharedRewriteEnabled() {
@@ -465,6 +479,7 @@ func (i *Inbound) start() error {
 			EnableUDP:        i.enableUDP,
 			Policy:           i.policySnapshot(),
 			TrackProcess:     i.processTracker != nil,
+			FakeIPICMPReply:  i.fakeIPICMPReply,
 		}
 		if i.selfBypass != nil {
 			backendConfig.SelfBypassMap = i.selfBypass.Map()

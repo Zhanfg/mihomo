@@ -30,6 +30,7 @@ func (i *Inbound) reportKernelCapabilities() {
 		EnableIPv6:          i.localIPv6 || i.sharedIPv6,
 		NeedLPMPolicy:       i.needsLPMPolicy(),
 		NeedProcessTracking: i.processTracker != nil,
+		FakeIPICMPReply:     i.fakeIPICMPReply,
 	}
 	if i.localEnabled {
 		options.LocalDataPlane = ECommon.KernelProbeDataPlane(i.localDataPlane)

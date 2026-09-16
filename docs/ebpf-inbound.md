@@ -92,6 +92,7 @@ listeners:
     tc-priority: 1            # TC filter priority; 1 also enables TCX
     bypass-rule-set: []       # rule providers (behavior: ipcidr) bypassed in kernel
     bypass-tun-direct: true   # see "Coexisting with TUN"
+    fakeip-icmp: off          # off (default) | reply, see "FakeIP"
     local:
       data-plane: cgroup      # cgroup (default) | tc
       cgroup-path: ""         # cgroup v2 directory, empty = auto-detect (cgroup only)
@@ -137,6 +138,9 @@ Field behavior:
   maps. Only `behavior: ipcidr` providers contribute; others are skipped.
 - `bypass-tun-direct`: whether a destination this inbound bypasses is
   connected directly when a TUN listener claims it anyway. Defaults to true.
+- `fakeip-icmp`: `off` (default) leaves ICMP alone, `reply` answers ICMP Echo
+  Requests addressed to a fake-ip address in the kernel. See "FakeIP" for what
+  it costs and which data planes can carry it.
 - `local.data-plane`: `cgroup` attaches connect/sendmsg/recvmsg programs to the
   cgroup and rewrites destinations to an internal redirect address on
   loopback. `tc` attaches an egress program to the default interface and
@@ -391,3 +395,17 @@ meaning once the tunnel maps it back to its domain. This matters when the
 configured range sits inside a bypassed range, as `fake-ip-range: 100.64.0.0/10`
 does. The ranges follow `dns.fake-ip-range`/`fake-ip-range6` at runtime, so a
 config reload that changes them reaches a running inbound.
+
+A fake-ip address answers nothing on its own, so `ping` against a fake-ip
+destination times out even while the same domain is proxied fine. With
+`fakeip-icmp: reply` a separate eBPF object is attached beside the interception
+programs and turns an ICMP Echo Request addressed to a fake-ip address into an
+Echo Reply in the kernel, without the packet ever reaching the core. Nothing
+about reachability is being measured: the reply says only that the address is a
+fake-ip one, not that the domain behind it resolves or that its proxy is up.
+
+The reply programs run on a TC hook, so `reply` is rejected unless a fake-ip
+range is configured and at least one attachment can carry them --
+`local.data-plane: tc`, or shared interception under either `shared.data-plane`.
+In particular `local.data-plane: cgroup` with no shared interception cannot:
+its `connect()`/`sendmsg()` hooks never see ICMP.

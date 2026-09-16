@@ -100,14 +100,15 @@ func (s *sharedRewrite) prepareBackend() (*ECommon.SharedNetworkBackend, error) 
 	}
 	cgroupBackend := s.inbound.cgroupBackendInstance()
 	backend, err := ECommon.PrepareSharedNetwork(cgroupBackend, ECommon.SharedNetworkConfig{
-		ListenerPort: s.listeners.selectedPort(),
-		EnableTCP:    s.inbound.enableTCP,
-		EnableUDP:    s.inbound.enableUDP,
-		RedirectIPv4: s.inbound.redirectIPv4Prefix,
-		RedirectIPv6: redirectIPv6,
-		Policy:       s.inbound.policySnapshot(),
-		MapCapacity:  s.mapCapacity,
-		UDPTimeout:   s.inbound.udpTimeout,
+		ListenerPort:    s.listeners.selectedPort(),
+		EnableTCP:       s.inbound.enableTCP,
+		EnableUDP:       s.inbound.enableUDP,
+		RedirectIPv4:    s.inbound.redirectIPv4Prefix,
+		RedirectIPv6:    redirectIPv6,
+		Policy:          s.inbound.policySnapshot(),
+		MapCapacity:     s.mapCapacity,
+		UDPTimeout:      s.inbound.udpTimeout,
+		FakeIPICMPReply: s.inbound.fakeIPICMPReply,
 	})
 	if err != nil {
 		return nil, err

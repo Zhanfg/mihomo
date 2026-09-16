@@ -16,6 +16,7 @@ type EBPFOption struct {
 	UDPTimeout      int64         `inbound:"udp-timeout,omitempty"`
 	TCPriority      uint16        `inbound:"tc-priority,omitempty"`
 	BypassRuleSet   []string      `inbound:"bypass-rule-set,omitempty"`
+	FakeIPICMP      string        `inbound:"fakeip-icmp,omitempty"`
 	BypassTUNDirect *bool         `inbound:"bypass-tun-direct,omitempty"`
 	Local           LC.EBPFLocal  `inbound:"local,omitempty"`
 	Shared          LC.EBPFShared `inbound:"shared,omitempty"`
@@ -53,6 +54,7 @@ func NewEBPF(options *EBPFOption) (*EBPF, error) {
 			UDPTimeout:           options.UDPTimeout,
 			TCPriority:           options.TCPriority,
 			BypassRuleSet:        options.BypassRuleSet,
+			FakeIPICMP:           options.FakeIPICMP,
 			BypassTUNDirect:      options.BypassTUNDirect,
 			DNSMode:              options.DNSMode,
 			BypassPrivateAddress: options.BypassPrivateAddress,

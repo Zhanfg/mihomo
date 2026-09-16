@@ -426,7 +426,7 @@ func (d *tcDataPlane) attachmentStateChanged(localInterface string, sharedInterf
 				return false, err
 			}
 		}
-		attached, err := attachment.filtersAttached(d.priority)
+		attached, err := attachment.filtersAttached(d.priority, d.backend.FakeIPICMPEnabled())
 		if err != nil {
 			return false, err
 		}
