@@ -11,8 +11,8 @@ import (
 
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	"github.com/metacubex/mihomo/component/iface"
+	"github.com/metacubex/mihomo/component/netchange"
 	"github.com/metacubex/mihomo/component/power"
-	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/listener/sing_tun"
 	"github.com/metacubex/mihomo/log"
 	"github.com/sagernet/netlink"
@@ -194,8 +194,7 @@ func (i *Inbound) setDefaultInterfaceName(interfaceName string) {
 	state.access.Unlock()
 	if active {
 		if changed {
-			iface.FlushCache()
-			resolver.ResetConnection()
+			netchange.Notify()
 		}
 		notifyTCInterfaceUpdate(updates)
 	}
