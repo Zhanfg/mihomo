@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/pool"
+
+	D "github.com/miekg/dns"
 )
 
 func TestDNSRelayLimiterBoundsConcurrency(t *testing.T) {
@@ -264,5 +266,59 @@ func TestDNSRelayPinsClientUntilWorkFinishes(t *testing.T) {
 	limiter.close()
 	if state.activity.pending.Load() != 0 || state.activity.last.Load() <= 1 {
 		t.Fatal("DNS did not release and refresh client")
+	}
+}
+
+// Refusing beats dropping when the budget is gone: a dropped datagram is
+// indistinguishable from a dead server, so the stub waits out its whole
+// per-nameserver timeout and retransmits into the burst that caused the
+// exhaustion, where REFUSED makes it fail over at once.
+func TestRefusedDNSReplyAnswersTheQuestionItRefuses(t *testing.T) {
+	query := new(D.Msg)
+	query.SetQuestion("example.com.", D.TypeA)
+	query.RecursionDesired = true
+	packed, err := query.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	refused, ok := refusedDNSReply(packed)
+	if !ok {
+		t.Fatal("a well-formed query was not refused")
+	}
+	var reply D.Msg
+	if err = reply.Unpack(refused); err != nil {
+		t.Fatalf("refusal does not unpack: %v", err)
+	}
+	if !reply.Response {
+		t.Fatal("refusal is not marked as a response, so the stub ignores it")
+	}
+	if reply.Id != query.Id {
+		t.Fatalf("refusal id = %d, want %d -- a mismatched id is discarded", reply.Id, query.Id)
+	}
+	if reply.Rcode != D.RcodeRefused {
+		t.Fatalf("refusal rcode = %d, want REFUSED", reply.Rcode)
+	}
+	if len(reply.Question) != 1 || reply.Question[0].Name != "example.com." {
+		t.Fatalf("refusal did not echo the question: %+v", reply.Question)
+	}
+}
+
+func TestRefusedDNSReplyDeclinesWhatItCannotAnswer(t *testing.T) {
+	if _, ok := refusedDNSReply(nil); ok {
+		t.Fatal("an empty datagram was answered")
+	}
+	if _, ok := refusedDNSReply([]byte{0x00, 0x01, 0x02}); ok {
+		t.Fatal("a truncated datagram was answered")
+	}
+	response := new(D.Msg)
+	response.SetQuestion("example.com.", D.TypeA)
+	response.Response = true
+	packed, err := response.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := refusedDNSReply(packed); ok {
+		t.Fatal("a response was answered, which would bounce between two resolvers")
 	}
 }

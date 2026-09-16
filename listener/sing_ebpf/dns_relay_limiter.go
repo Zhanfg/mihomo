@@ -158,13 +158,21 @@ func (i *Inbound) stopDNSRelays() {
 }
 func (i *Inbound) startUDPDNSRelay(data []byte, client netip.AddrPort, state *udpClientState, dest netip.AddrPort) {
 	if !i.dnsLimiter().startUDP(state.activity.retain, state.activity.release, func(ctx context.Context) { i.relayUDPDNS(ctx, data, client, state, dest) }) {
-		i.udpWarnings.dnsRelay.warn(i.logWarn, "hijacked UDP DNS relay budget is exhausted; dropping query from ", client)
+		i.udpWarnings.dnsRelay.warn(i.logWarn, "hijacked UDP DNS relay budget is exhausted; refusing query from ", client)
+		if reply, ok := refusedDNSReply(data); ok {
+			if err := i.writeUDPReply(client, state, dest, reply); err != nil {
+				i.udpWarnings.cleanup.warn(i.logWarn, "write refused UDP DNS reply: ", err)
+			}
+		}
 		_ = pool.Put(data)
 	}
 }
 func (s *sharedRewrite) startUDPDNSRelay(data []byte, client netip.AddrPort, state *sharedUDPClientState, dest netip.AddrPort) {
 	if !s.inbound.dnsLimiter().startUDP(state.activity.retain, state.activity.release, func(ctx context.Context) { s.relaySharedUDPDNS(ctx, data, client, state, dest) }) {
-		s.udpWarnings.dnsRelay.warn(s.inbound.logWarn, "hijacked shared UDP DNS relay budget is exhausted; dropping query from ", client)
+		s.udpWarnings.dnsRelay.warn(s.inbound.logWarn, "hijacked shared UDP DNS relay budget is exhausted; refusing query from ", client)
+		if reply, ok := refusedDNSReply(data); ok {
+			s.writeHijackedUDPReply(reply, client, state, dest)
+		}
 		_ = pool.Put(data)
 	}
 }
