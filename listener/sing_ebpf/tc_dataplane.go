@@ -68,6 +68,9 @@ type tcInterfaceAttachment struct {
 	localICMPLink    link.Link
 	sharedICMPLink   link.Link
 	attachmentType   string
+	// detachFilter overrides the netlink detach, for tests that need to
+	// reproduce a kernel that refuses to let a filter go.
+	detachFilter func(*netlink.BpfFilter) error
 }
 
 type tcDeliveryLink struct {
@@ -87,11 +90,14 @@ type tcSysctlState struct {
 }
 
 type tcDataPlane struct {
-	access                sync.Mutex
-	backend               *commonEBPF.TCBackend
-	routing               *tcPolicyRouting
-	delivery              *tcDeliveryLink
-	attachments           []*tcInterfaceAttachment
+	access      sync.Mutex
+	backend     *commonEBPF.TCBackend
+	routing     *tcPolicyRouting
+	delivery    *tcDeliveryLink
+	attachments []*tcInterfaceAttachment
+	// retiredAttachments are attachments whose detach failed. They keep their
+	// interface lock until the kernel lets go, and every reconcile retries them.
+	retiredAttachments    []*tcInterfaceAttachment
 	localInterface        string
 	sharedInterfaces      []string
 	hostAddresses         []netip.Addr
@@ -195,9 +201,13 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 	if d.backend == nil {
 		return E.New("TC eBPF data plane is closed")
 	}
+	// Retry anything a previous reconcile could not detach before deciding what
+	// this one wants: a retired attachment still holds its interface lock, so
+	// until it lets go the interface cannot be re-attached.
+	retiredErr := d.closeRetired()
 	desired, err := d.desiredAttachmentState(localInterface, sharedInterfaces)
 	if err != nil {
-		return err
+		return E.Errors(retiredErr, err)
 	}
 	current := make(map[string]*tcInterfaceAttachment, len(d.attachments))
 	for _, attachment := range d.attachments {
@@ -326,6 +336,7 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 	var closeErr error
 	for _, previous := range current {
 		closeErr = E.Errors(closeErr, previous.Close())
+		d.retire(previous)
 	}
 	for interfaceName, previous := range replaced {
 		lock := previous.lock
@@ -334,6 +345,9 @@ func (d *tcDataPlane) reconcile(localInterface string, sharedInterfaces []string
 			previous.lockOwned = false
 		}
 		closeErr = E.Errors(closeErr, previous.Close())
+		// The lock has already moved to the replacement, but programs that
+		// failed to detach are still in the kernel and have to be retried.
+		d.retire(previous)
 		for _, attachment := range created {
 			if attachment.interfaceName == interfaceName {
 				if lock != nil {
@@ -380,6 +394,15 @@ func retainLocalAttachmentStates(localInterface string, desired map[string]tcAtt
 		}
 		state, loaded := desired[attachment.interfaceName]
 		if !loaded {
+			// The interface could not be resolved, so this retains the index the
+			// attachment was created with. That is only meaningful while the
+			// index is still this attachment's to claim: the interface lock is
+			// named after the index, not the interface, so if something else now
+			// reports that index the interface this attachment describes is gone
+			// and retaining it would hold the lock the other one needs.
+			if tcAttachmentIndexClaimed(desired, attachment.interfaceName, attachment.interfaceIndex) {
+				continue
+			}
 			state = tcAttachmentState{
 				index:   attachment.interfaceIndex,
 				framing: attachment.framing,
@@ -389,6 +412,17 @@ func retainLocalAttachmentStates(localInterface string, desired map[string]tcAtt
 		state.role.local = true
 		desired[attachment.interfaceName] = state
 	}
+}
+
+// tcAttachmentIndexClaimed reports whether an interface other than the named one
+// is already known to carry this index.
+func tcAttachmentIndexClaimed(desired map[string]tcAttachmentState, interfaceName string, index int) bool {
+	for name, state := range desired {
+		if name != interfaceName && state.index == index {
+			return true
+		}
+	}
+	return false
 }
 
 // filtersAttached reports whether every program this attachment installed is
@@ -672,6 +706,29 @@ func closeTCInterfaceAttachments(attachments []*tcInterfaceAttachment) error {
 	for _, attachment := range slices.Backward(attachments) {
 		closeErr = E.Errors(closeErr, attachment.Close())
 	}
+	return closeErr
+}
+
+// retire parks an attachment whose detach did not fully succeed. It still owns
+// its interface lock, so it has to be retried rather than dropped.
+func (d *tcDataPlane) retire(attachment *tcInterfaceAttachment) {
+	if attachment == nil || attachment.IsClosed() {
+		return
+	}
+	d.retiredAttachments = append(d.retiredAttachments, attachment)
+}
+
+// closeRetired retries every attachment a previous pass could not detach and
+// forgets the ones that finally let go.
+func (d *tcDataPlane) closeRetired() error {
+	if len(d.retiredAttachments) == 0 {
+		return nil
+	}
+	var closeErr error
+	for _, attachment := range d.retiredAttachments {
+		closeErr = E.Errors(closeErr, attachment.Close())
+	}
+	d.retiredAttachments = slices.DeleteFunc(d.retiredAttachments, (*tcInterfaceAttachment).IsClosed)
 	return closeErr
 }
 
@@ -1264,16 +1321,47 @@ func restoreTCInterfaceAttachment(
 	return updateTCInterfaceAttachment(linkByName, backend, attachment, role, sharedSourceMACPolicy, priority)
 }
 
+// hasAttachedResources reports whether any program this attachment installed is
+// still in the kernel.
+func (a *tcInterfaceAttachment) hasAttachedResources() bool {
+	return a != nil && (a.localFilter != nil || a.sharedFilter != nil ||
+		a.localICMPFilter != nil || a.sharedICMPFilter != nil ||
+		a.localLink != nil || a.sharedLink != nil ||
+		a.localICMPLink != nil || a.sharedICMPLink != nil)
+}
+
+// IsClosed reports whether this attachment owns nothing any more, so the data
+// plane can drop it from the retired list.
+func (a *tcInterfaceAttachment) IsClosed() bool {
+	if a == nil {
+		return true
+	}
+	return !a.hasAttachedResources() && !(a.lockOwned && a.lock != nil)
+}
+
+// Close detaches everything and then releases the interface lock -- but only if
+// the detach actually succeeded. The lock is named after the interface index and
+// is what stops a second attachment (or a second mihomo) installing a duplicate
+// filter at the same priority, so giving it up while programs are still attached
+// would hand the interface to someone else on top of the orphans. A caller that
+// sees resources left over should retire the attachment and retry it later; see
+// (*tcDataPlane).closeRetired.
 func (a *tcInterfaceAttachment) Close() error {
 	if a == nil {
 		return nil
 	}
 	closeErr := E.Errors(a.closeFilters(), a.closeLinks())
+	if a.hasAttachedResources() {
+		return closeErr
+	}
 	if a.lockOwned && a.lock != nil {
-		closeErr = E.Errors(closeErr, a.lock.Close())
+		if err := a.lock.Close(); err != nil {
+			return E.Errors(closeErr, err)
+		}
 	}
 	a.lock = nil
 	a.lockOwned = false
+	a.attachmentType = ""
 	return closeErr
 }
 
@@ -1281,41 +1369,55 @@ func (a *tcInterfaceAttachment) closeFilters() error {
 	if a == nil {
 		return nil
 	}
-	closeErr := E.Errors(
-		detachTCFilter(a.sharedICMPFilter),
-		detachTCFilter(a.localICMPFilter),
-		detachTCFilter(a.sharedFilter),
-		detachTCFilter(a.localFilter),
+	detach := a.detachFilter
+	if detach == nil {
+		detach = detachTCFilter
+	}
+	return E.Errors(
+		detachTCFilterOwned(&a.sharedICMPFilter, detach),
+		detachTCFilterOwned(&a.localICMPFilter, detach),
+		detachTCFilterOwned(&a.sharedFilter, detach),
+		detachTCFilterOwned(&a.localFilter, detach),
 	)
-	a.sharedICMPFilter = nil
-	a.localICMPFilter = nil
-	a.sharedFilter = nil
-	a.localFilter = nil
-	return closeErr
 }
 
 func (a *tcInterfaceAttachment) closeLinks() error {
 	if a == nil {
 		return nil
 	}
-	var closeErr error
-	if a.sharedICMPLink != nil {
-		closeErr = E.Errors(closeErr, a.sharedICMPLink.Close())
-		a.sharedICMPLink = nil
+	return E.Errors(
+		closeOwned(&a.sharedICMPLink),
+		closeOwned(&a.localICMPLink),
+		closeOwned(&a.sharedLink),
+		closeOwned(&a.localLink),
+	)
+}
+
+// detachTCFilterOwned clears the reference only once the kernel has actually let
+// go of the filter. Nil'ing it unconditionally would make an orphaned program
+// look released, and the interface lock would then be handed on top of it.
+func detachTCFilterOwned(filter **netlink.BpfFilter, detach func(*netlink.BpfFilter) error) error {
+	if filter == nil || *filter == nil {
+		return nil
 	}
-	if a.localICMPLink != nil {
-		closeErr = E.Errors(closeErr, a.localICMPLink.Close())
-		a.localICMPLink = nil
+	if err := detach(*filter); err != nil {
+		return err
 	}
-	if a.sharedLink != nil {
-		closeErr = E.Errors(closeErr, a.sharedLink.Close())
-		a.sharedLink = nil
+	*filter = nil
+	return nil
+}
+
+// closeOwned is the same contract for links: keep the reference on failure.
+func closeOwned[T io.Closer](closer *T) error {
+	if closer == nil || any(*closer) == nil {
+		return nil
 	}
-	if a.localLink != nil {
-		closeErr = E.Errors(closeErr, a.localLink.Close())
-		a.localLink = nil
+	if err := (*closer).Close(); err != nil {
+		return err
 	}
-	return closeErr
+	var zero T
+	*closer = zero
+	return nil
 }
 
 func createTCDeliveryLink(backend *commonEBPF.TCBackend, priority uint16) (*tcDeliveryLink, error) {
@@ -1590,10 +1692,15 @@ func (d *tcDataPlane) Close() error {
 	if d.backend != nil {
 		closeErr = d.backend.Disable()
 	}
+	closeErr = E.Errors(closeErr, d.closeRetired())
 	for _, attachment := range slices.Backward(d.attachments) {
 		closeErr = E.Errors(closeErr, attachment.Close())
 	}
 	d.attachments = nil
+	// Anything still attached here has no later reconcile to retry it, so the
+	// error is all the caller gets; the lock stays held rather than being handed
+	// over on top of orphaned programs.
+	d.retiredAttachments = nil
 	closeErr = E.Errors(closeErr, d.routing.Close())
 	d.routing = nil
 	closeErr = E.Errors(closeErr, d.delivery.Close())
