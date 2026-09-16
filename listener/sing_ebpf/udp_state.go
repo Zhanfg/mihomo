@@ -60,6 +60,13 @@ type udpRedirectBinding struct {
 	redirectAddress netip.Addr
 	packetInfo      []byte
 	connected       bool
+	// sharedPath records which role's kernel rule selected this flow. The TC
+	// data plane carries local egress and shared socket-assignment flows on one
+	// listener, and the assignment that says which is only read for the first
+	// packet, so the answer has to live with the binding for every packet after
+	// it. dns-mode is configured per role, so a flow handled as the wrong one is
+	// relayed when it should have been forwarded, or the reverse.
+	sharedPath bool
 }
 
 func (t *udpClientTable) load(client netip.AddrPort) (*udpClientState, bool) {
@@ -151,6 +158,7 @@ func (t *udpClientTable) setDirectBinding(
 	destination netip.AddrPort,
 	sourceMAC net.HardwareAddr,
 	socketCookie uint64,
+	sharedPath bool,
 ) {
 	state := t.loadOrCreate(client)
 	state.access.Lock()
@@ -159,7 +167,7 @@ func (t *udpClientTable) setDirectBinding(
 		state.sourceMAC = append(state.sourceMAC[:0], sourceMAC...)
 	}
 	state.socketCookie = socketCookie
-	state.bindings[destination] = udpRedirectBinding{}
+	state.bindings[destination] = udpRedirectBinding{sharedPath: sharedPath}
 }
 
 func (t *udpClientTable) setDirectReplyBinding(
@@ -517,16 +525,19 @@ func (s *udpClientState) localAddr() net.Addr { return s.lAddr }
 // for the packets that follow the first one. Reply aliases do not count: they
 // were installed for a remote that answered, not for a flow the kernel
 // assigned.
-func (t *udpClientTable) hasDirectBinding(client netip.AddrPort, destination netip.AddrPort) bool {
+// hasDirectBinding also reports which role selected the flow, so the caller can
+// apply that role's dns-mode without re-reading the assignment per packet.
+func (t *udpClientTable) hasDirectBinding(client netip.AddrPort, destination netip.AddrPort) (bool, bool) {
 	state, loaded := t.load(client)
 	if !loaded {
-		return false
+		return false, false
 	}
 	state.access.RLock()
 	binding, loaded := state.bindings[destination]
 	ready := loaded && !binding.replyAlias && !state.closed && !state.cgroupDataPlane
+	sharedPath := ready && binding.sharedPath
 	state.access.RUnlock()
-	return ready
+	return ready, sharedPath
 }
 
 // replyBinding reads the reply binding and the data plane of the client in one
