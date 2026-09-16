@@ -252,7 +252,7 @@ func (i *Inbound) forwardLocalUDP(data []byte, client netip.AddrPort, destinatio
 		client:      client,
 		clientState: clientState,
 		data:        data,
-		lAddr:       clientState.localAddr(client),
+		lAddr:       clientState.localAddr(),
 	}
 	i.tunnel.HandleUDPPacket(packet, metadata)
 }

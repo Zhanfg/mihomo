@@ -38,14 +38,21 @@ func (t *udpClientTable) expire(cutoff int64, all bool) []netip.Addr {
 	return redirects
 }
 
-func (t *udpClientTable) expireBatch(cutoff int64, all bool, progress *udpSweepProgress) []netip.Addr {
-	idx, count := progress.nextBatch()
-	if count == 0 {
-		return nil
-	}
-	var candidates [udpIdleSweepBatch]*udpClientState
+// expireUDPBatch drains one shard batch and removes the clients that still look
+// idle. Written once for both client tables, which differ only in their state
+// type and their removal call.
+//
+// The second idle check is load-bearing: the shard lock is dropped between
+// selecting a client and removing it, so a client that becomes active in that
+// window must not have its flow torn down.
+func expireUDPBatch[S any, R any](
+	shard *udpClientShard[S],
+	count int,
+	idle func(*S) bool,
+	remove func(netip.AddrPort, *S) []R,
+) []R {
+	var candidates [udpIdleSweepBatch]*S
 	var clients [udpIdleSweepBatch]netip.AddrPort
-	shard := &t.clientShards[idx]
 	shard.access.Lock()
 	for n := 0; n < count; n++ {
 		client, loaded := shard.sweep.advance()
@@ -53,18 +60,28 @@ func (t *udpClientTable) expireBatch(cutoff int64, all bool, progress *udpSweepP
 			break
 		}
 		state := shard.clients[client]
-		if all || state.activity.idle(cutoff) {
+		if idle(state) {
 			candidates[n], clients[n] = state, client
 		}
 	}
 	shard.access.Unlock()
-	var redirects []netip.Addr
+	var results []R
 	for n, state := range candidates {
-		if state != nil && (all || state.activity.idle(cutoff)) {
-			redirects = append(redirects, t.delete(clients[n], state)...)
+		if state != nil && idle(state) {
+			results = append(results, remove(clients[n], state)...)
 		}
 	}
-	return redirects
+	return results
+}
+
+func (t *udpClientTable) expireBatch(cutoff int64, all bool, progress *udpSweepProgress) []netip.Addr {
+	idx, count := progress.nextBatch()
+	if count == 0 {
+		return nil
+	}
+	return expireUDPBatch(&t.clientShards[idx], count,
+		func(state *udpClientState) bool { return all || state.activity.idle(cutoff) },
+		t.delete)
 }
 
 func (t *sharedUDPClientTable) expire(cutoff int64, all bool) []sharedUDPRedirectRelease {
@@ -81,28 +98,9 @@ func (t *sharedUDPClientTable) expireBatch(cutoff int64, all bool, progress *udp
 	if count == 0 {
 		return nil
 	}
-	var candidates [udpIdleSweepBatch]*sharedUDPClientState
-	var clients [udpIdleSweepBatch]netip.AddrPort
-	shard := &t.clientShards[idx]
-	shard.access.Lock()
-	for n := 0; n < count; n++ {
-		client, loaded := shard.sweep.advance()
-		if !loaded {
-			break
-		}
-		state := shard.clients[client]
-		if all || state.activity.idle(cutoff) {
-			candidates[n], clients[n] = state, client
-		}
-	}
-	shard.access.Unlock()
-	var releases []sharedUDPRedirectRelease
-	for n, state := range candidates {
-		if state != nil && (all || state.activity.idle(cutoff)) {
-			releases = append(releases, t.deleteShared(clients[n], state)...)
-		}
-	}
-	return releases
+	return expireUDPBatch(&t.clientShards[idx], count,
+		func(state *sharedUDPClientState) bool { return all || state.activity.idle(cutoff) },
+		t.deleteShared)
 }
 func (i *Inbound) startUDPJanitor() {
 	if !i.enableUDP {
@@ -179,9 +177,12 @@ func (i *Inbound) expireUDP(cutoff int64, round *udpSweepRound) bool {
 		i.lifecycleAccess.Unlock()
 	}
 	progress.limit = roundLimit
-	i.lifecycleAccess.Lock()
+	// No lifecycleAccess here: the reply socket pool synchronises itself. Every
+	// shard takes its own lock, and sweepIdle skips any entry that still has a
+	// lease, which lease() installs under that same shard lock. Taking the
+	// exclusive lock would block the inbound's single UDP read loop while the
+	// sweep walks the table and closes sockets.
 	_ = i.udpReplySockets.sweepIdle(time.Now(), i.udpTimeout)
-	i.lifecycleAccess.Unlock()
 	if s := i.sharedRewrite; s != nil {
 		progress := &round.shared
 		roundLimit := progress.limit

@@ -156,7 +156,7 @@ func (s *sharedRewrite) forwardSharedUDP(data []byte, client netip.AddrPort, des
 		client:      client,
 		clientState: clientState,
 		data:        data,
-		lAddr:       clientState.localAddr(client),
+		lAddr:       clientState.localAddr(),
 	}
 	s.inbound.tunnel.HandleUDPPacket(packet, metadata)
 }

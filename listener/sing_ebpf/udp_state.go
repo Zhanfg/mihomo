@@ -22,19 +22,21 @@ const (
 	udpClientShardCount         = 16
 	udpReplyAliasLimit          = 64
 	udpReplySocketShardCapacity = 64
-	udpReplySocketTotalCapacity = udpClientShardCount * udpReplySocketShardCapacity
 )
 
 var errUDPReplySocketPoolBusy = errors.New("eBPF UDP reply socket pool has no idle slot")
 
 type udpClientTable struct {
-	clientShards [udpClientShardCount]udpClientShard
+	clientShards [udpClientShardCount]udpClientShard[udpClientState]
 }
 
-type udpClientShard struct {
+// udpClientShard is shared by the local and the shared-rewrite client tables:
+// they differ only in the state they hang off each client, and keeping one
+// shard type is what lets the sweep and expiry bookkeeping be written once.
+type udpClientShard[S any] struct {
 	sweep   udpSweepQueue
 	access  sync.RWMutex
-	clients map[netip.AddrPort]*udpClientState
+	clients map[netip.AddrPort]*S
 }
 
 type udpClientState struct {
@@ -84,6 +86,7 @@ func (t *udpClientTable) loadOrCreate(client netip.AddrPort) *udpClientState {
 	state := &udpClientState{
 		bindings:        make(map[netip.AddrPort]udpRedirectBinding),
 		cgroupOriginals: make(map[netip.Addr]commonEBPF.OriginalDestination),
+		lAddr:           newUDPClientAddr(client),
 	}
 	state.activity.touch()
 	shard.clients[client] = state
@@ -139,7 +142,7 @@ func (t *udpClientTable) setCgroupReplyBinding(client netip.AddrPort, expected *
 	return true
 }
 
-func (t *udpClientTable) clientShard(client netip.AddrPort) *udpClientShard {
+func (t *udpClientTable) clientShard(client netip.AddrPort) *udpClientShard[udpClientState] {
 	port := client.Port()
 	return &t.clientShards[(port^port>>8)&(udpClientShardCount-1)]
 }
@@ -208,12 +211,6 @@ func (t *udpClientTable) delete(client netip.AddrPort, expected *udpClientState)
 	expected.replyAliasCount = 0
 	expected.access.Unlock()
 	return redirects
-}
-
-func (s *udpClientState) isCgroupDataPlane() bool {
-	s.access.RLock()
-	defer s.access.RUnlock()
-	return s.cgroupDataPlane
 }
 
 func sourcePacketInfo(address netip.Addr) []byte {
@@ -489,25 +486,17 @@ func (s *udpClientState) processSocketCookie() uint64 {
 	return s.socketCookie
 }
 
-// localAddr returns the address the tunnel keys its NAT table on. It is the
-// same for every packet of a client, so it is built once: formatting the
-// client address and allocating a net.UDPAddr per packet was pure overhead on
-// the read loop.
-func (s *udpClientState) localAddr(client netip.AddrPort) net.Addr {
-	s.access.RLock()
-	lAddr := s.lAddr
-	s.access.RUnlock()
-	if lAddr != nil {
-		return lAddr
-	}
-	s.access.Lock()
-	if s.lAddr == nil {
-		s.lAddr = N.NewCustomAddr(C.EBPF.String(), client.String(), net.UDPAddrFromAddrPort(client))
-	}
-	lAddr = s.lAddr
-	s.access.Unlock()
-	return lAddr
+// newUDPClientAddr builds the address the tunnel keys its NAT table on. Both
+// client tables go through it, so the local and shared data planes can never
+// end up keying NAT differently for the same client.
+func newUDPClientAddr(client netip.AddrPort) net.Addr {
+	return N.NewCustomAddr(C.EBPF.String(), client.String(), net.UDPAddrFromAddrPort(client))
 }
+
+// localAddr is fixed at construction from the client key, so reading it on the
+// packet path needs no lock: formatting the address and allocating a
+// net.UDPAddr per packet was pure overhead on the read loop.
+func (s *udpClientState) localAddr() net.Addr { return s.lAddr }
 
 // hasDirectBinding reports whether a TC client already has a validated
 // binding for destination, so the per-flow assignment lookup can be skipped

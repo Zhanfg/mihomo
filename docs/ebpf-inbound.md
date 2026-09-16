@@ -190,8 +190,12 @@ rounds once per second, then returns to the normal idle-sweep interval. Active
 destination bindings are not hard-capped. Outstanding packets, DNS work and
 replies retain activity.
 
-TCP and UDP DNS relays share a fixed 256-task limit per inbound. Excess UDP
-queries are dropped; excess TCP connections are closed. Transparent UDP reply
+DNS relays have separate per-inbound budgets, because a TCP relay holds its slot
+for the whole connection while a UDP relay holds one for a single datagram: 256
+concurrent UDP queries and 128 hijacked TCP connections, of which no single
+source may hold more than 8 once the TCP budget is more than half spent. Excess
+UDP queries are dropped; excess TCP connections are closed. Both are logged at a
+limited rate. Transparent UDP reply
 sockets have 16 shards with a limit of 64 live sockets each, including retired
 sockets still leased by writers. A full shard with every socket leased rejects
 the reply. These limits are internal constants, not YAML options.

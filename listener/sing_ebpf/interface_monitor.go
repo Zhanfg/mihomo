@@ -235,13 +235,21 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	// Refreshing the interface inventory is a full netlink dump and touches no
+	// inbound state, so it stays outside lifecycleAccess. The packet path takes
+	// that lock for read on every datagram and Go's RWMutex parks new readers as
+	// soon as a writer queues, so anything slow held under it stops the single
+	// UDP read loop from draining the socket and the kernel starts dropping
+	// datagrams. Updates are already serialised without the lock:
+	// runTCInterfaceUpdates is the only caller and runs on one goroutine.
+	if err := sing_tun.DefaultInterfaceFinder.Update(); err != nil {
+		i.interfaceWarnings.inventory.warn(i.logWarn, "update interfaces for TC eBPF: ", err)
+	}
+
 	i.lifecycleAccess.Lock()
 	defer i.lifecycleAccess.Unlock()
 	if ctx.Err() != nil {
 		return
-	}
-	if err := sing_tun.DefaultInterfaceFinder.Update(); err != nil {
-		i.interfaceWarnings.inventory.warn(i.logWarn, "update interfaces for TC eBPF: ", err)
 	}
 	defaultInterface := i.monitoredDefaultInterfaceName()
 	localTCEnabled := i.localTCEnabled()

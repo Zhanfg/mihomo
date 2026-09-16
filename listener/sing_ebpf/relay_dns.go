@@ -65,13 +65,9 @@ func (s *sharedRewrite) relaySharedUDPDNS(ctx context.Context, data []byte, clie
 	}
 }
 
-// relayHijackedDNS resolves one hijacked query. The query buffer is returned to
-// the pool as soon as the resolver has unpacked it; the reply is built into a
-// pooled buffer the caller returns after writing it.
-func relayHijackedDNS(query []byte) ([]byte, []byte, error) {
-	return relayHijackedDNSContext(context.Background(), query)
-}
-
+// relayHijackedDNSContext resolves one hijacked query. The query buffer is
+// returned to the pool as soon as the resolver has unpacked it; the reply is
+// built into a pooled buffer the caller returns after writing it.
 func relayHijackedDNSContext(parent context.Context, query []byte) ([]byte, []byte, error) {
 	ctx, cancel := context.WithTimeout(parent, resolver.DefaultDnsRelayTimeout)
 	defer cancel()

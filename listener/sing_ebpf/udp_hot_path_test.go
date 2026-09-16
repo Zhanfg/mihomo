@@ -19,8 +19,8 @@ func TestLocalAddrIsBuiltOncePerClient(t *testing.T) {
 	client := netip.MustParseAddrPort("192.0.2.10:40000")
 	state := table.loadOrCreate(client)
 
-	first := state.localAddr(client)
-	second := state.localAddr(client)
+	first := state.localAddr()
+	second := state.localAddr()
 	if first != second {
 		t.Fatalf("expected the cached address to be reused, got %p and %p", first, second)
 	}
@@ -30,16 +30,16 @@ func TestLocalAddrIsBuiltOncePerClient(t *testing.T) {
 	if first.Network() != C.EBPF.String() {
 		t.Fatalf("unexpected network %q", first.Network())
 	}
-	if allocs := testing.AllocsPerRun(100, func() { state.localAddr(client) }); allocs != 0 {
+	if allocs := testing.AllocsPerRun(100, func() { state.localAddr() }); allocs != 0 {
 		t.Fatalf("cached localAddr allocates %v per call", allocs)
 	}
 
 	var shared sharedUDPClientTable
 	sharedState := shared.loadOrCreate(client)
-	if sharedState.localAddr(client) != sharedState.localAddr(client) {
+	if sharedState.localAddr() != sharedState.localAddr() {
 		t.Fatal("expected the shared client address to be reused")
 	}
-	if sharedState.localAddr(client).String() != client.String() {
+	if sharedState.localAddr().String() != client.String() {
 		t.Fatal("shared NAT key changed")
 	}
 }
