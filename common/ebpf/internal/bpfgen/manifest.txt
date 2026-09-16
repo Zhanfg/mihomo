@@ -4,7 +4,7 @@ cflags: -mcpu=v1 -O2 -g0 -ffreestanding -mllvm -disable-block-placement -mllvm -
 include_environment: cleared
 bpf2go: v0.22.1-0.20260724091036-00feb08ae4e5
 clang: Android (13989888, +pgo, +bolt, +lto, +mlgo, based on r563880c) clang version 21.0.0 (https://android.googlesource.com/toolchain/llvm-project 5e96669f06077099aa41290cdb4c5e6fa0f59349)
-db3ddc279384e20f6c189af6319c196c9981f07c1bd0be4166e9bc4273801cf2  native/abi.h
+2a0c49bc3c4b4742d67a039452940e1d52fcd094edcbbf2e33f529fc956057c3  native/abi.h
 acef2ae96d9657f06d0533ced13e39509f624074cbcf46197c2ed9909c5844b1  native/bpf_compat.h
 c567a11eba73f88d0a156469333464cbc5c412fdf87330adeb362b3e5fceb348  native/cgroup.bpf.c
 5a511a669a2c9a4a3963f341bba98ba7aa553f69c1fcfe6f7e508f606c7a1e73  native/cgroup_coarse.bpf.c
@@ -18,7 +18,7 @@ d0e7698fec294a8cb5924aac6d09cad5d601e17fcbe5f62902e7f1b0d85d77f7  native/shared_
 2857a13fc1404bb137ad03cc8a304cdd3c360ffbc0d265cfe7a13d1f70b8b453  native/shared_network_packet.h
 f803804e29085c35af4cff9f01f4a4d4af84bc363a0f751e85242b84d66c6fc8  native/shared_network_policy.h
 0c412386e35764777719b276245dff8191a645d9e716cec2b02523a3e1e5442f  native/shared_network_rewrite.h
-d29a179bc4745320e7b62eb20b839d9de9ea66f576a4631bdb4d6c27be5e634e  native/tc.bpf.c
+0a1bb504e43af6f03c7ce16f8e815d005da9e9a325da0f20aadae99f00698f30  native/tc.bpf.c
 03086bf51e34063844eaa174cb3c16c2867f532a7f249680a8670a74ac3ab0ba  internal/bpfgen/cgroup_bpfeb.o
 361d60b22853539219026c63e9963a2973f240c93d3402f9859ec3e31753c06f  internal/bpfgen/cgroup_bpfel.o
 990c3e9879f9bbd3f93e650ee3c614263ec0e51816eab7dba792a144d07acd03  internal/bpfgen/cgroup_coarse_bpfeb.o
@@ -29,5 +29,5 @@ cc9b7c027cf1bb33b3b277470731761dcf96d55810600f1d1c6cf045656c0db6  internal/bpfge
 51ad649c4f86593b6adc9e8a941fcd5e39bb8c1410010de61758515313708b04  internal/bpfgen/fakeip_icmp_bpfel.o
 ac33c805338f1c8e90d4e50aee347d1dbd534fa2d4f52f78b988d02df06db980  internal/bpfgen/shared_network_bpfeb.o
 bbe6d68c0ce060fb54afda2b4887d1b9ebfc7eb2387cd4dc042be36832da7889  internal/bpfgen/shared_network_bpfel.o
-98ddc472de6464586c7344ebae15d60ca104ed9733f9e29e5eef4def60cdd35d  internal/bpfgen/tc_bpfeb.o
-6c719a4cb37547cd92dfedc39cc7853370d50ee3ad553a75f592261d05da097b  internal/bpfgen/tc_bpfel.o
+7b23a0be2d230361f20df25b840842e2e6617ef7d25093d895ea3d6cc0a32673  internal/bpfgen/tc_bpfeb.o
+7faecd8e5adac88e5cda278d6a20d19816bb44ea9b4d1b157d0edd2f13a17fe7  internal/bpfgen/tc_bpfel.o

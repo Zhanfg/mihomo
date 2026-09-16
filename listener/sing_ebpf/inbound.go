@@ -54,6 +54,11 @@ type Inbound struct {
 	enableTCP        bool
 	enableUDP        bool
 
+	// The datapath degradation report's own cadence; see datapath_report.go for
+	// why it does not ride on the UDP janitor or the interface-update loop.
+	datapathReportCancel context.CancelFunc
+	datapathReportDone   chan struct{}
+
 	localDNSMode        string
 	sharedDNSMode       string
 	localIPv6           bool
@@ -555,6 +560,10 @@ func (i *Inbound) start() error {
 			return err
 		}
 	}
+	// After the data planes exist and are enabled: the reporter reads their stat
+	// maps, and its first tick must not land on a backend that is still being
+	// built.
+	i.startDatapathReporter()
 	// Publish the bypass policy even when no bypass_rule_set refresh will ever
 	// run (no rule sets configured), so a TUN listener can still report an
 	// overlap with the private ranges and keep them off its routes.
@@ -783,6 +792,9 @@ func (i *Inbound) Close() error {
 	var closeErr error
 	i.closeOnce.Do(func() {
 		i.stopUDPJanitor()
+		// Stopped and joined here, before anything below drops a backend or
+		// clears sharedRewrite: the reporter reads both without a lock.
+		i.stopDatapathReporter()
 		i.stopDNSRelays()
 		if i.protectRegistered {
 			dialer.UnregisterSocketProtectFunc()
