@@ -65,7 +65,65 @@ func (i *Inbound) updateBypassRuleSet(P.RuleProvider) {
 		if backend := i.tcBackend(); backend != nil {
 			log.Errorln("[EBPF] refresh TC eBPF bypass_rule_set; keeping previous policy: %s", err.Error())
 		}
+		// A rule-provider update is the only thing that would otherwise ever
+		// ask for this refresh again: nothing about this rule set is
+		// guaranteed to change a second time, so a transient failure here
+		// sticks until a restart. Hand it to the interface-update scheduler,
+		// which owns the backoff, and wake it now -- setting the flag alone
+		// would leave the first retry waiting on a netlink event or the drift
+		// check (tcDriftCheckInterval, ten minutes) instead of the seconds
+		// every other TC failure gets.
+		i.bypassRuleSetNeedsRetry = true
+		i.notifyTCInterfaceUpdate()
+		return
 	}
+	i.bypassRuleSetNeedsRetry = false
+}
+
+// retryBypassRuleSetIfNeeded is updateTCInterfaces' hook into the
+// bypass_rule_set half of this file: it does nothing, and reports settled,
+// unless a previous refresh actually failed, so a healthy bypass_rule_set
+// costs a round nothing beyond the lock and a boolean check.
+func (i *Inbound) retryBypassRuleSetIfNeeded() tcSharedRewriteOutcome {
+	i.bypassRuleSetAccess.Lock()
+	defer i.bypassRuleSetAccess.Unlock()
+	if !i.bypassRuleSetStarted {
+		return tcSharedRewriteSettled
+	}
+	if i.bypassRuleSetBackendRequiresRebuildLocked() {
+		i.bypassRuleSetNeedsRetry = false
+		return tcSharedRewriteUnrecoverable
+	}
+	if !i.bypassRuleSetNeedsRetry {
+		return tcSharedRewriteSettled
+	}
+	if err := i.refreshBypassCIDRsLocked(); err != nil {
+		i.interfaceWarnings.bypassRuleSet.warn(i.logWarn, "retry TC eBPF bypass_rule_set refresh: ", err)
+		if i.bypassRuleSetBackendRequiresRebuildLocked() {
+			i.bypassRuleSetNeedsRetry = false
+			return tcSharedRewriteUnrecoverable
+		}
+		return tcSharedRewriteRecoverable
+	}
+	i.bypassRuleSetNeedsRetry = false
+	return tcSharedRewriteSettled
+}
+
+// bypassRuleSetBackendRequiresRebuildLocked reports whether any backend a
+// refresh would have to write the compiled policy into has already been
+// invalidated by a failed rollback of its own. Every write to such a backend is
+// refused from then on, so repeating the refresh cannot succeed.
+func (i *Inbound) bypassRuleSetBackendRequiresRebuildLocked() bool {
+	if i.tcBackend().RequiresRebuild() {
+		return true
+	}
+	if i.cgroupBackendInstance().RequiresRebuild() {
+		return true
+	}
+	if i.sharedRewrite != nil && i.sharedRewrite.sharedBackendInstance().RequiresRebuild() {
+		return true
+	}
+	return false
 }
 
 func (i *Inbound) refreshBypassCIDRsLocked() error {

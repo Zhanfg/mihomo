@@ -109,7 +109,11 @@ type Inbound struct {
 	bypassRuleSetStarted  bool
 	bypassCIDR            []netip.Prefix
 	bypassRuleSetPolicy   ECommon.BypassCIDRPolicy
-	bypassRuleSetDirty    bool
+	// bypassRuleSetNeedsRetry records that a refresh failed and the previous
+	// policy is still live. Nothing else will ask for that refresh again --
+	// rule-provider callbacks are the only other driver -- so the
+	// interface-update scheduler picks it back up on its next round.
+	bypassRuleSetNeedsRetry bool
 
 	// TUN coexistence and fake-ip tracking, see tun_coexist.go and fakeip.go.
 	fakeIPRangeRemove  func()
@@ -129,6 +133,11 @@ type interfaceWarningLimiters struct {
 	infrastructure   warningLimiter
 	hostPolicy       warningLimiter
 	reconcile        warningLimiter
+	// bypassRuleSet covers the scheduler's retries of a failed bypass_rule_set
+	// refresh. The rule-provider callback's own failure is reported once, at
+	// the point it happens; a retry that keeps failing repeats every two
+	// seconds at first, so it needs the limiter.
+	bypassRuleSet warningLimiter
 }
 
 func (i *Inbound) logWarn(format string, args ...any) {
