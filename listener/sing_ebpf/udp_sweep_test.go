@@ -30,6 +30,26 @@ func BenchmarkUDPActiveSweep(b *testing.B) {
 	}
 }
 
+// sameShardClients returns count distinct clients that all hash to shard 0 of
+// both client tables, so a fixture can concentrate a sweep on one shard.
+func sameShardClients(t *testing.T, count int) []netip.AddrPort {
+	t.Helper()
+	if udpClientShardCount != sharedUDPClientShardCount {
+		t.Fatalf("shard counts diverged: %d vs %d", udpClientShardCount, sharedUDPClientShardCount)
+	}
+	clients := make([]netip.AddrPort, 0, count)
+	for n := 0; len(clients) < count; n++ {
+		if n > 1<<24 {
+			t.Fatalf("only found %d of %d same-shard clients", len(clients), count)
+		}
+		candidate := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, byte(n >> 16), byte(n >> 8), byte(n)}), 1234)
+		if shardIndexForAddrPort(candidate, udpClientShardCount) == 0 {
+			clients = append(clients, candidate)
+		}
+	}
+	return clients
+}
+
 func TestUDPSweepBoundsActiveScanAndResumes(t *testing.T) {
 	for _, shared := range []bool{false, true} {
 		name := "local"
@@ -39,19 +59,21 @@ func TestUDPSweepBoundsActiveScanAndResumes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			var local udpClientTable
 			var remote sharedUDPClientTable
-			clients := make([]netip.AddrPort, udpIdleSweepBudget*3)
-			for n := range clients {
-				// All clients hash to the same shard: a shard cursor must advance
-				// past an arbitrarily long active prefix, not restart a map walk.
-				clients[n] = netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, byte(n >> 8), byte(n)}), 1234)
+			// Every client has to land on the same shard: a shard cursor must
+			// advance past an arbitrarily long active prefix, not restart a map
+			// walk, and the budget accounting below only holds for one shard.
+			// shardIndexForAddrPort mixes the whole address, so pick the
+			// addresses that hash there rather than relying on a shared port.
+			clients := sameShardClients(t, udpIdleSweepBudget*3)
+			for n, client := range clients {
 				last := int64(1)
 				if n < udpIdleSweepBudget {
 					last = 3
 				}
 				if shared {
-					remote.loadOrCreate(clients[n]).activity.last.Store(last)
+					remote.loadOrCreate(client).activity.last.Store(last)
 				} else {
-					local.loadOrCreate(clients[n]).activity.last.Store(last)
+					local.loadOrCreate(client).activity.last.Store(last)
 				}
 			}
 			progress := local.sweepProgress(false)

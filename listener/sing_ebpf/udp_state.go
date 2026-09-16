@@ -143,8 +143,7 @@ func (t *udpClientTable) setCgroupReplyBinding(client netip.AddrPort, expected *
 }
 
 func (t *udpClientTable) clientShard(client netip.AddrPort) *udpClientShard[udpClientState] {
-	port := client.Port()
-	return &t.clientShards[(port^port>>8)&(udpClientShardCount-1)]
+	return &t.clientShards[shardIndexForAddrPort(client, udpClientShardCount)]
 }
 
 func (t *udpClientTable) setDirectBinding(
@@ -306,9 +305,20 @@ func (p *udpReplySocketPool) lease(
 	return udpReplySocketLease{shard: shard, entry: entry}, nil
 }
 
-func (p *udpReplySocketPool) shardIndex(source netip.AddrPort) int {
-	address := source.Addr().As16()
-	hash := uint32(source.Port()) * 0x9e3779b1
+// shardIndexForAddrPort mixes every address byte with the port, and is the one
+// placement function for all the sharded UDP tables. A port-only key collapses
+// onto a single shard whenever many distinct addresses share one port, which is
+// the normal case rather than the exotic one: reply sockets are keyed by
+// destination and those cluster on a handful of well-known ports, while client
+// keys collapse for any downstream application that dials from a fixed source
+// port (WireGuard, games) across many hosts.
+//
+// shardCount must be a power of two. This only changes how entries are spread;
+// nothing depends on which shard a key lands in, as long as every lookup and
+// insert goes through here.
+func shardIndexForAddrPort(addrPort netip.AddrPort, shardCount int) int {
+	address := addrPort.Addr().As16()
+	hash := uint32(addrPort.Port()) * 0x9e3779b1
 	for offset := 0; offset < len(address); offset += 4 {
 		hash ^= uint32(address[offset])<<24 |
 			uint32(address[offset+1])<<16 |
@@ -317,7 +327,11 @@ func (p *udpReplySocketPool) shardIndex(source netip.AddrPort) int {
 		hash *= 0x85ebca6b
 	}
 	hash ^= hash >> 16
-	return int(hash & (udpClientShardCount - 1))
+	return int(hash & uint32(shardCount-1))
+}
+
+func (p *udpReplySocketPool) shardIndex(source netip.AddrPort) int {
+	return shardIndexForAddrPort(source, udpClientShardCount)
 }
 
 func (l udpReplySocketLease) release() {

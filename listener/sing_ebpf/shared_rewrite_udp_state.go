@@ -110,9 +110,7 @@ func sharedLoadOrCreateLocked(s *udpClientShard[sharedUDPClientState], client ne
 func (s *sharedUDPClientState) localAddr() net.Addr { return s.lAddr }
 
 func (t *sharedUDPClientTable) clientShard(client netip.AddrPort) *udpClientShard[sharedUDPClientState] {
-	port := client.Port()
-	index := (port ^ port>>8) & (sharedUDPClientShardCount - 1)
-	return &t.clientShards[index]
+	return &t.clientShards[shardIndexForAddrPort(client, sharedUDPClientShardCount)]
 }
 
 func (t *sharedUDPClientTable) cachedOriginal(client netip.AddrPort, redirectAddress netip.Addr) (sharedUDPOriginalDestination, bool) {
