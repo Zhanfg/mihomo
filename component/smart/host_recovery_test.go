@@ -147,3 +147,35 @@ func TestUpdateHostStatusRecordsTheHostWhenCode3Blocks(t *testing.T) {
 	require.Equal(t, "probe.example.com", cached.Codes[3].NodeHosts[node],
 		"code 3 blocked a node without recording where to probe it")
 }
+
+// A connection that completes cleanly is the positive evidence a block was
+// waiting for, and it has to undo every code the node collected -- except the
+// manual one, which is the user's decision and not the network's.
+func TestUpdateHostStatusClearsEveryRecoverableBlockOnSuccess(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	codes := map[int]*CodeNodeSet{}
+	for _, code := range []int{1, 2, 3, 4, 5, 6} {
+		codes[code] = blockedNode(node, "probe.example.com", time.Hour)
+	}
+	codes[1].Nodes[node] = 0
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: codes})
+
+	store := &Store{}
+	metadata := &C.Metadata{Host: "probe.example.com"}
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, false, true, 0)
+
+	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
+	require.True(t, ok)
+	for _, code := range []int{2, 3, 4, 5, 6} {
+		if codeSet := cached.Codes[code]; codeSet != nil {
+			require.NotContainsf(t, codeSet.Nodes, node, "a clean close left the code %d block in place", code)
+		}
+	}
+	require.NotNil(t, cached.Codes[1], "a clean close lifted the user's manual block")
+	require.Contains(t, cached.Codes[1].Nodes, node, "a clean close lifted the user's manual block")
+}

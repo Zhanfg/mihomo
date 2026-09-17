@@ -1854,8 +1854,16 @@ func (s *Smart) checkNodeQuality(
 
 	wtFailNodes, wtLastCheck, wtLastFailure, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
+	// The safety valve: so many nodes are blocked for this target that
+	// filterProxies has started letting blocked ones back into the pool, and no
+	// further blocking verdict should be recorded while that lasts. A clean
+	// close over a node that is itself blocked still has to be reported, and
+	// for the same reason as below -- draining the blocks is the only way the
+	// valve ever closes, and reporting it unchecked left the recovery probe as
+	// the only route out of a state the probe could not even see, since it
+	// swept code 2 alone.
 	if wtBlocked {
-		return newWeight, false, false, 0
+		return newWeight, false, err == nil && wtFailNodes[proxyName] != 0, 0
 	}
 
 	if newWeight > 0 && newWeight < smart.AllowedWeight {
@@ -1866,8 +1874,16 @@ func (s *Smart) checkNodeQuality(
 		return newWeight, false, true, 3
 	}
 
+	// The node is already blocked for this target and still carried this
+	// connection through -- the hostFailLimit safety valve lets blocked nodes
+	// back into the pool once too many of them are out, and a recovery probe
+	// clears the way for the rest. Skipping the quality checks for it is right;
+	// reporting it unchecked was not, because UpdateHostStatus returns at once
+	// on !checked and its clearing branch is the only thing that lifts a block.
+	// Success could therefore never undo one: a blocked node waited out the
+	// full 24-hour TTL or a recovery probe, however well it was working.
 	if wtFailNodes[proxyName] != 0 {
-		return newWeight, false, false, 0
+		return newWeight, false, true, 0
 	}
 
 	// zero-traffic connection
@@ -1914,13 +1930,28 @@ func (s *Smart) markNodeFailure(metadata *C.Metadata, proxyName string, isDegrad
 
 	failedBlock := s.store.UpdateHostStatus(s.Name(), s.configName, wildcardTarget, metadata, proxyName, s.maxFailedTimes, int(s.hostFailLimit.Load()), isDegraded, checked, blockCode)
 
-	if isDegraded || failedBlock {
+	if hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked, blockCode) {
 		if target != "" && target != wildcardTarget {
 			s.store.UpdateHostStatus(s.Name(), s.configName, target, metadata, proxyName, s.maxFailedTimes, int(s.hostFailLimit.Load()), isDegraded, checked, blockCode)
 		}
 	}
 
 	return failedBlock
+}
+
+// hostStatusAppliesToEveryScope reports whether a host-status update changes a
+// block, and so has to reach the SmartTarget records as well as the wildcard
+// ones. GetHostStatus unions the two scopes, so a block written to both and
+// lifted from one still excludes the node at dial time -- which is what used to
+// happen, because only the blocking verdicts propagated.
+func hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked bool, blockCode int64) bool {
+	if isDegraded || failedBlock {
+		return true
+	}
+	// A clear. UpdateHostStatus drops the node from every code set but the
+	// manual one when it is told the connection succeeded, and does nothing at
+	// all when the verdict was never checked.
+	return checked && blockCode == 0
 }
 
 func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asnNumber string, force bool) {

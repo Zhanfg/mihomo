@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
+	"github.com/metacubex/mihomo/component/smart"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel/statistic"
 )
@@ -172,5 +173,126 @@ func TestFloodSuppressorArmsOnce(t *testing.T) {
 	}
 	if arms != 1 {
 		t.Fatalf("suppressor armed %d times across one flood, want 1", arms)
+	}
+}
+
+// GetHostStatus unions the wildcard records with the SmartTarget ones, so a
+// node is excluded while either scope still holds a block. Blocking wrote both
+// scopes but clearing only ever wrote the first, which left the SmartTarget
+// block standing and the node excluded anyway.
+func TestHostStatusScopePropagationCoversClearsAsWellAsBlocks(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		isDegraded  bool
+		failedBlock bool
+		checked     bool
+		blockCode   int64
+		want        bool
+	}{
+		{name: "degrade blocks both scopes", isDegraded: true, checked: true, blockCode: 4, want: true},
+		{name: "accumulated failures block both scopes", failedBlock: true, checked: true, blockCode: 3, want: true},
+		{name: "a clean close clears both scopes", checked: true, blockCode: 0, want: true},
+		{name: "an unchecked close changes nothing", want: false},
+		{name: "a checked non-blocking verdict is not a clear", checked: true, blockCode: 2, want: false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			got := hostStatusAppliesToEveryScope(testCase.isDegraded, testCase.failedBlock, testCase.checked, testCase.blockCode)
+			if got != testCase.want {
+				t.Fatalf("hostStatusAppliesToEveryScope = %v, want %v", got, testCase.want)
+			}
+		})
+	}
+}
+
+// A blocked node that carries a connection through cleanly has just proved the
+// block wrong. Reporting that close as unchecked meant UpdateHostStatus
+// returned before its clearing branch, so nothing but the 24-hour TTL or a
+// recovery probe could ever lift a block -- however well the node was working.
+// Both exits matter: the safety valve above hostFailLimit is exactly the state
+// where blocks most need to drain, because it is what lets blocked nodes carry
+// traffic again in the first place.
+func TestACleanCloseOnABlockedNodeIsReportedAsChecked(t *testing.T) {
+	const (
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	for _, testCase := range []struct {
+		name          string
+		hostFailLimit int32
+	}{
+		{name: "below the safety valve", hostFailLimit: 1_000},
+		{name: "safety valve open", hostFailLimit: 0},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			smart.InitCache()
+			smart.InitQueue()
+			group := "smart-group-" + testCase.name
+
+			s := sweepGroup(group)
+			s.configName = config
+			s.store = &smart.Store{}
+			s.maxFailedTimes = 1
+			s.hostFailLimit.Store(testCase.hostFailLimit)
+
+			blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
+			s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, 4)
+			if failNodes, _, _, _ := s.store.GetHostStatus(group, config, wildcardTarget, 1_000); failNodes[node] == 0 {
+				t.Fatal("fixture did not block the node")
+			}
+
+			metadata := &C.Metadata{
+				Host: "probe.example.com", WildcardTarget: wildcardTarget,
+				SmartBlock: "normal", NetWork: C.TCP,
+			}
+			_, isDegraded, checked, blockCode := s.checkNodeQuality(
+				nil, metadata, nil, wildcardTarget, "probe.example.com:443", node,
+				0.9, 0.9, 1_000, 1.0, 1.0, "tcp", "", false, 0, 0)
+
+			if isDegraded || blockCode != 0 {
+				t.Fatalf("a clean close was judged degraded=%v code=%d", isDegraded, blockCode)
+			}
+			if !checked {
+				t.Fatal("a clean close on a blocked node is reported unchecked, so the block can never be lifted by success")
+			}
+		})
+	}
+}
+
+// The valve is there to stop new blocks piling up while most of the pool is
+// already out. A failing close must not be turned into a clear by the change
+// above.
+func TestTheSafetyValveStillRefusesToRecordAFailure(t *testing.T) {
+	const (
+		group          = "valve-group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	smart.InitCache()
+	smart.InitQueue()
+
+	s := sweepGroup(group)
+	s.configName = config
+	s.store = &smart.Store{}
+	s.maxFailedTimes = 1
+	s.hostFailLimit.Store(0)
+
+	blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
+	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, 4)
+
+	metadata := &C.Metadata{
+		Host: "probe.example.com", WildcardTarget: wildcardTarget,
+		SmartBlock: "normal", NetWork: C.TCP,
+	}
+	_, isDegraded, checked, blockCode := s.checkNodeQuality(
+		errors.New("connection reset"), metadata, nil, wildcardTarget, "probe.example.com:443", node,
+		0.9, 0.9, 1_000, 1.0, 1.0, "tcp", "", false, 0, 0)
+
+	if isDegraded || blockCode != 0 {
+		t.Fatalf("the valve recorded a blocking verdict: degraded=%v code=%d", isDegraded, blockCode)
+	}
+	if checked {
+		t.Fatal("a failed close was reported as checked, which clears the very blocks the valve is waiting out")
 	}
 }
