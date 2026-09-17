@@ -403,6 +403,7 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, asnNumber string, p C.Pr
 		// nothing. A connection that a parallel dial placed on another node
 		// after the winner settled now survives until it ends on its own, which
 		// is the better outcome anyway: it is working traffic.
+		return
 	default:
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnNumber, wildcard)
 		s.store.StoreUnwrapResult(s.Name(), s.configName, target, asnNumber, wildcard, []C.Proxy{p})
@@ -1935,7 +1936,22 @@ func (s *Smart) checkNodeQuality(
 	if downloadTotal < 0.03 && metadata.Host != "" && metadata.DstPort == 443 && !isUDP && metadata.Type != C.INNER {
 		var failure bool
 		var checked bool
-		if now-wtLastCheck > 300 || now-wtLastFailure < 300 {
+		// A probe is a live HTTPS request through the proxy -- a fresh
+		// transport, a TLS handshake, up to three redirects, a 10s client
+		// timeout -- and it runs with this connection's shard lock held. The
+		// rate limit is what keeps that bounded.
+		//
+		// The second clause used to remove the limit outright for 300s after
+		// any failure on this target, so during exactly the churn that produces
+		// failures, every qualifying close launched its own probe: unbounded,
+		// while the scheduled path doing the same work budgets itself to 64
+		// probes per half hour. Recent trouble now shortens the interval rather
+		// than removing it, so the eagerness survives and the storm does not.
+		probeInterval := int64(300)
+		if now-wtLastFailure < 300 {
+			probeInterval = 30
+		}
+		if now-wtLastCheck > probeInterval {
 			checked = true
 			status, ok, err := s.StatusTest(proxy, metadata.Host)
 			if err == nil {
@@ -1993,6 +2009,8 @@ func hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked bool, blockC
 }
 
 func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asnNumber string, force bool) {
+	// Loop-invariant: depends only on asnNumber.
+	cdnASN := asnNumber != "" && smart.CdnASNs[asnNumber]
 	statistic.DefaultManager.RangeSmartTarget(target, func(id string) bool {
 		if id == metadata.UUID {
 			return true
@@ -2004,14 +2022,19 @@ func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asn
 		if !lo.Contains(tracker.Chains(), s.Name()) {
 			return true
 		}
+		// Cheapest rejection first. On the dial path this test rejects nearly
+		// every tracker -- they are already on the winning node -- and the ASN
+		// comparison below dereferences the tracker's info and can memoise an
+		// ASN lookup into its metadata, which is wasted on a tracker that is
+		// not a candidate for closing in the first place.
+		if !force && (proxyName == "" || lo.Contains(tracker.Chains(), proxyName)) {
+			return true
+		}
 		if asnNumber != "" {
-			if !smart.CdnASNs[asnNumber] && s.getASNCode(tracker.Info().Metadata) != asnNumber {
+			if !cdnASN && s.getASNCode(tracker.Info().Metadata) != asnNumber {
 				return true
 			}
 		} else if s.getASNCode(tracker.Info().Metadata) != "" {
-			return true
-		}
-		if !force && (proxyName == "" || lo.Contains(tracker.Chains(), proxyName)) {
 			return true
 		}
 		// Marked before it is closed, in both modes. checkNodeQuality reads this

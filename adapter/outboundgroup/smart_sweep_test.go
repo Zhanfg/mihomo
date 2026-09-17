@@ -333,6 +333,56 @@ func TestTheSafetyValveOnlyReportsClosesOnBlockedNodes(t *testing.T) {
 	}
 }
 
+// The sweep exists to move traffic onto a new winner. When the winner has not
+// moved there is nothing to move, and scanning anyway costs dial-rate x
+// bucket-size per dial -- and the bucket, keyed by the matched rule, grows with
+// the dial rate too. A connection a parallel dial placed elsewhere after the
+// winner settled now survives; that is working traffic, and killing it was the
+// churn this whole area is trying to stop.
+func TestAdoptingAnUnchangedWinnerDoesNotSweep(t *testing.T) {
+	const (
+		target = "RuleSet [Proxy]"
+		group  = "adopt-group"
+		config = "config"
+	)
+	smart.InitCache()
+	smart.InitQueue()
+
+	s := sweepGroup(group)
+	s.configName = config
+	s.store = &smart.Store{}
+
+	winner := &proxyNamed{name: "node-a"}
+	dialer := &C.Metadata{UUID: "dialer", SmartTarget: target, WildcardTarget: "example.com"}
+
+	// First adopt: records the winner.
+	s.adoptUnwrapWinner(dialer, "", winner)
+
+	// A connection lands on another node afterwards.
+	straggler := newSweepTracker("straggler", target, "node-b", group)
+	statistic.DefaultManager.Join(straggler)
+	defer statistic.DefaultManager.Leave(straggler)
+
+	// Second adopt, same winner: nothing to consolidate.
+	s.adoptUnwrapWinner(dialer, "", winner)
+	if straggler.closed {
+		t.Fatal("a dial that changed nothing still swept the bucket")
+	}
+
+	// A winner that actually moves still sweeps.
+	s.adoptUnwrapWinner(dialer, "", &proxyNamed{name: "node-c"})
+	if !straggler.closed {
+		t.Fatal("a changed winner did not consolidate traffic onto it")
+	}
+}
+
+type proxyNamed struct {
+	C.Proxy
+	name string
+}
+
+func (p *proxyNamed) Name() string { return p.name }
+
 // A swept victim usually reports no error, but one whose first read had already
 // failed before the sweep reached it arrives with both an error and the marker.
 // Counting that toward the suppressor is not the safe direction: tripping runs
