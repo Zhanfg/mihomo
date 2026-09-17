@@ -2,6 +2,7 @@ package inbound
 
 import (
 	"context"
+	"errors"
 
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
@@ -104,16 +105,14 @@ func (e *EBPF) Update(newConfig C.InboundConfig) (bool, error) {
 		optionToString(withoutInPlaceUpdatableFields(*options)) {
 		return false, nil
 	}
-	// The shared packet-rewrite backend sizes its bypass flow cache to a single
-	// entry when nothing is bypassed, and that is fixed when the map is
-	// created. A rule-set list crossing between empty and non-empty therefore
-	// needs the backend built around it, even though the policy itself would
-	// install fine.
-	if (len(e.config.BypassRuleSet) == 0) != (len(options.BypassRuleSet) == 0) {
-		return false, nil
-	}
 	next := ebpfListenerConfig(options)
 	if err := e.l.Update(next); err != nil {
+		// Not every refusal is a failure: the data planes know constraints this
+		// layer cannot see -- which planes are even running -- and report them
+		// by asking for the rebuild the caller would have done anyway.
+		if errors.Is(err, sing_ebpf.ErrRebuildRequired) {
+			return false, nil
+		}
 		return false, err
 	}
 	// The running listener stays registered, so it has to answer for the config

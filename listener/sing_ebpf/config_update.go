@@ -11,6 +11,16 @@ import (
 	E "github.com/metacubex/sing/common/exceptions"
 )
 
+// ErrRebuildRequired reports a difference this inbound will not take in place.
+// The listener maps it to "not handled" rather than to a failure, so the caller
+// rebuilds exactly as it would have without an Update at all -- no error is
+// logged, because nothing went wrong.
+//
+// It exists so the reasons a change needs a rebuild can live here, next to the
+// data planes that impose them, rather than in the option layer which cannot
+// see which planes are running.
+var ErrRebuildRequired = E.New("eBPF inbound requires a rebuild to apply this change")
+
 // Update applies a config difference to the running inbound.
 //
 // The caller has already established that the difference is confined to the
@@ -88,6 +98,14 @@ func (i *Inbound) bypassRuleSetStep(tags []string) (*reversibleStep, error) {
 	i.bypassRuleSetAccess.Unlock()
 	if unchanged {
 		return nil, nil
+	}
+	// The shared packet-rewrite backend sizes its bypass flow cache to a single
+	// entry when nothing is bypassed, and that size is fixed when the map is
+	// created. Only that plane has the constraint -- the cgroup and TC bypass
+	// maps are fixed-capacity either way -- so only an inbound actually running
+	// it has to be rebuilt when the list crosses between empty and non-empty.
+	if i.sharedRewrite != nil && (len(tags) == 0) != (len(i.bypassRuleSetTags) == 0) {
+		return nil, ErrRebuildRequired
 	}
 	if i.providerTunnel == nil {
 		return nil, E.New("tunnel does not expose rule providers")

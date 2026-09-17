@@ -12,6 +12,11 @@ import (
 	E "github.com/metacubex/sing/common/exceptions"
 )
 
+// ErrRebuildRequired mirrors the real build's sentinel; see config_update.go.
+// Nothing can return it here -- New always fails -- but the listener package
+// compares against it unconditionally.
+var ErrRebuildRequired = E.New("eBPF inbound requires a rebuild to apply this change")
+
 // Listener is the eBPF inbound listener. It is only available when the
 // binary is built for linux/android with the `with_ebpf` build tag.
 type Listener interface {

@@ -3,6 +3,7 @@
 package sing_ebpf
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
@@ -154,5 +155,35 @@ func TestUpdateWithNothingChangedTouchesNothing(t *testing.T) {
 	}
 	if !slices.Equal(i.bypassCIDR, before) {
 		t.Fatalf("bypass policy = %v, want %v", i.bypassCIDR, before)
+	}
+}
+
+// Only the shared packet-rewrite plane sizes its bypass flow cache to the
+// presence of a policy, and only at map creation. An inbound running it has to
+// be rebuilt when the rule-set list crosses between empty and non-empty; one
+// that is not running it has no such constraint and used to be rebuilt anyway,
+// losing every kernel map for a limit it does not have.
+func TestUpdateOnlyDemandsARebuildForThePlaneThatNeedsOne(t *testing.T) {
+	china := netip.MustParsePrefix("10.0.0.0/8")
+	providerTunnel := &fakeRuleProviderTunnel{providers: map[string]P.RuleProvider{
+		"ChinaIP": newFakeIPCIDRRuleProvider(t, "ChinaIP", china),
+	}}
+
+	withoutShared := updatableInboundForTest(t, providerTunnel, "ChinaIP")
+	if err := withoutShared.Update(updateOptions(nil, 300)); err != nil {
+		t.Fatalf("an inbound with no shared packet-rewrite plane refused to empty its rule set: %v", err)
+	}
+	if len(withoutShared.bypassRuleSetTags) != 0 {
+		t.Fatalf("tags = %v, want empty", withoutShared.bypassRuleSetTags)
+	}
+
+	withShared := updatableInboundForTest(t, providerTunnel, "ChinaIP")
+	withShared.sharedRewrite = &sharedRewrite{}
+	err := withShared.Update(updateOptions(nil, 300))
+	if !errors.Is(err, ErrRebuildRequired) {
+		t.Fatalf("update = %v, want a rebuild request", err)
+	}
+	if len(withShared.bypassRuleSetTags) != 1 {
+		t.Fatalf("a refused update changed the tags to %v", withShared.bypassRuleSetTags)
 	}
 }

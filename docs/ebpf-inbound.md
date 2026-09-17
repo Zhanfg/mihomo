@@ -307,7 +307,7 @@ does not depend on stale pinned objects.
 
 ## Privileged integration tests
 
-The `privileged-integration` job in `.github/workflows/build-ebpf.yml` probes
+The `privileged-integration` job in `.github/workflows/ebpf.yml` probes
 the runner with `common/ebpf/check-kernel.sh` and marks the job SKIP when
 required BPF/cgroup features cannot be proven. GitHub-hosted runners are
 expected to SKIP because the probe cannot distinguish cgroup sockaddr attach
@@ -325,6 +325,26 @@ The suite creates temporary cgroups, loads programs, attaches traffic
 helpers, and cleans up all state on completion. After stopping mihomo on the
 same host, verify `bpftool prog show`, `bpftool map show`, and
 `bpftool link show` report no leftover objects.
+
+## Keeping the generated objects honest
+
+The kernel programs are compiled ahead of time and their objects are committed
+under `common/ebpf/internal/bpfgen`. Nothing that consumes them recompiles
+them: `go test -tags with_ebpf` and the release `go build` both embed whatever
+is in the tree. A `.bpf.c` edited without a regenerate therefore produces a
+binary running the previous kernel program while the source says otherwise.
+
+`make ebpf_check` is what catches that. It regenerates into a scratch
+directory and diffs, including `manifest.txt`, which records the exact Clang
+build the committed objects came from -- so a toolchain that drifts fails
+loudly rather than silently producing different programs. The `generate-check`
+job in `.github/workflows/ebpf.yml` runs it whenever `common/ebpf/**` changes.
+
+Regenerating locally needs that same toolchain:
+
+```bash
+ANDROID_NDK_HOME=/path/to/android-ndk-r29 make ebpf_generate
+```
 
 ## Repository automation prerequisites
 

@@ -133,9 +133,6 @@ func TestEBPFUpdateRefusesWhatItCannotApply(t *testing.T) {
 			o.UDPTimeout = 600
 			o.Mode = "local"
 		}},
-		// The shared packet-rewrite bypass flow cache is sized to one entry when
-		// nothing is bypassed, and that is fixed when the map is created.
-		{name: "the last rule set removed", mutate: func(o *EBPFOption) { o.BypassRuleSet = nil }},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			listener, stub := runningEBPF(t, baseEBPFOption())
@@ -169,6 +166,27 @@ func TestEBPFUpdateTakesARuleSetAddedToAnExistingList(t *testing.T) {
 	}
 	if !slices.Equal(stub.applied.BypassRuleSet, []string{"ChinaIP", "MetaCN"}) {
 		t.Fatalf("applied bypass_rule_set = %v", stub.applied.BypassRuleSet)
+	}
+}
+
+// A data plane can refuse a change for a reason this layer cannot see -- which
+// planes are running at all. That is a rebuild, not a failure: no error is
+// logged and the caller does exactly what it would have without an Update.
+func TestEBPFUpdateTreatsARebuildRequestAsUnhandled(t *testing.T) {
+	listener, stub := runningEBPF(t, baseEBPFOption())
+	stub.err = sing_ebpf.ErrRebuildRequired
+
+	changed := baseEBPFOption()
+	changed.UDPTimeout = 600
+	handled, err := listener.Update(changed)
+	if err != nil {
+		t.Fatalf("a rebuild request was reported as a failure: %v", err)
+	}
+	if handled {
+		t.Fatal("a rebuild request was reported as handled, so the change is silently never applied")
+	}
+	if listener.Config().(*EBPFOption).UDPTimeout != 300 {
+		t.Fatal("a refused update adopted the config it did not apply")
 	}
 }
 
