@@ -1,7 +1,6 @@
 package smart
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -11,12 +10,6 @@ import (
 )
 
 func TestCheckHostStatusConcurrentUpdate(t *testing.T) {
-	InitCache()
-	InitQueue()
-	db = nil
-	hostStatusCache.Clear()
-	dbResultCache.Clear()
-
 	const (
 		group          = "group"
 		config         = "config"
@@ -29,20 +22,10 @@ func TestCheckHostStatusConcurrentUpdate(t *testing.T) {
 			NodeHosts: map[string]string{"node-0": "example.com"},
 		},
 	}}
-	data, err := json.Marshal(&initial)
-	require.NoError(t, err)
-
-	// Seed the caches directly: AdjustCacheParameters can leave asynchronous
-	// flushes running, so the global write queue is not a stable test fixture.
-	cachePath := FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget)
-	initial.initOnce.Do(func() {})
-	hostStatusCache.Set(cachePath, &initial)
-	dbResultCache.Set(FormatDBKey(KeyTypeHostFailures, config, group), map[string][]byte{
-		cachePath: data,
-	})
+	cachePath := seedHostStatus(t, group, config, wildcardTarget, &initial)
 
 	store := &Store{}
-	_, err = store.CheckHostStatus(group, config, 1_000)
+	_, err := store.CheckHostStatus(group, config, 1_000)
 	require.NoError(t, err)
 
 	cached, ok := hostStatusCache.Get(cachePath)

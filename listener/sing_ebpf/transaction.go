@@ -11,8 +11,10 @@ import (
 // reversibleStep is one write in a change that has to land everywhere or
 // nowhere, paired with how to put back what it replaced.
 type reversibleStep struct {
-	// name completes the phrases "apply <name>" and "restore <name>", so it
-	// reads as a noun: "TC bypass policy", "cgroup UDP timeout".
+	// name completes the phrases "apply <name>" and "restore <name>". Where a
+	// step corresponds to one config key, that key is the clearest thing to
+	// name -- "apply bypass_rule_set" points the reader at what they edited.
+	// Otherwise a noun naming the plane and the decision: "TC bypass policy".
 	name   string
 	apply  func() error
 	revert func() error
@@ -28,9 +30,11 @@ type reversibleStep struct {
 // since a rule set that does not change again is never revisited.
 //
 // A revert that itself fails is reported alongside the original error rather
-// than replacing it: the cause of the outage is the first failure, and the
-// backend whose rollback failed marks itself as needing a rebuild, which the
-// retry scheduler reads to stop retrying it.
+// than replacing it: the cause of the outage is the first failure. Where the
+// step writes a multi-entry policy map, the backend also marks itself as
+// needing a rebuild, which the retry scheduler reads to stop retrying it; a
+// step that writes a single control record has no partial state to leave
+// behind, so restoring its own field is all the rollback there is.
 func applyReversibleSteps(steps []reversibleStep) error {
 	var applied []reversibleStep
 	for _, step := range steps {

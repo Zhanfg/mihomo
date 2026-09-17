@@ -208,8 +208,8 @@ func TestUpdateHostStatusClearsEveryRecoverableBlockOnSuccess(t *testing.T) {
 // A recovery probe that fails re-blocks the node, and the probe is the only
 // thing that ever re-blocks a node it has just tested. Minting a fresh TTL
 // there turns a bounded exclusion into a permanent one: a host that answers a
-// bare GET with a banned status fails every probe, and the probe comes round
-// every four hours, so the pair is never released at all.
+// bare GET with a banned status fails every probe, so the pair would never be
+// released at all.
 func TestUpdateHostStatusReblockNeverExtendsTheDeadline(t *testing.T) {
 	const (
 		group          = "group"
@@ -233,7 +233,7 @@ func TestUpdateHostStatusReblockNeverExtendsTheDeadline(t *testing.T) {
 	require.True(t, ok)
 	require.NotNil(t, cached.Codes[2])
 	require.Equalf(t, original, cached.Codes[2].Nodes[node],
-		"the re-block moved the deadline to %d; the node is now excluded for another full TTL and the probe will do this again in four hours",
+		"the re-block moved the deadline to %d; the node is now excluded for another full TTL and the next failed probe will do it again",
 		cached.Codes[2].Nodes[node])
 }
 
@@ -255,7 +255,8 @@ func TestUpdateHostStatusFirstBlockGetsTheFullTTL(t *testing.T) {
 
 	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 	require.True(t, ok)
-	require.GreaterOrEqual(t, cached.Codes[4].Nodes[node], before)
+	require.GreaterOrEqual(t, cached.Codes[4].Nodes[node], before,
+		"a first block was clamped below the full TTL")
 }
 
 // An expired block is not a block: nothing is excluding the node, so probing it

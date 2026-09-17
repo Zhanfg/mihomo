@@ -1433,7 +1433,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 			// answers a bare GET with 403, 405 or a timeout -- most API and
 			// telemetry endpoints, and exactly what a zero-traffic or
 			// low-weight block lands on -- fails every probe, and the probe
-			// comes round every four hours. HostFailureNodeTTL is a bound on
+			// keeps coming round. HostFailureNodeTTL is a bound on
 			// how long we stay away from a node, so repeated evidence must not
 			// be able to remove the bound. A block that has already lapsed does
 			// not count: currentExpiry only holds deadlines still in the future.
