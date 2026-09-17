@@ -73,9 +73,13 @@ const (
 	// fixed for the process lifetime.
 	hostRecoveryActiveWindow = 2 * hostStatusCheckInterval
 	hostRecoveryBackoffBase  = 2 * hostStatusCheckInterval
-	// The store already refuses to re-offer a pair for its own retry window
-	// (4h), so backing off past that only delays recovery without saving work,
-	// and unlike the store's gate this one is lost on restart.
+	// This is now the only thing spacing repeat probes of the same pair. The
+	// store's own gate only withholds a pair for the first hostStatusRetryAfter
+	// of its block: it was implemented by a failed probe resetting the deadline
+	// to now+TTL, and a re-block no longer moves the deadline, precisely so a
+	// host that fails every probe cannot stay blocked for good. Backing off
+	// past a few hours only delays recovery, and this map is lost on restart --
+	// after which the 64-per-tick budget is what bounds the catch-up.
 	hostRecoveryBackoffMax = 4 * time.Hour
 )
 
@@ -387,6 +391,18 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, asnNumber string, p C.Pr
 	case len(existing) == 0:
 		s.store.StoreUnwrapResult(s.Name(), s.configName, target, asnNumber, wildcard, []C.Proxy{p})
 	case existing[0] == p.Name():
+		// The winner did not move, so there is nothing to consolidate onto it:
+		// whatever was on a superseded node was swept when the winner last
+		// changed. This is the overwhelmingly common case, and returning here
+		// is what keeps a steady-state dial off the scan below.
+		//
+		// The bucket is keyed by the matched rule, so it holds every live
+		// connection that rule routed. Scanning it per dial costs dial-rate x
+		// bucket-size, and bucket size is itself dial-rate x connection
+		// lifetime -- quadratic in load, for a scan that in steady state closes
+		// nothing. A connection that a parallel dial placed on another node
+		// after the winner settled now survives until it ends on its own, which
+		// is the better outcome anyway: it is working traffic.
 	default:
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnNumber, wildcard)
 		s.store.StoreUnwrapResult(s.Name(), s.configName, target, asnNumber, wildcard, []C.Proxy{p})
@@ -1533,10 +1549,17 @@ func updateEMAFloat(oldValue, newValue float64) float64 {
 // that, which meant the one mechanism written to stop a disconnect storm was
 // held open by the storm it was meant to stop.
 func (s *Smart) admitConnectionStats(metadata *C.Metadata, err error, now int64) (proceed bool, tripped bool) {
+	// Neither direction: a connection this group closed says nothing about the
+	// network, so it must not clear the suppressor and must not count toward
+	// arming it either. A victim usually reports no error, but one whose first
+	// read had already failed before the sweep reached it arrives here with
+	// both an error and the marker -- and arming is not the safe direction it
+	// looks like, because tripping runs ClearFloodRecordsByGroup, which
+	// discards the group's queued stat and host-status writes.
+	if metadata.SmartBlock == "degraded" {
+		return true, false
+	}
 	if err == nil {
-		if metadata.SmartBlock == "degraded" {
-			return true, false
-		}
 		s.suppressStats.Store(false)
 		s.suppressCount.Store(0)
 		return true, false

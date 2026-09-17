@@ -332,3 +332,23 @@ func TestTheSafetyValveOnlyReportsClosesOnBlockedNodes(t *testing.T) {
 		t.Fatal("a clean close on an unblocked node was reported as checked, which writes a host-status update with nothing to clear")
 	}
 }
+
+// A swept victim usually reports no error, but one whose first read had already
+// failed before the sweep reached it arrives with both an error and the marker.
+// Counting that toward the suppressor is not the safe direction: tripping runs
+// ClearFloodRecordsByGroup, which throws away the group's queued stat and
+// host-status writes.
+func TestFloodSuppressorIgnoresSelfClosedConnectionsThatAlsoErrored(t *testing.T) {
+	s := sweepGroup("flood-both-ways")
+	failure := errors.New("connection reset")
+	var now int64 = 1000
+
+	for range floodThreshold * 2 {
+		if _, tripped := s.admitConnectionStats(&C.Metadata{SmartBlock: "degraded"}, failure, now); tripped {
+			t.Fatal("connections this group closed armed the suppressor and discarded the group's queued writes")
+		}
+	}
+	if proceed, _ := s.admitConnectionStats(&C.Metadata{SmartBlock: "normal"}, failure, now); !proceed {
+		t.Fatal("the suppressor engaged on evidence that was entirely self-inflicted")
+	}
+}

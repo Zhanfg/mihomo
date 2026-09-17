@@ -1347,9 +1347,11 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 
 	oldLastFailure := hs.LastFailure
 	currentCode := -1
-	// The deadline this node is already blocked until, if any. blockNode below
-	// refuses to push it out; see there for why.
+	// What this node is already blocked with, if anything: the deadline, which
+	// blockNode refuses to push out, and the host a probe would aim at, which
+	// it inherits when this update carries none. See blockNode for both.
 	currentExpiry := int64(0)
+	currentHost := ""
 
 	for code, codeSet := range hs.Codes {
 		if codeSet == nil {
@@ -1361,6 +1363,9 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 			}
 			if nodeEntry > now && (currentExpiry == 0 || nodeEntry < currentExpiry) {
 				currentExpiry = nodeEntry
+			}
+			if currentHost == "" {
+				currentHost = codeSet.NodeHosts[name]
 			}
 		}
 		if codeSet.FailCounts != nil {
@@ -1436,13 +1441,24 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 				expiry = currentExpiry
 			}
 			codeSet.Nodes[name] = expiry
-			if host == "" {
+			// A demotion empties the old code set for this node, probe target
+			// and all, and the connection that caused the demotion may carry no
+			// hostname of its own -- a bare-IP destination reports none.
+			// Inheriting the target keeps the block probeable; dropping it
+			// leaves the node excluded for the rest of the TTL with nothing
+			// able to test it, which is the state recording a target for every
+			// blocking code was meant to end.
+			probeHost := host
+			if probeHost == "" {
+				probeHost = currentHost
+			}
+			if probeHost == "" {
 				return
 			}
 			if codeSet.NodeHosts == nil {
 				codeSet.NodeHosts = make(map[string]string)
 			}
-			codeSet.NodeHosts[name] = host
+			codeSet.NodeHosts[name] = probeHost
 		}
 
 		switch newCode {

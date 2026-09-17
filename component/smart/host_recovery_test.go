@@ -282,3 +282,40 @@ func TestCheckHostStatusSkipsALapsedBlock(t *testing.T) {
 	require.NotContains(t, probes, "node-lapsed", "a block that already expired was queued for a probe")
 	require.Equal(t, "live.example.com", probes["node-live"], "the live block stopped being probed")
 }
+
+// A demotion empties the old code set for the node, probe target included, and
+// the connection that caused it may carry no hostname of its own. Losing the
+// target there leaves the node blocked for the rest of the TTL with nothing
+// able to probe it -- the state that recording a target for every blocking
+// code was meant to end.
+func TestUpdateHostStatusKeepsTheProbeTargetThroughADemotion(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	blocked := time.Now().Add(20 * time.Hour).Unix()
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
+		4: {
+			Nodes:     map[string]int64{node: blocked},
+			NodeHosts: map[string]string{node: "api.example.com"},
+		},
+	}})
+
+	store := &Store{}
+	// A later failure on a bare-IP destination: no hostname of its own, and a
+	// lower code, so the code-4 record is demoted away.
+	bareIP := &C.Metadata{}
+	for range 3 {
+		store.UpdateHostStatus(group, config, wildcardTarget, bareIP, node, 1, 1_000, true, true, 3)
+	}
+
+	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
+	require.True(t, ok)
+	codeSet := cached.Codes[3]
+	require.NotNil(t, codeSet)
+	require.Contains(t, codeSet.Nodes, node, "the demotion lifted the block instead of moving it")
+	require.Equal(t, "api.example.com", codeSet.NodeHosts[node],
+		"the demoted block has no probe target, so nothing can return this node to service before the TTL")
+}
