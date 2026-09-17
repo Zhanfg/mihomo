@@ -20,9 +20,8 @@ type stubEBPFListener struct {
 	err     error
 }
 
-func (s *stubEBPFListener) Close() error      { return nil }
-func (s *stubEBPFListener) Address() string   { return "" }
-func (s *stubEBPFListener) InterfaceUpdated() {}
+func (s *stubEBPFListener) Close() error    { return nil }
+func (s *stubEBPFListener) Address() string { return "" }
 
 func (s *stubEBPFListener) Update(options LC.EBPF) error {
 	s.updates++

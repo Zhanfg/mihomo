@@ -4,6 +4,7 @@ package sing_ebpf
 
 import (
 	"net/netip"
+	"slices"
 
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -54,10 +55,23 @@ func (i *Inbound) stopBypassRuleSetsLocked() {
 	i.bypassRuleSetStarted = false
 }
 
-func (i *Inbound) updateBypassRuleSet(P.RuleProvider) {
+func (i *Inbound) updateBypassRuleSet(ruleProvider P.RuleProvider) {
 	i.bypassRuleSetAccess.Lock()
 	defer i.bypassRuleSetAccess.Unlock()
 	if !i.bypassRuleSetStarted {
+		return
+	}
+	// The callback is registered on the tunnel, so it fires for every rule
+	// provider in the config -- not only the ones this listener bypasses. A
+	// config with forty providers recompiled the whole policy forty times to
+	// reach the same answer thirty-eight of them: every tag's prefixes
+	// re-collected (tens of thousands for a CN list), two IPSets rebuilt, the
+	// coexistence union recomputed for every publisher, all under this lock.
+	// Worst at startup, where every provider's first fetch lands at once and
+	// each callback queues here. sing_tun's equivalent filters by name the same
+	// way. A nil provider is not something Emit produces, but refreshing is the
+	// safe answer if it ever did.
+	if ruleProvider != nil && !slices.Contains(i.bypassRuleSetTags, ruleProvider.Name()) {
 		return
 	}
 	if err := i.refreshBypassCIDRsLocked(); err != nil {
@@ -192,7 +206,7 @@ func (i *Inbound) refreshBypassCIDRsLocked() error {
 	// reverse -- silently and permanently, since nothing revisits a rule set
 	// that did not change again. So each write records how to undo itself, and
 	// a failure puts the previous policy back before reporting.
-	previousPolicy, previousCIDR := i.bypassRuleSetPolicy, i.bypassCIDR
+	previousPolicy := i.bypassRuleSetPolicy
 	var steps []reversibleStep
 	if backend := i.tcBackend(); backend != nil {
 		steps = append(steps, reversibleStep{
@@ -229,12 +243,15 @@ func (i *Inbound) refreshBypassCIDRsLocked() error {
 		})
 	}
 
-	i.bypassRuleSetPolicy = policy
-	i.bypassCIDR = policy.Prefixes()
+	// Committed only once every plane has it. No step reads these fields -- the
+	// revert closures captured previousPolicy above -- and every reader holds
+	// the lock this function is called with, so there is nothing to restore on
+	// failure if nothing was published in the first place.
 	if err = applyReversibleSteps(steps); err != nil {
-		i.bypassRuleSetPolicy, i.bypassCIDR = previousPolicy, previousCIDR
 		return err
 	}
+	i.bypassRuleSetPolicy = policy
+	i.bypassCIDR = policy.Prefixes()
 	// Recompute the set the DNS fake-ip middleware consults, so domains whose
 	// real addresses fall inside it keep their real IP and the kernel eBPF
 	// bypass can engage. Only bypass_rule_set feeds it; publishing the private

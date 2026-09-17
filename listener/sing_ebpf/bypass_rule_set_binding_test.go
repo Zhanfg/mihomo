@@ -152,3 +152,34 @@ func TestBypassRuleSetClearsWhenEveryTagVanishes(t *testing.T) {
 		t.Fatalf("DNS bypass set kept %v after every tag vanished", i.dnsBypassSet.Prefixes())
 	}
 }
+
+// The rule-update callback is registered on the tunnel, so every rule provider
+// in the config reaches it. Recompiling for providers this listener does not
+// bypass is pure waste -- and not a little of it, since each recompile
+// re-collects every tag's prefixes, rebuilds two IPSets and recomputes the
+// coexistence union across all publishers, under the policy lock.
+func TestBypassRuleSetRefreshesOnlyForItsOwnRuleSets(t *testing.T) {
+	china := netip.MustParsePrefix("10.0.0.0/8")
+	replaced := netip.MustParsePrefix("192.168.0.0/16")
+	providerTunnel := &fakeRuleProviderTunnel{providers: map[string]P.RuleProvider{
+		"ChinaIP": newFakeIPCIDRRuleProvider(t, "ChinaIP", china),
+	}}
+	i := bypassInboundForTest(providerTunnel, "ChinaIP")
+	i.bypassRuleSetStarted = true
+	if got := refreshBypassForTest(t, i); !slices.Contains(got, china) {
+		t.Fatalf("first refresh = %v, want %v", got, china)
+	}
+
+	// Content moves, so any recompile is observable.
+	providerTunnel.providers["ChinaIP"] = newFakeIPCIDRRuleProvider(t, "ChinaIP", replaced)
+
+	i.updateBypassRuleSet(newFakeIPCIDRRuleProvider(t, "SomeOtherRuleSet"))
+	if slices.Contains(i.bypassCIDR, replaced) {
+		t.Fatal("a rule set this listener does not bypass triggered a full policy recompile")
+	}
+
+	i.updateBypassRuleSet(providerTunnel.providers["ChinaIP"])
+	if !slices.Contains(i.bypassCIDR, replaced) {
+		t.Fatalf("bypass policy = %v, want the updated rule set's %v", i.bypassCIDR, replaced)
+	}
+}

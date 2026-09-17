@@ -44,7 +44,7 @@ func (i *Inbound) Update(options LC.EBPF) error {
 	if bypassStep != nil {
 		steps = append(steps, *bypassStep)
 	}
-	if step := i.bypassTUNDirectStep(options.BypassTUNDirect == nil || *options.BypassTUNDirect); step != nil {
+	if step := i.bypassTUNDirectStep(resolveBypassTUNDirect(options.BypassTUNDirect)); step != nil {
 		steps = append(steps, *step)
 	}
 	return applyReversibleSteps(steps)
@@ -141,9 +141,12 @@ func (i *Inbound) bypassRuleSetStep(tags []string) (*reversibleStep, error) {
 	}, nil
 }
 
-// bypassTUNDirectStep republishes the coexistence registry entry a TUN listener
-// reads. It touches no kernel state at all, which is why it cannot fail; the
-// TUN listener notices through the Stale check the patch loop runs afterwards.
+// bypassTUNDirectStep republishes the coexistence registry entry, which the
+// dial path reads through resolver.EBPFBypassedDirect to decide whether a
+// bypassed destination goes direct. It touches no kernel state, which is why it
+// cannot fail, and no listener has to notice: the flag feeds only the bypass
+// policy value, never the route exclusion a TUN device is built from, so
+// nothing about that device goes stale.
 func (i *Inbound) bypassTUNDirectStep(next bool) *reversibleStep {
 	i.bypassRuleSetAccess.Lock()
 	previous := i.bypassTUNDirect

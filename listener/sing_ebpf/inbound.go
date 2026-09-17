@@ -33,7 +33,6 @@ import (
 type Listener interface {
 	Close() error
 	Address() string
-	InterfaceUpdated()
 	// Update applies a config difference in place; see config_update.go.
 	Update(options LC.EBPF) error
 }
@@ -81,7 +80,6 @@ type Inbound struct {
 	redirectIPv4Prefix  netip.Prefix
 	redirectIPv6Prefix  netip.Prefix
 	androidUIDOptions   *androidUIDOptions
-	bypassTUNDirect     bool
 	localStateCapacity  uint32
 	sharedStateCapacity uint32
 
@@ -126,8 +124,10 @@ type Inbound struct {
 	// C.Tunnel, and the rule-provider half is an optional interface on top.
 	providerTunnel P.Tunnel
 
-	bypassRuleSetAccess   sync.Mutex
-	bypassRuleSetTags     []string
+	bypassRuleSetAccess sync.Mutex
+	bypassRuleSetTags   []string
+	// Read on the publish path and rewritten by an in-place config update.
+	bypassTUNDirect       bool
 	bypassRuleSetMissing  warningLimiter
 	bypassRuleSetCallback io.Closer
 	bypassRuleSetStarted  bool
@@ -319,10 +319,7 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	if inbound.tcPriority == 0 {
 		inbound.tcPriority = defaultTCPriority
 	}
-	// On by default: a destination this inbound bypasses is one the user asked
-	// to keep off the proxy, and letting TUN hand it to the rules instead is
-	// what makes a bypassed address unreachable.
-	inbound.bypassTUNDirect = options.BypassTUNDirect == nil || *options.BypassTUNDirect
+	inbound.bypassTUNDirect = resolveBypassTUNDirect(options.BypassTUNDirect)
 	inbound.localStateCapacity = options.Local.StateCapacity
 	inbound.sharedStateCapacity = options.Shared.StateCapacity
 	inbound.tunOverlapWarnings.interval = tunOverlapWarningInterval

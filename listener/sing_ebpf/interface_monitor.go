@@ -39,10 +39,6 @@ type tcInterfaceMonitor struct {
 	done                     chan struct{}
 }
 
-func (i *Inbound) InterfaceUpdated() {
-	i.setDefaultInterfaceName(i.currentDefaultInterfaceName())
-}
-
 func (i *Inbound) startTCInterfaceMonitor() error {
 	networkMonitor, err := tun.NewNetworkUpdateMonitor(log.SingLogger)
 	if err != nil {
