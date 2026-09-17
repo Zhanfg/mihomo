@@ -1,6 +1,7 @@
 package smart
 
 import (
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -99,4 +100,58 @@ func TestQueueConcurrentAppendsKeepEveryKey(t *testing.T) {
 	wg.Wait()
 	require.Equal(t, writers*each, flushed+len(q.snapshot()),
 		"operations were lost between the flushed batches and what is still pending")
+}
+
+// The record is encoded with hs.mu released, from a copy taken under it. If the
+// copy shared any map with the live record, a concurrent update could mutate it
+// mid-encode -- and worse, the encoded form would not be the one that was
+// agreed under the lock.
+func TestHostStatusSaveCopySharesNothingWithTheLiveRecord(t *testing.T) {
+	live := &HostStatus{
+		LastCheck: 7,
+		Blocked:   true,
+		Codes: map[BlockCode]*CodeNodeSet{
+			BlockNoResponse: {
+				Nodes:      map[string]int64{"node-a": 100},
+				FailCounts: map[string]int{"node-a": 2},
+				NodeHosts:  map[string]string{"node-a": "probe.example.com"},
+			},
+			BlockManual: nil,
+		},
+	}
+
+	live.mu.Lock()
+	saved := live.cloneForSaveLocked()
+	live.mu.Unlock()
+
+	require.Equal(t, int64(7), saved.LastCheck)
+	require.True(t, saved.Blocked)
+	require.NotContains(t, saved.Codes, BlockManual, "a nil code set was copied as an empty one")
+
+	live.Codes[BlockNoResponse].Nodes["node-a"] = 999
+	live.Codes[BlockNoResponse].FailCounts["node-a"] = 99
+	live.Codes[BlockNoResponse].NodeHosts["node-a"] = "elsewhere"
+	require.Equal(t, int64(100), saved.Codes[BlockNoResponse].Nodes["node-a"],
+		"the copy shares its Nodes map with the live record")
+	require.Equal(t, 2, saved.Codes[BlockNoResponse].FailCounts["node-a"],
+		"the copy shares its FailCounts map with the live record")
+	require.Equal(t, "probe.example.com", saved.Codes[BlockNoResponse].NodeHosts["node-a"],
+		"the copy shares its NodeHosts map with the live record")
+}
+
+// What the copy encodes to must be what the live record would have encoded to.
+// The maps a code does not use stay out either way -- omitempty drops an empty
+// map as readily as a nil one -- so this pins the whole encoded form rather
+// than the nil-ness of any one field.
+func TestHostStatusSaveCopyEncodesTheSameForm(t *testing.T) {
+	live := &HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockLowWeight: {Nodes: map[string]int64{"node-a": 1}},
+	}}
+	live.mu.Lock()
+	saved := live.cloneForSaveLocked()
+	live.mu.Unlock()
+
+	encoded, err := json.Marshal(saved)
+	require.NoError(t, err)
+	require.JSONEq(t, `{"codes":{"5":{"nodes":{"node-a":1}}}}`, string(encoded))
 }

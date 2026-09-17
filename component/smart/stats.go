@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -1312,6 +1313,34 @@ func (s *Store) GetHostStatus(group, config, wildcardTarget string, hostFailLimi
 	return
 }
 
+// cloneForSaveLocked copies everything the persisted form needs. Callers hold
+// hs.mu; the result is owned by the caller and safe to encode without it.
+func (hs *HostStatus) cloneForSaveLocked() *HostStatus {
+	clone := &HostStatus{
+		LastFailure: hs.LastFailure,
+		LastCheck:   hs.LastCheck,
+		Blocked:     hs.Blocked,
+	}
+	if len(hs.Codes) == 0 {
+		return clone
+	}
+	clone.Codes = make(map[BlockCode]*CodeNodeSet, len(hs.Codes))
+	for code, codeSet := range hs.Codes {
+		if codeSet == nil {
+			continue
+		}
+		// maps.Clone copies a nil map as nil, which costs nothing for the
+		// sets a given code does not use. It is not what keeps them out of the
+		// encoded form -- omitempty drops an empty map just the same.
+		clone.Codes[code] = &CodeNodeSet{
+			Nodes:      maps.Clone(codeSet.Nodes),
+			FailCounts: maps.Clone(codeSet.FailCounts),
+			NodeHosts:  maps.Clone(codeSet.NodeHosts),
+		}
+	}
+	return clone
+}
+
 func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata *C.Metadata, name string, maxFailedTimes int, hostFailLimit int, failure, checked bool, statusCode BlockCode) bool {
 	if !checked {
 		return false
@@ -1352,7 +1381,6 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 	})
 
 	hs.mu.Lock()
-	defer hs.mu.Unlock()
 
 	if hs.Codes == nil {
 		hs.Codes = make(map[BlockCode]*CodeNodeSet)
@@ -1550,8 +1578,16 @@ saveAndReturn:
 		}
 	}
 
-	if len(hs.Codes) > 0 {
-		data, err := json.Marshal(&hs)
+	// Copied, then encoded with the mutex released. GetHostStatus read-locks the
+	// same mutex on the dial path, so a dial for this target would otherwise
+	// queue behind a close encoding the whole record -- up to six code sets of
+	// three maps each, keyed by node name. The copy walks the same entries but
+	// at map-insert cost rather than JSON-encode cost.
+	saved := hs.cloneForSaveLocked()
+	hs.mu.Unlock()
+
+	if len(saved.Codes) > 0 {
+		data, err := json.Marshal(saved)
 		if err != nil {
 			return failedBlock
 		}
