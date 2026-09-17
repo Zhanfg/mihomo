@@ -12,10 +12,10 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	CiliumEBPF "github.com/cilium/ebpf"
 	"github.com/metacubex/mihomo/adapter/inbound"
+	"github.com/metacubex/mihomo/common/atomic"
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -34,6 +34,8 @@ type Listener interface {
 	Close() error
 	Address() string
 	InterfaceUpdated()
+	// Update applies a config difference in place; see config_update.go.
+	Update(options LC.EBPF) error
 }
 
 type Inbound struct {
@@ -79,10 +81,15 @@ type Inbound struct {
 	redirectIPv4Prefix  netip.Prefix
 	redirectIPv6Prefix  netip.Prefix
 	androidUIDOptions   *androidUIDOptions
-	udpTimeout          time.Duration
 	bypassTUNDirect     bool
 	localStateCapacity  uint32
 	sharedStateCapacity uint32
+
+	// udpTimeout is nanoseconds. The janitor loop, the reply-socket pool and a
+	// shared backend built for an interface that appeared late all read it
+	// while a config reload can be writing it, so it does not stay a plain
+	// Duration field.
+	udpTimeout atomic.Int64
 
 	// policyAccess guards compiledPolicy and the fake-ip prefixes once the
 	// inbound is running: the fake-ip observer rewrites them while a shared
@@ -357,7 +364,7 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 		}
 	}
 	inbound.bypassRuleSetTags = slices.Clone(options.BypassRuleSet)
-	inbound.udpTimeout = resolveUDPTimeout(options.UDPTimeout)
+	inbound.udpTimeout.Store(int64(resolveUDPTimeout(options.UDPTimeout)))
 	if err := inbound.compilePolicy(); err != nil {
 		return nil, err
 	}
@@ -756,7 +763,7 @@ func (i *Inbound) prepareCgroupBackend() error {
 		RedirectIPv4:  i.redirectIPv4Prefix,
 		RedirectIPv6:  i.redirectIPv6Prefix,
 		MapCapacity:   i.cgroupMapCapacity(),
-		UDPTimeout:    i.udpTimeout,
+		UDPTimeout:    i.udpTimeoutValue(),
 		Policy:        i.policySnapshot(),
 		SelfBypassMap: i.selfBypass.Map(),
 	}

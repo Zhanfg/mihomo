@@ -22,10 +22,31 @@ const udpIdleSweepBudget = 1024
 // makes a short idle bound safe rather than merely cheap.
 const udpReplySocketMaxIdle = 30 * time.Second
 
+// udpTimeoutValue is the configured udp-timeout. A config reload can change it
+// under a running inbound, so every reader goes through here rather than
+// keeping a copy.
+func (i *Inbound) udpTimeoutValue() time.Duration {
+	return time.Duration(i.udpTimeout.Load())
+}
+
+// udpJanitorInterval paces the sweep at half the session timeout, bounded so a
+// very short timeout does not spin and a very long one still notices a dead
+// session within half a minute.
+func (i *Inbound) udpJanitorInterval() time.Duration {
+	interval := i.udpTimeoutValue() / 2
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > 30*time.Second {
+		return 30 * time.Second
+	}
+	return interval
+}
+
 // udpReplySocketIdleTimeout keeps the bound under udp-timeout, so lowering that
 // still lowers this.
 func (i *Inbound) udpReplySocketIdleTimeout() time.Duration {
-	return min(udpReplySocketMaxIdle, i.udpTimeout)
+	return min(udpReplySocketMaxIdle, i.udpTimeoutValue())
 }
 
 var udpActivityEpoch = time.Now()
@@ -128,14 +149,8 @@ func (i *Inbound) startUDPJanitor() {
 	ctx, cancel := context.WithCancel(parent)
 	i.udpJanitorCancel = cancel
 	i.udpJanitorDone = make(chan struct{})
-	interval := i.udpTimeout / 2
-	if interval < time.Second {
-		interval = time.Second
-	}
-	if interval > 30*time.Second {
-		interval = 30 * time.Second
-	}
 	go func() {
+		interval := i.udpJanitorInterval()
 		defer close(i.udpJanitorDone)
 		timer := time.NewTimer(interval)
 		defer timer.Stop()
@@ -145,8 +160,13 @@ func (i *Inbound) startUDPJanitor() {
 			case <-ctx.Done():
 				return
 			case <-timer.C:
+				// Re-read every round: udp-timeout can be changed by a config
+				// reload without the inbound being rebuilt, and a sweep pacing
+				// itself off the value the process started with would keep
+				// scanning on the old schedule for the rest of its life.
+				interval = i.udpJanitorInterval()
 				next := interval
-				if i.expireUDP(udpActivityNow()-int64(i.udpTimeout), &round) {
+				if i.expireUDP(udpActivityNow()-i.udpTimeout.Load(), &round) {
 					next = time.Second
 				}
 				timer.Reset(next)

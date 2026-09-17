@@ -1,0 +1,148 @@
+//go:build with_ebpf && (linux || android)
+
+package sing_ebpf
+
+import (
+	"slices"
+	"time"
+
+	LC "github.com/metacubex/mihomo/listener/config"
+
+	E "github.com/metacubex/sing/common/exceptions"
+)
+
+// Update applies a config difference to the running inbound.
+//
+// The caller has already established that the difference is confined to the
+// fields handled here -- see the EBPF listener's Update, which compares the two
+// options with exactly these fields cleared -- so anything else this reads is
+// the same in both. That split is deliberate: the raw option struct is the only
+// place a field added later can be caught, and the reasons a field can or
+// cannot be applied in place live down here with the data planes.
+//
+// Every write is reversible and they are applied as one transaction, so a
+// failure leaves the inbound coherent on its previous config rather than half
+// on each. The caller still falls back to a rebuild, but it may not get one:
+// Listen can fail too, and an inbound that is going to keep running until the
+// next reload should not be running on a configuration that never existed.
+func (i *Inbound) Update(options LC.EBPF) error {
+	steps := i.udpTimeoutSteps(resolveUDPTimeout(options.UDPTimeout))
+	bypassStep, err := i.bypassRuleSetStep(options.BypassRuleSet)
+	if err != nil {
+		return err
+	}
+	if bypassStep != nil {
+		steps = append(steps, *bypassStep)
+	}
+	if step := i.bypassTUNDirectStep(options.BypassTUNDirect == nil || *options.BypassTUNDirect); step != nil {
+		steps = append(steps, *step)
+	}
+	return applyReversibleSteps(steps)
+}
+
+// udpTimeoutSteps writes the new session timeout to the in-memory value every
+// userspace sweep reads and to each data plane's control record. The kernel
+// compares the timeout against a flow's last-seen stamp rather than storing a
+// deadline, so the change reaches the sessions that already exist.
+func (i *Inbound) udpTimeoutSteps(next time.Duration) []reversibleStep {
+	previous := i.udpTimeoutValue()
+	if next == previous {
+		return nil
+	}
+	steps := []reversibleStep{{
+		name:   "UDP timeout",
+		apply:  func() error { i.udpTimeout.Store(int64(next)); return nil },
+		revert: func() error { i.udpTimeout.Store(int64(previous)); return nil },
+	}}
+	if backend := i.cgroupBackendInstance(); backend != nil {
+		steps = append(steps, reversibleStep{
+			name:   "cgroup UDP timeout",
+			apply:  func() error { return backend.SetUDPTimeout(next) },
+			revert: func() error { return backend.SetUDPTimeout(previous) },
+		})
+	}
+	if backend := i.sharedRewriteBackend(); backend != nil {
+		steps = append(steps, reversibleStep{
+			name:   "shared packet-rewrite UDP timeout",
+			apply:  func() error { return backend.SetUDPTimeout(next) },
+			revert: func() error { return backend.SetUDPTimeout(previous) },
+		})
+	}
+	return steps
+}
+
+// bypassRuleSetStep swaps the configured rule-set tags and recompiles the
+// kernel bypass policy from them. Only the tags are held, so this is a slice
+// swap and a refresh the rule-provider callback already performs on its own
+// schedule; refreshBypassCIDRsLocked is itself transactional across the data
+// planes.
+//
+// A tag that does not resolve is refused here rather than dropped. Dropping is
+// right when a rule-provider disappears from under a running listener -- the
+// honest policy is one without it -- but a tag the user just typed into this
+// listener's own config is a typo, and starting with it silently missing is the
+// same failure New refuses outright.
+func (i *Inbound) bypassRuleSetStep(tags []string) (*reversibleStep, error) {
+	i.bypassRuleSetAccess.Lock()
+	unchanged := slices.Equal(tags, i.bypassRuleSetTags)
+	i.bypassRuleSetAccess.Unlock()
+	if unchanged {
+		return nil, nil
+	}
+	if i.providerTunnel == nil {
+		return nil, E.New("tunnel does not expose rule providers")
+	}
+	providers := i.providerTunnel.RuleProviders()
+	for _, tag := range tags {
+		if _, loaded := providers[tag]; !loaded {
+			return nil, E.New("parse bypass_rule_set: rule-set not found: ", tag)
+		}
+	}
+	next := slices.Clone(tags)
+	var previous []string
+	swap := func(to []string) error {
+		i.bypassRuleSetAccess.Lock()
+		defer i.bypassRuleSetAccess.Unlock()
+		restore := i.bypassRuleSetTags
+		i.bypassRuleSetTags = to
+		if err := i.refreshBypassCIDRsLocked(); err != nil {
+			i.bypassRuleSetTags = restore
+			return err
+		}
+		return nil
+	}
+	return &reversibleStep{
+		name: "bypass_rule_set",
+		apply: func() error {
+			i.bypassRuleSetAccess.Lock()
+			previous = i.bypassRuleSetTags
+			i.bypassRuleSetAccess.Unlock()
+			return swap(next)
+		},
+		revert: func() error { return swap(previous) },
+	}, nil
+}
+
+// bypassTUNDirectStep republishes the coexistence registry entry a TUN listener
+// reads. It touches no kernel state at all, which is why it cannot fail; the
+// TUN listener notices through the Stale check the patch loop runs afterwards.
+func (i *Inbound) bypassTUNDirectStep(next bool) *reversibleStep {
+	i.bypassRuleSetAccess.Lock()
+	previous := i.bypassTUNDirect
+	i.bypassRuleSetAccess.Unlock()
+	if next == previous {
+		return nil
+	}
+	publish := func(value bool) error {
+		i.bypassRuleSetAccess.Lock()
+		defer i.bypassRuleSetAccess.Unlock()
+		i.bypassTUNDirect = value
+		i.publishBypassPolicyLocked()
+		return nil
+	}
+	return &reversibleStep{
+		name:   "bypass_tun_direct",
+		apply:  func() error { return publish(next) },
+		revert: func() error { return publish(previous) },
+	}
+}

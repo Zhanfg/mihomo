@@ -127,7 +127,8 @@ func TestUDPSweepBoundsActiveScanAndResumes(t *testing.T) {
 }
 
 func TestUDPSweepRoundContinuesWithoutRescanningActiveClients(t *testing.T) {
-	i := &Inbound{udpTimeout: time.Minute, sharedRewrite: &sharedRewrite{}}
+	i := &Inbound{sharedRewrite: &sharedRewrite{}}
+	i.udpTimeout.Store(int64(time.Minute))
 	const clients = udpIdleSweepBudget*3 + 1
 	for n := 0; n < clients; n++ {
 		client := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, byte(n >> 8), byte(n)}), 1234)
@@ -151,7 +152,8 @@ func TestUDPSweepRoundContinuesWithoutRescanningActiveClients(t *testing.T) {
 }
 
 func TestUDPSweepUnevenShardsRespectPassBudget(t *testing.T) {
-	i := &Inbound{udpTimeout: time.Minute, sharedRewrite: &sharedRewrite{}}
+	i := &Inbound{sharedRewrite: &sharedRewrite{}}
+	i.udpTimeout.Store(int64(time.Minute))
 	for shard, count := range []int{1, udpIdleSweepBudget * 2} {
 		for n := 0; n < count; n++ {
 			client := netip.AddrPortFrom(netip.AddrFrom4([4]byte{192, 0, byte(n >> 8), byte(n)}), uint16(16+shard))
@@ -176,7 +178,8 @@ func TestUDPSweepUnevenShardsRespectPassBudget(t *testing.T) {
 }
 
 func TestUDPSweepCursorSurvivesConcurrentClientReplacement(t *testing.T) {
-	i := &Inbound{udpTimeout: time.Minute, sharedRewrite: &sharedRewrite{}}
+	i := &Inbound{sharedRewrite: &sharedRewrite{}}
+	i.udpTimeout.Store(int64(time.Minute))
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {

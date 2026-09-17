@@ -48,21 +48,80 @@ func NewEBPF(options *EBPFOption) (*EBPF, error) {
 	return &EBPF{
 		Base:   base,
 		config: options,
-		ebpf: LC.EBPF{
-			Mode:                 options.Mode,
-			Network:              options.Network,
-			UDPTimeout:           options.UDPTimeout,
-			TCPriority:           options.TCPriority,
-			BypassRuleSet:        options.BypassRuleSet,
-			FakeIPICMP:           options.FakeIPICMP,
-			BypassTUNDirect:      options.BypassTUNDirect,
-			DNSMode:              options.DNSMode,
-			BypassPrivateAddress: options.BypassPrivateAddress,
-			TCPSplice:            options.TCPSplice,
-			Local:                options.Local,
-			Shared:               options.Shared,
-		},
+		ebpf:   ebpfListenerConfig(options),
 	}, nil
+}
+
+// ebpfListenerConfig is the listener's half of the option. Update builds it
+// too, so it lives here rather than inline: the two drifting apart would mean
+// an in-place update quietly applying a different config from the one a
+// rebuild would have produced.
+func ebpfListenerConfig(options *EBPFOption) LC.EBPF {
+	return LC.EBPF{
+		Mode:                 options.Mode,
+		Network:              options.Network,
+		UDPTimeout:           options.UDPTimeout,
+		TCPriority:           options.TCPriority,
+		BypassRuleSet:        options.BypassRuleSet,
+		FakeIPICMP:           options.FakeIPICMP,
+		BypassTUNDirect:      options.BypassTUNDirect,
+		DNSMode:              options.DNSMode,
+		BypassPrivateAddress: options.BypassPrivateAddress,
+		TCPSplice:            options.TCPSplice,
+		Local:                options.Local,
+		Shared:               options.Shared,
+	}
+}
+
+// withoutInPlaceUpdatableFields zeroes every field the running listener can
+// change without being rebuilt. Two options whose cleared copies compare equal
+// differ only in fields it can absorb.
+//
+// Clearing rather than listing the rebuild-forcing fields is what makes this
+// fail closed. A field added to EBPFOption later is not cleared here, so it
+// takes part in the comparison and forces a rebuild until someone decides
+// otherwise. Listing the other way round would silently admit a new field as
+// updatable and then apply none of it, leaving the listener running a config
+// the user cannot see it is not running.
+func withoutInPlaceUpdatableFields(options EBPFOption) EBPFOption {
+	options.UDPTimeout = 0
+	options.BypassRuleSet = nil
+	options.BypassTUNDirect = nil
+	return options
+}
+
+// Update implements the listener registry's in-place update. Rebuilding this
+// inbound destroys every kernel map it owns -- the cgroup redirect table, the
+// shared flow table, the TC assignment map, the UDP recovery table -- so every
+// established redirect breaks for the sake of, in the common case, one changed
+// number.
+func (e *EBPF) Update(newConfig C.InboundConfig) (bool, error) {
+	options, ok := newConfig.(*EBPFOption)
+	if !ok || e.l == nil {
+		return false, nil
+	}
+	if optionToString(withoutInPlaceUpdatableFields(*e.config)) !=
+		optionToString(withoutInPlaceUpdatableFields(*options)) {
+		return false, nil
+	}
+	// The shared packet-rewrite backend sizes its bypass flow cache to a single
+	// entry when nothing is bypassed, and that is fixed when the map is
+	// created. A rule-set list crossing between empty and non-empty therefore
+	// needs the backend built around it, even though the policy itself would
+	// install fine.
+	if (len(e.config.BypassRuleSet) == 0) != (len(options.BypassRuleSet) == 0) {
+		return false, nil
+	}
+	next := ebpfListenerConfig(options)
+	if err := e.l.Update(next); err != nil {
+		return false, err
+	}
+	// The running listener stays registered, so it has to answer for the config
+	// it is now running: the next reload compares against Config(), and a stale
+	// answer would ask it to apply the same difference again on every reload.
+	e.config = options
+	e.ebpf = next
+	return true, nil
 }
 
 // Config implements constant.InboundListener

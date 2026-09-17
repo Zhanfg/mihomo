@@ -107,7 +107,7 @@ func (s *sharedRewrite) prepareBackend() (*ECommon.SharedNetworkBackend, error) 
 		RedirectIPv6:    redirectIPv6,
 		Policy:          s.inbound.policySnapshot(),
 		MapCapacity:     s.mapCapacity,
-		UDPTimeout:      s.inbound.udpTimeout,
+		UDPTimeout:      s.inbound.udpTimeoutValue(),
 		FakeIPICMPReply: s.inbound.fakeIPICMPReply,
 	})
 	if err != nil {

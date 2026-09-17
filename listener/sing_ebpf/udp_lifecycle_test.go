@@ -65,7 +65,8 @@ func TestSharedUDPPurgeReleasesReferences(t *testing.T) {
 	}
 }
 func TestUDPJanitorStopsOnClose(t *testing.T) {
-	i := &Inbound{enableUDP: true, udpTimeout: time.Minute}
+	i := &Inbound{enableUDP: true}
+	i.udpTimeout.Store(int64(time.Minute))
 	i.startUDPJanitor()
 	i.stopUDPJanitor()
 	select {

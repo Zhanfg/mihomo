@@ -17,6 +17,7 @@ import (
 type Listener interface {
 	Close() error
 	Address() string
+	Update(options LC.EBPF) error
 }
 
 // New creates an eBPF inbound. Without the `with_ebpf` build tag the feature
