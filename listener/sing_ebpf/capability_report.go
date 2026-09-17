@@ -92,7 +92,7 @@ func (i *Inbound) networkNames() []string {
 // trie: bypass_rule_set, UID ranges, and shared source CIDRs. The probe uses
 // it to decide whether the 6.6.0-6.6.46 LPM update defect matters here.
 func (i *Inbound) needsLPMPolicy() bool {
-	return len(i.bypassRuleSet) > 0 ||
+	return len(i.bypassRuleSetTags) > 0 ||
 		len(i.localPolicy.IncludeUID) > 0 || len(i.localPolicy.ExcludeUID) > 0 ||
 		len(i.sharedOptions.IncludeSourceCIDR) > 0 || len(i.sharedOptions.ExcludeSourceCIDR) > 0
 }

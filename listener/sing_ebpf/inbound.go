@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/netip"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -108,8 +109,19 @@ type Inbound struct {
 
 	sharedRewrite *sharedRewrite
 
+	// providerTunnel is the tunnel's rule-provider registry. Bypass rule sets
+	// are resolved through it by name on every refresh instead of being
+	// captured once at startup, because a config reload builds an entirely new
+	// set of provider objects and swaps the registry out: a captured pointer
+	// would go on compiling the kernel policy from an orphan nothing updates
+	// any more, so the eBPF bypass would silently stop tracking the rule set
+	// after the first reload. tunnel itself cannot serve this -- it is only a
+	// C.Tunnel, and the rule-provider half is an optional interface on top.
+	providerTunnel P.Tunnel
+
 	bypassRuleSetAccess   sync.Mutex
-	bypassRuleSet         []P.RuleProvider
+	bypassRuleSetTags     []string
+	bypassRuleSetMissing  warningLimiter
 	bypassRuleSetCallback io.Closer
 	bypassRuleSetStarted  bool
 	bypassCIDR            []netip.Prefix
@@ -335,13 +347,16 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	if !ok {
 		return nil, E.New("tunnel does not expose rule providers")
 	}
+	inbound.providerTunnel = rp
+	// Only the tags are kept; see providerTunnel. Resolving them here is purely
+	// a check that each one exists, so a typo fails the listener outright
+	// instead of quietly bypassing nothing at all.
 	for _, ruleSetTag := range options.BypassRuleSet {
-		ruleSet, loaded := rp.RuleProviders()[ruleSetTag]
-		if !loaded {
+		if _, loaded := rp.RuleProviders()[ruleSetTag]; !loaded {
 			return nil, E.New("parse bypass_rule_set: rule-set not found: ", ruleSetTag)
 		}
-		inbound.bypassRuleSet = append(inbound.bypassRuleSet, ruleSet)
 	}
+	inbound.bypassRuleSetTags = slices.Clone(options.BypassRuleSet)
 	inbound.udpTimeout = resolveUDPTimeout(options.UDPTimeout)
 	if err := inbound.compilePolicy(); err != nil {
 		return nil, err

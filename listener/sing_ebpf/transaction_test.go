@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-func recordingStep(name string, order *[]string, applyErr error) bypassPolicyStep {
-	return bypassPolicyStep{
+func recordingStep(name string, order *[]string, applyErr error) reversibleStep {
+	return reversibleStep{
 		name: name,
 		apply: func() error {
 			*order = append(*order, "apply:"+name)
@@ -22,15 +22,15 @@ func recordingStep(name string, order *[]string, applyErr error) bypassPolicySte
 	}
 }
 
-func TestApplyBypassPolicyStepsAppliesEveryPlaneInOrder(t *testing.T) {
+func TestApplyReversibleStepsAppliesEveryStepInOrder(t *testing.T) {
 	var order []string
-	steps := []bypassPolicyStep{
+	steps := []reversibleStep{
 		recordingStep("TC", &order, nil),
 		recordingStep("cgroup", &order, nil),
 		recordingStep("shared", &order, nil),
 	}
 
-	if err := applyBypassPolicySteps(steps); err != nil {
+	if err := applyReversibleSteps(steps); err != nil {
 		t.Fatalf("all-succeeding transaction failed: %v", err)
 	}
 	want := []string{"apply:TC", "apply:cgroup", "apply:shared"}
@@ -41,16 +41,16 @@ func TestApplyBypassPolicyStepsAppliesEveryPlaneInOrder(t *testing.T) {
 
 // The point of the transaction: a plane that fails must not leave the ones
 // before it carrying a policy the others never got.
-func TestApplyBypassPolicyStepsUndoesWhatItAlreadyApplied(t *testing.T) {
+func TestApplyReversibleStepsUndoesWhatItAlreadyApplied(t *testing.T) {
 	var order []string
 	failure := errors.New("map is full")
-	steps := []bypassPolicyStep{
+	steps := []reversibleStep{
 		recordingStep("TC", &order, nil),
 		recordingStep("cgroup", &order, failure),
 		recordingStep("shared", &order, nil),
 	}
 
-	err := applyBypassPolicySteps(steps)
+	err := applyReversibleSteps(steps)
 	if err == nil {
 		t.Fatal("a failing transaction reported success")
 	}
@@ -65,15 +65,15 @@ func TestApplyBypassPolicyStepsUndoesWhatItAlreadyApplied(t *testing.T) {
 	}
 }
 
-func TestApplyBypassPolicyStepsUndoesNewestFirst(t *testing.T) {
+func TestApplyReversibleStepsUndoesNewestFirst(t *testing.T) {
 	var order []string
-	steps := []bypassPolicyStep{
+	steps := []reversibleStep{
 		recordingStep("TC", &order, nil),
 		recordingStep("cgroup", &order, nil),
 		recordingStep("shared", &order, errors.New("closed")),
 	}
 
-	if err := applyBypassPolicySteps(steps); err == nil {
+	if err := applyReversibleSteps(steps); err == nil {
 		t.Fatal("a failing transaction reported success")
 	}
 	want := []string{"apply:TC", "apply:cgroup", "apply:shared", "revert:cgroup", "revert:TC"}
@@ -84,10 +84,10 @@ func TestApplyBypassPolicyStepsUndoesNewestFirst(t *testing.T) {
 
 // A revert that fails must not swallow the failure that caused it: the first
 // error is what explains the outage.
-func TestApplyBypassPolicyStepsKeepsTheCauseWhenRevertFails(t *testing.T) {
+func TestApplyReversibleStepsKeepsTheCauseWhenRevertFails(t *testing.T) {
 	cause := errors.New("map is full")
 	revertFailure := errors.New("backend closed")
-	steps := []bypassPolicyStep{
+	steps := []reversibleStep{
 		{
 			name:   "TC",
 			apply:  func() error { return nil },
@@ -100,7 +100,7 @@ func TestApplyBypassPolicyStepsKeepsTheCauseWhenRevertFails(t *testing.T) {
 		},
 	}
 
-	err := applyBypassPolicySteps(steps)
+	err := applyReversibleSteps(steps)
 	if !errors.Is(err, cause) {
 		t.Fatalf("original cause was lost: %v", err)
 	}

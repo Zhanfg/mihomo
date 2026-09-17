@@ -1,0 +1,49 @@
+//go:build with_ebpf && (linux || android)
+
+package sing_ebpf
+
+import (
+	"slices"
+
+	E "github.com/metacubex/sing/common/exceptions"
+)
+
+// reversibleStep is one write in a change that has to land everywhere or
+// nowhere, paired with how to put back what it replaced.
+type reversibleStep struct {
+	// name completes the phrases "apply <name>" and "restore <name>", so it
+	// reads as a noun: "TC bypass policy", "cgroup UDP timeout".
+	name   string
+	apply  func() error
+	revert func() error
+}
+
+// applyReversibleSteps performs every step, or none of them.
+//
+// The data planes hold separate copies of the same decisions -- what to
+// bypass, how long a UDP session lives -- and nothing reconciles them
+// afterwards. Applying in sequence and returning at the first error is what
+// leaves them disagreeing: TC proxying a CIDR cgroup lets past, or one plane
+// expiring sessions on a timeout the others never got. Silently, and for good,
+// since a rule set that does not change again is never revisited.
+//
+// A revert that itself fails is reported alongside the original error rather
+// than replacing it: the cause of the outage is the first failure, and the
+// backend whose rollback failed marks itself as needing a rebuild, which the
+// retry scheduler reads to stop retrying it.
+func applyReversibleSteps(steps []reversibleStep) error {
+	var applied []reversibleStep
+	for _, step := range steps {
+		if err := step.apply(); err != nil {
+			err = E.Cause(err, "apply ", step.name)
+			for _, undo := range slices.Backward(applied) {
+				if undoErr := undo.revert(); undoErr != nil {
+					err = E.Errors(err, E.Cause(undoErr, "restore ", undo.name))
+				}
+			}
+			return err
+		}
+		applied = append(applied, step)
+	}
+	return nil
+}
