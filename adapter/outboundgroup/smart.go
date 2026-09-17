@@ -1886,9 +1886,20 @@ func (s *Smart) checkNodeQuality(
 		return newWeight, false, true, 0
 	}
 
-	// zero-traffic connection
-	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal == 0 && metadata.DstPort == 443 && !isUDP {
-		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected zero-traffic...",
+	// A connection that carried a request and got nothing back. The node
+	// accepted the flow and then swallowed it, which is a failure no dial error
+	// reports.
+	//
+	// It used to require uploadTotal == 0 as well, which inverted the
+	// attribution: the client had not sent a byte, so the node never had a
+	// chance to answer and could not be at fault. That fires on every
+	// speculative TLS connection a browser opens and closes unused, and on
+	// every idle HTTP/2 spare -- each one costing the node that happened to
+	// carry it a 24-hour block for the target. The fork's own stall detector
+	// already draws the line here: tunnel/statistic/tracker.go refuses to
+	// record a stall unless the upload counter moved.
+	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal > 0 && metadata.DstPort == 443 && !isUDP {
+		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected no response to a sent request...",
 			s.Name(), proxyName, networkType, addressDisplay)
 		return newWeight, true, true, 4
 	}
