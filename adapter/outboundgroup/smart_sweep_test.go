@@ -186,14 +186,14 @@ func TestHostStatusScopePropagationCoversClearsAsWellAsBlocks(t *testing.T) {
 		isDegraded  bool
 		failedBlock bool
 		checked     bool
-		blockCode   int64
+		blockCode   smart.BlockCode
 		want        bool
 	}{
-		{name: "degrade blocks both scopes", isDegraded: true, checked: true, blockCode: 4, want: true},
-		{name: "accumulated failures block both scopes", failedBlock: true, checked: true, blockCode: 3, want: true},
-		{name: "a clean close clears both scopes", checked: true, blockCode: 0, want: true},
+		{name: "degrade blocks both scopes", isDegraded: true, checked: true, blockCode: smart.BlockNoResponse, want: true},
+		{name: "accumulated failures block both scopes", failedBlock: true, checked: true, blockCode: smart.BlockDialFailure, want: true},
+		{name: "a clean close clears both scopes", checked: true, blockCode: smart.BlockNone, want: true},
 		{name: "an unchecked close changes nothing", want: false},
-		{name: "a checked non-blocking verdict is not a clear", checked: true, blockCode: 2, want: false},
+		{name: "a checked non-blocking verdict is not a clear", checked: true, blockCode: smart.BlockAbnormalStatus, want: false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			got := hostStatusAppliesToEveryScope(testCase.isDegraded, testCase.failedBlock, testCase.checked, testCase.blockCode)
@@ -236,7 +236,7 @@ func TestACleanCloseOnABlockedNodeIsReportedAsChecked(t *testing.T) {
 			s.hostFailLimit.Store(testCase.hostFailLimit)
 
 			blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
-			s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, 4)
+			s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, smart.BlockNoResponse)
 			if failNodes, _, _, _ := s.store.GetHostStatus(group, config, wildcardTarget, 1_000); failNodes[node] == 0 {
 				t.Fatal("fixture did not block the node")
 			}
@@ -249,7 +249,7 @@ func TestACleanCloseOnABlockedNodeIsReportedAsChecked(t *testing.T) {
 				nil, metadata, nil, wildcardTarget, "probe.example.com:443", node,
 				0.9, 0.9, 1_000, 1.0, 1.0, "tcp", "", false, 0, 0)
 
-			if isDegraded || blockCode != 0 {
+			if isDegraded || blockCode != smart.BlockNone {
 				t.Fatalf("a clean close was judged degraded=%v code=%d", isDegraded, blockCode)
 			}
 			if !checked {
@@ -279,7 +279,7 @@ func TestTheSafetyValveStillRefusesToRecordAFailure(t *testing.T) {
 	s.hostFailLimit.Store(0)
 
 	blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
-	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, 4)
+	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, node, 1, 1_000, true, true, smart.BlockNoResponse)
 
 	metadata := &C.Metadata{
 		Host: "probe.example.com", WildcardTarget: wildcardTarget,
@@ -289,7 +289,7 @@ func TestTheSafetyValveStillRefusesToRecordAFailure(t *testing.T) {
 		errors.New("connection reset"), metadata, nil, wildcardTarget, "probe.example.com:443", node,
 		0.9, 0.9, 1_000, 1.0, 1.0, "tcp", "", false, 0, 0)
 
-	if isDegraded || blockCode != 0 {
+	if isDegraded || blockCode != smart.BlockNone {
 		t.Fatalf("the valve recorded a blocking verdict: degraded=%v code=%d", isDegraded, blockCode)
 	}
 	if checked {
@@ -319,7 +319,7 @@ func TestTheSafetyValveOnlyReportsClosesOnBlockedNodes(t *testing.T) {
 	s.hostFailLimit.Store(0)
 
 	blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
-	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, blocked, 1, 1_000, true, true, 4)
+	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, blocked, 1, 1_000, true, true, smart.BlockNoResponse)
 
 	metadata := &C.Metadata{
 		Host: "probe.example.com", WildcardTarget: wildcardTarget,

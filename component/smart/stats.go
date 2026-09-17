@@ -65,6 +65,43 @@ type AtomicStatsRecord struct {
 	weights *lru.LruCache[string, float64]
 }
 
+// BlockCode says why a node is excluded from a target. The values are the keys
+// of HostStatus.Codes and are persisted, so they are an on-disk format: they
+// can be added to, never renumbered.
+//
+// They are ordered by severity, lowest first, and UpdateHostStatus relies on
+// that -- a new verdict that is numerically lower replaces a higher one, and a
+// higher one is discarded while a lower one stands.
+type BlockCode int
+
+const (
+	// BlockNone is not a block. It is what a healthy close reports, and what
+	// tells UpdateHostStatus to clear the node instead of recording anything.
+	BlockNone BlockCode = 0
+	// BlockManual is the dashboard's block. Permanent, never probed, and never
+	// cleared by anything the network does -- it is the user's decision.
+	BlockManual BlockCode = 1
+	// BlockAbnormalStatus is a status test through the node answering badly.
+	// The only code a recovery probe can itself raise.
+	BlockAbnormalStatus BlockCode = 2
+	// BlockDialFailure accumulates: it counts failures and only blocks once
+	// they reach maxFailedTimes.
+	BlockDialFailure BlockCode = 3
+	// BlockNoResponse is a request that went out and got nothing back.
+	BlockNoResponse BlockCode = 4
+	// BlockLowWeight is a computed weight under AllowedWeight.
+	BlockLowWeight BlockCode = 5
+	// BlockPacketLoss is loss over the threshold.
+	BlockPacketLoss BlockCode = 6
+)
+
+// Recoverable reports whether a probe may return this node to service. Only
+// BlockManual is excluded: it is the user's decision, not the network's, and
+// nothing should undo it behind their back.
+func (c BlockCode) Recoverable() bool {
+	return c != BlockNone && c != BlockManual
+}
+
 type CodeNodeSet struct {
 	Nodes      map[string]int64  `json:"nodes"`
 	FailCounts map[string]int    `json:"fail_counts,omitempty"`
@@ -72,12 +109,12 @@ type CodeNodeSet struct {
 }
 
 type HostStatus struct {
-	initOnce    sync.Once            `json:"-"`
-	mu          sync.RWMutex         `json:"-"`
-	LastFailure int64                `json:"last_failure,omitempty"`
-	LastCheck   int64                `json:"last_check,omitempty"`
-	Blocked     bool                 `json:"blocked,omitempty"`
-	Codes       map[int]*CodeNodeSet `json:"codes,omitempty"`
+	initOnce    sync.Once                  `json:"-"`
+	mu          sync.RWMutex               `json:"-"`
+	LastFailure int64                      `json:"last_failure,omitempty"`
+	LastCheck   int64                      `json:"last_check,omitempty"`
+	Blocked     bool                       `json:"blocked,omitempty"`
+	Codes       map[BlockCode]*CodeNodeSet `json:"codes,omitempty"`
 }
 
 type ActiveTarget struct {
@@ -1214,10 +1251,10 @@ func (s *Store) GetAllNodesForGroup(group, config string) ([]string, error) {
 }
 
 // 域名失败屏蔽
-func (s *Store) GetHostStatus(group, config, wildcardTarget string, hostFailLimit int, extraTargets ...string) (failNodes map[string]int, lastCheck int64, lastFailure int64, blocked bool) {
+func (s *Store) GetHostStatus(group, config, wildcardTarget string, hostFailLimit int, extraTargets ...string) (failNodes map[string]BlockCode, lastCheck int64, lastFailure int64, blocked bool) {
 	now := time.Now().Unix()
 
-	lookup := func(pathPrefix string) (nodes map[string]int, lastCheck int64, lastFailure int64, blocked bool) {
+	lookup := func(pathPrefix string) (nodes map[string]BlockCode, lastCheck int64, lastFailure int64, blocked bool) {
 		hs, _ := hostStatusCache.GetOrStore(pathPrefix, func() *HostStatus { return &HostStatus{} })
 		hs.initOnce.Do(func() {
 			if rawResult, err := s.GetSubBytesByPath(pathPrefix); err == nil {
@@ -1238,13 +1275,13 @@ func (s *Store) GetHostStatus(group, config, wildcardTarget string, hostFailLimi
 			for nodeName, nodeEntry := range codeSet.Nodes {
 				if nodeEntry == 0 || nodeEntry > now {
 					if nodes == nil {
-						nodes = make(map[string]int)
+						nodes = make(map[string]BlockCode)
 					}
 					if oldCode, exists := nodes[nodeName]; !exists || code < oldCode {
 						nodes[nodeName] = code
 					}
 				}
-				if code != 1 && nodeEntry > now {
+				if code.Recoverable() && nodeEntry > now {
 					blockingCount++
 				}
 			}
@@ -1275,12 +1312,12 @@ func (s *Store) GetHostStatus(group, config, wildcardTarget string, hostFailLimi
 	return
 }
 
-func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata *C.Metadata, name string, maxFailedTimes int, hostFailLimit int, failure, checked bool, statusCode int64) bool {
+func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata *C.Metadata, name string, maxFailedTimes int, hostFailLimit int, failure, checked bool, statusCode BlockCode) bool {
 	if !checked {
 		return false
 	}
 
-	newCode := int(statusCode)
+	newCode := statusCode
 
 	// The host is where a recovery probe is aimed, so every code that can block
 	// has to record it -- not just code 2, the one code that was reached by
@@ -1292,7 +1329,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 	// from traffic that may carry none (a bare IP destination), and for those
 	// the TTL remains the only way back, exactly as before.
 	host := metadata.Host
-	if failure && newCode == 2 && host == "" {
+	if failure && newCode == BlockAbnormalStatus && host == "" {
 		return false
 	}
 
@@ -1318,7 +1355,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 	defer hs.mu.Unlock()
 
 	if hs.Codes == nil {
-		hs.Codes = make(map[int]*CodeNodeSet)
+		hs.Codes = make(map[BlockCode]*CodeNodeSet)
 	}
 
 	for code, codeSet := range hs.Codes {
@@ -1326,7 +1363,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 			delete(hs.Codes, code)
 			continue
 		}
-		if code == 1 {
+		if code == BlockManual {
 			continue
 		}
 		// One expiry rule for every code now that all of them carry a probe
@@ -1346,7 +1383,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 	}
 
 	oldLastFailure := hs.LastFailure
-	currentCode := -1
+	currentCode := BlockCode(-1)
 	// What this node is already blocked with, if anything: the deadline, which
 	// blockNode refuses to push out, and the host a probe would aim at, which
 	// it inherits when this update carries none. See blockNode for both.
@@ -1377,9 +1414,9 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 		}
 	}
 
-	if !failure && newCode == 0 {
+	if !failure && newCode == BlockNone {
 		for code, codeSet := range hs.Codes {
-			if code == 1 || codeSet == nil {
+			if code == BlockManual || codeSet == nil {
 				continue
 			}
 			delete(codeSet.Nodes, name)
@@ -1411,7 +1448,7 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 		}
 	}
 
-	if failure || newCode == 3 {
+	if failure || newCode == BlockDialFailure {
 		hs.LastFailure = now
 
 		if hs.Codes[newCode] == nil {
@@ -1462,14 +1499,14 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 		}
 
 		switch newCode {
-		case 1:
+		case BlockManual:
 			// The dashboard's manual block. Deliberately permanent, and
 			// deliberately given no probe target: nothing may return it to
 			// service behind the user's back.
 			codeSet.Nodes[name] = 0 // TTL=0 means permanent
-		case 2:
+		case BlockAbnormalStatus:
 			blockNode()
-		case 3:
+		case BlockDialFailure:
 			if codeSet.FailCounts == nil {
 				codeSet.FailCounts = make(map[string]int)
 			}
@@ -1496,7 +1533,7 @@ saveAndReturn:
 	hostBlockingCount := 0
 
 	for code, cs := range hs.Codes {
-		if code != 1 && cs != nil {
+		if code.Recoverable() && cs != nil {
 			hostBlockingCount += len(cs.Nodes)
 		}
 	}
@@ -1577,7 +1614,7 @@ func (s *Store) CheckHostStatus(group, config string, hostFailLimit int) (map[st
 		cacheHS.mu.Lock()
 		hostBlockingCount := 0
 		for code, cs := range cacheHS.Codes {
-			if code != 1 && cs != nil {
+			if code.Recoverable() && cs != nil {
 				for _, nodeEntry := range cs.Nodes {
 					if nodeEntry == 0 || nodeEntry > now {
 						hostBlockingCount++
@@ -1607,7 +1644,7 @@ func (s *Store) CheckHostStatus(group, config string, hostFailLimit int) (map[st
 		// original code.
 		retryHosts := make(map[string]string)
 		for code, codeSet := range cacheHS.Codes {
-			if code == 1 || codeSet == nil || codeSet.NodeHosts == nil {
+			if !code.Recoverable() || codeSet == nil || codeSet.NodeHosts == nil {
 				continue
 			}
 			for nodeName, nodeEntry := range codeSet.Nodes {
@@ -1856,7 +1893,7 @@ func (s *Store) RemoveNodesData(group, config string, hostFailLimit int, nodes [
 				} else {
 					hostBlockingCount := 0
 					for code, cs := range hs.Codes {
-						if code != 1 && cs != nil {
+						if code.Recoverable() && cs != nil {
 							hostBlockingCount += len(cs.Nodes)
 						}
 					}

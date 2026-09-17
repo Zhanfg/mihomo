@@ -27,10 +27,10 @@ func TestNoResponseVerdictNeedsTheClientToHaveSentSomething(t *testing.T) {
 		name         string
 		uploadTotal  float64
 		wantDegraded bool
-		wantCode     int64
+		wantCode     smart.BlockCode
 	}{
-		{name: "client sent nothing", uploadTotal: 0, wantDegraded: false, wantCode: 0},
-		{name: "client sent a request and got nothing back", uploadTotal: 1, wantDegraded: true, wantCode: 4},
+		{name: "client sent nothing", uploadTotal: 0, wantDegraded: false, wantCode: smart.BlockNone},
+		{name: "client sent a request and got nothing back", uploadTotal: 1, wantDegraded: true, wantCode: smart.BlockNoResponse},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			s := sweepGroup(group + testCase.name)

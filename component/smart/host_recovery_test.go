@@ -41,21 +41,21 @@ func blockedNode(node, host string, expiresIn time.Duration) *CodeNodeSet {
 
 // A blocked node is dropped outright at dial time, so a recovery probe is the
 // only thing that can return it to service before the 24-hour TTL. The sweep
-// used to be built from Codes[2] alone -- the one code reached by probing --
-// which left code 3 (dial or close failure) and codes 4, 5 and 6 (zero
-// traffic, low weight, packet loss) excluded for a full day with no way back.
+// used to be built from BlockAbnormalStatus alone -- the one code a probe can
+// itself raise -- which left dial failures, no-response, low weight and packet
+// loss excluded for a full day with no way back.
 func TestCheckHostStatusProbesEveryRecoverableCode(t *testing.T) {
 	const (
 		group          = "group"
 		config         = "config"
 		wildcardTarget = "example.com"
 	)
-	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
-		2: blockedNode("node-abnormal", "a.example.com", time.Hour),
-		3: blockedNode("node-dial", "b.example.com", time.Hour),
-		4: blockedNode("node-zero-traffic", "c.example.com", time.Hour),
-		5: blockedNode("node-low-weight", "d.example.com", time.Hour),
-		6: blockedNode("node-loss", "e.example.com", time.Hour),
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockAbnormalStatus: blockedNode("node-abnormal", "a.example.com", time.Hour),
+		BlockDialFailure:    blockedNode("node-dial", "b.example.com", time.Hour),
+		BlockNoResponse:     blockedNode("node-zero-traffic", "c.example.com", time.Hour),
+		BlockLowWeight:      blockedNode("node-low-weight", "d.example.com", time.Hour),
+		BlockPacketLoss:     blockedNode("node-loss", "e.example.com", time.Hour),
 	}})
 
 	store := &Store{}
@@ -74,14 +74,14 @@ func TestCheckHostStatusProbesEveryRecoverableCode(t *testing.T) {
 	}
 }
 
-// Code 1 is the dashboard's manual block. It must never be probed back into
+// BlockManual is the dashboard's block. It must never be probed back into
 // service behind the user's back.
 //
 // The entry here is given a real deadline rather than the TTL 0 production
-// uses, precisely so the code == 1 guard is what the test exercises: with
+// uses, precisely so the Recoverable guard is what the test exercises: with
 // TTL 0 the independent "permanent entries are not probed" gate excludes it
 // and the guard goes unpinned. Production also never records a NodeHosts
-// entry for code 1, which is a third independent reason -- so this is
+// entry for a manual block, which is a third independent reason -- so this is
 // defence in depth, and each layer deserves its own test.
 func TestCheckHostStatusNeverProbesAManualBlock(t *testing.T) {
 	const (
@@ -89,8 +89,8 @@ func TestCheckHostStatusNeverProbesAManualBlock(t *testing.T) {
 		config         = "config"
 		wildcardTarget = "manual.example.com"
 	)
-	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
-		1: blockedNode("node-manual", "manual.example.com", time.Hour),
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockManual: blockedNode("node-manual", "manual.example.com", time.Hour),
 	}})
 
 	store := &Store{}
@@ -108,8 +108,8 @@ func TestCheckHostStatusNeverProbesAPermanentEntry(t *testing.T) {
 	)
 	permanent := blockedNode("node-permanent", "permanent.example.com", time.Hour)
 	permanent.Nodes["node-permanent"] = 0 // TTL 0 means permanent
-	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
-		4: permanent,
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockNoResponse: permanent,
 	}})
 
 	store := &Store{}
@@ -118,8 +118,9 @@ func TestCheckHostStatusNeverProbesAPermanentEntry(t *testing.T) {
 	require.Empty(t, result[wildcardTarget], "a permanent block was queued for a recovery probe")
 }
 
-// A probe needs somewhere to aim. Recording the host only for code 2 meant
-// that even once the other codes were swept there would be nothing to test.
+// A probe needs somewhere to aim. Recording the host only for the
+// status-test code meant that even once the others were swept there would be
+// nothing to test.
 func TestUpdateHostStatusRecordsTheHostForEveryBlockingCode(t *testing.T) {
 	const (
 		group          = "group"
@@ -127,7 +128,7 @@ func TestUpdateHostStatusRecordsTheHostForEveryBlockingCode(t *testing.T) {
 		wildcardTarget = "example.com"
 		node           = "node-a"
 	)
-	for _, blockCode := range []int64{2, 4, 5, 6} {
+	for _, blockCode := range []BlockCode{BlockAbnormalStatus, BlockNoResponse, BlockLowWeight, BlockPacketLoss} {
 		seedHostStatus(t, group, config, wildcardTarget, &HostStatus{})
 
 		store := &Store{}
@@ -136,15 +137,15 @@ func TestUpdateHostStatusRecordsTheHostForEveryBlockingCode(t *testing.T) {
 
 		cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 		require.True(t, ok)
-		codeSet := cached.Codes[int(blockCode)]
+		codeSet := cached.Codes[blockCode]
 		require.NotNilf(t, codeSet, "code %d recorded no block at all", blockCode)
 		require.Equalf(t, "probe.example.com", codeSet.NodeHosts[node],
 			"code %d blocked a node without recording where to probe it", blockCode)
 	}
 }
 
-// Code 3 only blocks once the failures pile up; until then it is a counter,
-// and a counter is not something to probe.
+// BlockDialFailure only blocks once the failures pile up; until then it is a
+// counter, and a counter is not something to probe.
 func TestUpdateHostStatusRecordsTheHostWhenCode3Blocks(t *testing.T) {
 	const (
 		group          = "group"
@@ -159,17 +160,17 @@ func TestUpdateHostStatusRecordsTheHostWhenCode3Blocks(t *testing.T) {
 	cachePath := FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget)
 	metadata := &C.Metadata{Host: "probe.example.com"}
 
-	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, maxFailedTimes, 1_000, true, true, 3)
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, maxFailedTimes, 1_000, true, true, BlockDialFailure)
 	cached, ok := hostStatusCache.Get(cachePath)
 	require.True(t, ok)
-	require.Empty(t, cached.Codes[3].Nodes, "a single failure blocked the node outright")
+	require.Empty(t, cached.Codes[BlockDialFailure].Nodes, "a single failure blocked the node outright")
 
-	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, maxFailedTimes, 1_000, true, true, 3)
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, maxFailedTimes, 1_000, true, true, BlockDialFailure)
 	cached, ok = hostStatusCache.Get(cachePath)
 	require.True(t, ok)
-	require.NotEmpty(t, cached.Codes[3].Nodes, "the node never blocked despite reaching the failure limit")
-	require.Equal(t, "probe.example.com", cached.Codes[3].NodeHosts[node],
-		"code 3 blocked a node without recording where to probe it")
+	require.NotEmpty(t, cached.Codes[BlockDialFailure].Nodes, "the node never blocked despite reaching the failure limit")
+	require.Equal(t, "probe.example.com", cached.Codes[BlockDialFailure].NodeHosts[node],
+		"a dial-failure block recorded no probe target")
 }
 
 // The store-side contract the caller-side fix depends on: told a connection
@@ -183,26 +184,26 @@ func TestUpdateHostStatusClearsEveryRecoverableBlockOnSuccess(t *testing.T) {
 		wildcardTarget = "example.com"
 		node           = "node-a"
 	)
-	codes := map[int]*CodeNodeSet{}
-	for _, code := range []int{1, 2, 3, 4, 5, 6} {
+	codes := map[BlockCode]*CodeNodeSet{}
+	for _, code := range []BlockCode{BlockManual, BlockAbnormalStatus, BlockDialFailure, BlockNoResponse, BlockLowWeight, BlockPacketLoss} {
 		codes[code] = blockedNode(node, "probe.example.com", time.Hour)
 	}
-	codes[1].Nodes[node] = 0
+	codes[BlockManual].Nodes[node] = 0
 	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: codes})
 
 	store := &Store{}
 	metadata := &C.Metadata{Host: "probe.example.com"}
-	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, false, true, 0)
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, false, true, BlockNone)
 
 	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 	require.True(t, ok)
-	for _, code := range []int{2, 3, 4, 5, 6} {
+	for _, code := range []BlockCode{BlockAbnormalStatus, BlockDialFailure, BlockNoResponse, BlockLowWeight, BlockPacketLoss} {
 		if codeSet := cached.Codes[code]; codeSet != nil {
 			require.NotContainsf(t, codeSet.Nodes, node, "a clean close left the code %d block in place", code)
 		}
 	}
-	require.NotNil(t, cached.Codes[1], "a clean close lifted the user's manual block")
-	require.Contains(t, cached.Codes[1].Nodes, node, "a clean close lifted the user's manual block")
+	require.NotNil(t, cached.Codes[BlockManual], "a clean close lifted the user's manual block")
+	require.Contains(t, cached.Codes[BlockManual].Nodes, node, "a clean close lifted the user's manual block")
 }
 
 // A recovery probe that fails re-blocks the node, and the probe is the only
@@ -218,7 +219,7 @@ func TestUpdateHostStatusReblockNeverExtendsTheDeadline(t *testing.T) {
 		node           = "node-a"
 	)
 	original := time.Now().Add(2 * time.Hour).Unix()
-	codes := map[int]*CodeNodeSet{4: {
+	codes := map[BlockCode]*CodeNodeSet{BlockNoResponse: {
 		Nodes:     map[string]int64{node: original},
 		NodeHosts: map[string]string{node: "probe.example.com"},
 	}}
@@ -227,14 +228,14 @@ func TestUpdateHostStatusReblockNeverExtendsTheDeadline(t *testing.T) {
 	store := &Store{}
 	metadata := &C.Metadata{Host: "probe.example.com"}
 	// What a failed recovery probe does: re-block as code 2.
-	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, 2)
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, BlockAbnormalStatus)
 
 	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 	require.True(t, ok)
-	require.NotNil(t, cached.Codes[2])
-	require.Equalf(t, original, cached.Codes[2].Nodes[node],
+	require.NotNil(t, cached.Codes[BlockAbnormalStatus])
+	require.Equalf(t, original, cached.Codes[BlockAbnormalStatus].Nodes[node],
 		"the re-block moved the deadline to %d; the node is now excluded for another full TTL and the next failed probe will do it again",
-		cached.Codes[2].Nodes[node])
+		cached.Codes[BlockAbnormalStatus].Nodes[node])
 }
 
 // A first block still gets the full TTL -- the clamp only ever holds a
@@ -251,11 +252,11 @@ func TestUpdateHostStatusFirstBlockGetsTheFullTTL(t *testing.T) {
 	store := &Store{}
 	metadata := &C.Metadata{Host: "probe.example.com"}
 	before := time.Now().Add(HostFailureNodeTTL).Unix()
-	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, 4)
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, BlockNoResponse)
 
 	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 	require.True(t, ok)
-	require.GreaterOrEqual(t, cached.Codes[4].Nodes[node], before,
+	require.GreaterOrEqual(t, cached.Codes[BlockNoResponse].Nodes[node], before,
 		"a first block was clamped below the full TTL")
 }
 
@@ -269,9 +270,9 @@ func TestCheckHostStatusSkipsALapsedBlock(t *testing.T) {
 		config         = "config"
 		wildcardTarget = "example.com"
 	)
-	codes := map[int]*CodeNodeSet{
-		4: blockedNode("node-lapsed", "lapsed.example.com", -time.Hour),
-		5: blockedNode("node-live", "live.example.com", time.Hour),
+	codes := map[BlockCode]*CodeNodeSet{
+		BlockNoResponse: blockedNode("node-lapsed", "lapsed.example.com", -time.Hour),
+		BlockLowWeight:  blockedNode("node-live", "live.example.com", time.Hour),
 	}
 	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: codes})
 
@@ -297,8 +298,8 @@ func TestUpdateHostStatusKeepsTheProbeTargetThroughADemotion(t *testing.T) {
 		node           = "node-a"
 	)
 	blocked := time.Now().Add(20 * time.Hour).Unix()
-	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
-		4: {
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockNoResponse: {
 			Nodes:     map[string]int64{node: blocked},
 			NodeHosts: map[string]string{node: "api.example.com"},
 		},
@@ -309,14 +310,33 @@ func TestUpdateHostStatusKeepsTheProbeTargetThroughADemotion(t *testing.T) {
 	// lower code, so the code-4 record is demoted away.
 	bareIP := &C.Metadata{}
 	for range 3 {
-		store.UpdateHostStatus(group, config, wildcardTarget, bareIP, node, 1, 1_000, true, true, 3)
+		store.UpdateHostStatus(group, config, wildcardTarget, bareIP, node, 1, 1_000, true, true, BlockDialFailure)
 	}
 
 	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
 	require.True(t, ok)
-	codeSet := cached.Codes[3]
+	codeSet := cached.Codes[BlockDialFailure]
 	require.NotNil(t, codeSet)
 	require.Contains(t, codeSet.Nodes, node, "the demotion lifted the block instead of moving it")
 	require.Equal(t, "api.example.com", codeSet.NodeHosts[node],
 		"the demoted block has no probe target, so nothing can return this node to service before the TTL")
+}
+
+// The codes are the keys of a persisted map, so giving them a named type must
+// not change what lands on disk. A defined integer type marshals exactly as the
+// underlying int does; this pins that, because a silent change here would make
+// every existing cache file unreadable.
+func TestBlockCodeKeysKeepTheirOnDiskForm(t *testing.T) {
+	encoded, err := json.Marshal(&HostStatus{Codes: map[BlockCode]*CodeNodeSet{
+		BlockManual:     {Nodes: map[string]int64{"node-a": 0}},
+		BlockNoResponse: {Nodes: map[string]int64{"node-b": 12345}},
+	}})
+	require.NoError(t, err)
+	require.JSONEq(t,
+		`{"codes":{"1":{"nodes":{"node-a":0}},"4":{"nodes":{"node-b":12345}}}}`,
+		string(encoded))
+
+	var decoded HostStatus
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Equal(t, int64(12345), decoded.Codes[BlockNoResponse].Nodes["node-b"])
 }

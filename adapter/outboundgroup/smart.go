@@ -739,8 +739,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if weights != nil && w < smart.AllowedWeight {
 			continue
 		}
-		if wtFailNodes[name] != 0 {
-			if !wtBlocked || wtFailNodes[name] == 1 {
+		if wtFailNodes[name] != smart.BlockNone {
+			if !wtBlocked || wtFailNodes[name] == smart.BlockManual {
 				continue
 			}
 		}
@@ -818,8 +818,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if checkNodeUsed[adapter.ProxyIdentity(p)] {
 			continue
 		}
-		if wtFailNodes[name] != 0 {
-			if !wtBlocked || wtFailNodes[name] == 1 {
+		if wtFailNodes[name] != smart.BlockNone {
+			if !wtBlocked || wtFailNodes[name] == smart.BlockManual {
 				continue
 			}
 		}
@@ -1769,7 +1769,7 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		// it; this path did not, and a connection whose first read had already
 		// failed before the sweep reached it was blamed with code 3 anyway.
 		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
-			s.markNodeFailure(metadata, proxy.Name(), true, true, 3)
+			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure)
 		}
 		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err)
 	}()
@@ -1860,10 +1860,10 @@ func (s *Smart) checkNodeQuality(
 	addressDisplay, proxyName string,
 	newWeight, oldWeight float64,
 	connectionDuration int64, uploadTotal, downloadTotal float64,
-	networkType string, asnNumber string, isUDP bool, lossRate, emaLossRate float64) (float64, bool, bool, int64) {
+	networkType string, asnNumber string, isUDP bool, lossRate, emaLossRate float64) (float64, bool, bool, smart.BlockCode) {
 
 	if s.selected != "" {
-		return newWeight, false, false, 0
+		return newWeight, false, false, smart.BlockNone
 	}
 
 	now := time.Now().Unix()
@@ -1872,12 +1872,12 @@ func (s *Smart) checkNodeQuality(
 	if metadata.SmartBlock == "blocked" {
 		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected manual block...",
 			s.Name(), proxyName, networkType, addressDisplay)
-		return newWeight, true, true, 1
+		return newWeight, true, true, smart.BlockManual
 	}
 
 	// force-closed connection, skip quality check to avoid erroneous downgrade
 	if metadata.SmartBlock == "degraded" {
-		return oldWeight, false, false, 0
+		return oldWeight, false, false, smart.BlockNone
 	}
 
 	wtFailNodes, wtLastCheck, wtLastFailure, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
@@ -1891,15 +1891,15 @@ func (s *Smart) checkNodeQuality(
 	// the only route out of a state the probe could not even see, since it
 	// swept code 2 alone.
 	if wtBlocked {
-		return newWeight, false, err == nil && wtFailNodes[proxyName] != 0, 0
+		return newWeight, false, err == nil && wtFailNodes[proxyName] != smart.BlockNone, smart.BlockNone
 	}
 
 	if newWeight > 0 && newWeight < smart.AllowedWeight {
-		return newWeight, true, true, 5
+		return newWeight, true, true, smart.BlockLowWeight
 	}
 
 	if err != nil {
-		return newWeight, false, true, 3
+		return newWeight, false, true, smart.BlockDialFailure
 	}
 
 	// The node is already blocked for this target and still carried this
@@ -1910,8 +1910,8 @@ func (s *Smart) checkNodeQuality(
 	// on !checked and its clearing branch is the only thing that lifts a block.
 	// Success could therefore never undo one: a blocked node waited out the
 	// full 24-hour TTL or a recovery probe, however well it was working.
-	if wtFailNodes[proxyName] != 0 {
-		return newWeight, false, true, 0
+	if wtFailNodes[proxyName] != smart.BlockNone {
+		return newWeight, false, true, smart.BlockNone
 	}
 
 	// A connection that carried a request and got nothing back. The node
@@ -1929,7 +1929,7 @@ func (s *Smart) checkNodeQuality(
 	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal > 0 && metadata.DstPort == 443 && !isUDP {
 		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected no response to a sent request...",
 			s.Name(), proxyName, networkType, addressDisplay)
-		return newWeight, true, true, 4
+		return newWeight, true, true, smart.BlockNoResponse
 	}
 
 	// abnormal status code detection
@@ -1963,22 +1963,22 @@ func (s *Smart) checkNodeQuality(
 			}
 		}
 		if failure {
-			return newWeight, true, checked, 2
+			return newWeight, true, checked, smart.BlockAbnormalStatus
 		}
-		return newWeight, false, checked, 0
+		return newWeight, false, checked, smart.BlockNone
 	}
 
 	// high packet loss detection
 	if lossRate >= 0.1 || emaLossRate >= 0.05 {
 		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected high packet loss [current: %.2f%%, history EMA: %.2f%%]...",
 			s.Name(), proxyName, networkType, addressDisplay, lossRate*100, emaLossRate*100)
-		return newWeight, true, true, 6
+		return newWeight, true, true, smart.BlockPacketLoss
 	}
 
-	return newWeight, false, false, 0
+	return newWeight, false, false, smart.BlockNone
 }
 
-func (s *Smart) markNodeFailure(metadata *C.Metadata, proxyName string, isDegraded bool, checked bool, blockCode int64) bool {
+func (s *Smart) markNodeFailure(metadata *C.Metadata, proxyName string, isDegraded bool, checked bool, blockCode smart.BlockCode) bool {
 	wildcardTarget := metadata.WildcardTarget
 	target := metadata.SmartTarget
 
@@ -1998,14 +1998,14 @@ func (s *Smart) markNodeFailure(metadata *C.Metadata, proxyName string, isDegrad
 // ones. GetHostStatus unions the two scopes, so a block written to both and
 // lifted from one still excludes the node at dial time -- which is what used to
 // happen, because only the blocking verdicts propagated.
-func hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked bool, blockCode int64) bool {
+func hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked bool, blockCode smart.BlockCode) bool {
 	if isDegraded || failedBlock {
 		return true
 	}
 	// A clear. UpdateHostStatus drops the node from every code set but the
 	// manual one when it is told the connection succeeded, and does nothing at
 	// all when the verdict was never checked.
-	return checked && blockCode == 0
+	return checked && blockCode == smart.BlockNone
 }
 
 func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asnNumber string, force bool) {
