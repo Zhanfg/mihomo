@@ -713,13 +713,31 @@ func uniqueProxiesByName(proxies []C.Proxy) map[string]C.Proxy {
 	return byName
 }
 
+// proxyIndexFor returns the cached name index when all is the group's own
+// current proxy list, which is what every caller on the connection path passes.
+// A caller holding some other slice gets a freshly derived index.
+func (s *Smart) proxyIndexFor(all []C.Proxy) map[string]C.Proxy {
+	s.getProxiesMutex.Lock()
+	cached := len(all) == len(s.providerProxies) &&
+		(len(all) == 0 || &all[0] == &s.providerProxies[0])
+	if cached && s.proxiesByName == nil {
+		s.proxiesByName = uniqueProxiesByName(all)
+	}
+	byName := s.proxiesByName
+	s.getProxiesMutex.Unlock()
+	if !cached {
+		return uniqueProxiesByName(all)
+	}
+	return byName
+}
+
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
 	var proxyByName map[string]C.Proxy
 	if len(names) > 0 {
-		proxyByName = uniqueProxiesByName(all)
+		proxyByName = s.proxyIndexFor(all)
 	}
 
 	checkNodeUsed := make(map[string]bool, len(names))
@@ -942,8 +960,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		if len(names) == 0 {
 			return
 		}
-		allProxies := s.GetProxies(true)
-		proxyByName := uniqueProxiesByName(allProxies)
+		_, proxyByName := s.GetProxiesByName(true)
 		resultProxies := make([]C.Proxy, 0, len(names))
 		for _, name := range names {
 			if p, ok := proxyByName[name]; ok {
