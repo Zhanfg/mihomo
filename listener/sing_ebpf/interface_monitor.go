@@ -268,6 +268,7 @@ const (
 	tcRetryComponentSharedRewrite tcRetryComponent = iota
 	tcRetryComponentGeneral
 	tcRetryComponentBypassRuleSet
+	tcRetryComponentFakeIPRanges
 	tcRetryComponentCount
 )
 
@@ -279,6 +280,8 @@ func (c tcRetryComponent) String() string {
 		return "TC attachment/infrastructure/host policy"
 	case tcRetryComponentBypassRuleSet:
 		return "bypass_rule_set"
+	case tcRetryComponentFakeIPRanges:
+		return "fake-ip ranges"
 	default:
 		return "unknown"
 	}
@@ -302,10 +305,14 @@ func (c tcRetryComponent) String() string {
 //     normally by rule-provider update callbacks rather than network events,
 //     which is exactly the case this scheduler exists to also cover: a
 //     transient failure with no later rule-set change to retry it.
+//   - fakeIPRanges: pushing the fake-ip ranges into the live backends. Same
+//     shape as bypassRuleSet -- the driver is a DNS config change, which will
+//     not happen again just because one backend refused the write.
 type tcUpdateOutcome struct {
 	sharedRewrite tcSharedRewriteOutcome
 	general       tcSharedRewriteOutcome
 	bypassRuleSet tcSharedRewriteOutcome
+	fakeIPRanges  tcSharedRewriteOutcome
 }
 
 // tcRetryTimer is the slice of *time.Timer this loop needs, reduced to the two
@@ -447,6 +454,7 @@ func runTCInterfaceUpdateLoop(
 			tcRetryComponentSharedRewrite: outcome.sharedRewrite,
 			tcRetryComponentGeneral:       outcome.general,
 			tcRetryComponentBypassRuleSet: outcome.bypassRuleSet,
+			tcRetryComponentFakeIPRanges:  outcome.fakeIPRanges,
 		}
 		changed := false
 		for component, componentOutcome := range outcomes {
@@ -592,6 +600,7 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		return tcUpdateOutcome{}
 	}
 	outcome.bypassRuleSet = i.retryBypassRuleSetIfNeeded()
+	outcome.fakeIPRanges = i.retryFakeIPRangesIfNeeded()
 	defaultInterface := i.monitoredDefaultInterfaceName()
 	localTCEnabled := i.localTCEnabled()
 	localInterface, err := availableLocalTCInterface(localTCEnabled, defaultInterface)

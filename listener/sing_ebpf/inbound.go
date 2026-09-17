@@ -89,6 +89,11 @@ type Inbound struct {
 	// Duration field.
 	udpTimeout atomic.Int64
 
+	// fakeIPRangeNeedsRetry records that a backend refused the current fake-ip
+	// ranges. Only a DNS config change would otherwise ask again, so the
+	// interface-update scheduler picks it up; see fakeip.go.
+	fakeIPRangeNeedsRetry bool
+
 	// policyAccess guards compiledPolicy and the fake-ip prefixes once the
 	// inbound is running: the fake-ip observer rewrites them while a shared
 	// data plane may be building a backend from the snapshot.

@@ -29,6 +29,14 @@ type reversibleStep struct {
 // expiring sessions on a timeout the others never got. Silently, and for good,
 // since a rule set that does not change again is never revisited.
 //
+// Not every multi-plane write belongs here. Rolling back is right when the
+// planes must agree and nothing will ever ask again -- a rule set that does not
+// change again is the case this was written for. Where the desired end state is
+// every plane on the NEW value and a driver exists that can keep asking, the
+// answer is to converge instead: rolling back moves away from the goal. The
+// fake-ip range push is that case, and fakeip.go says so at the point it
+// diverges.
+//
 // A revert that itself fails is reported alongside the original error rather
 // than replacing it: the cause of the outage is the first failure. Where the
 // step writes a multi-entry policy map, the backend also marks itself as
