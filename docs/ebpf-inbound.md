@@ -184,6 +184,33 @@ size the kernel state maps; `shared.advanced.tc-priority` becomes
 `shared.data-plane`. `tcp-splice` and `shared.advanced.routing-mark` /
 `routing-table` no longer do anything and are reported once at startup.
 
+### What a config reload can change in place
+
+Rebuilding this inbound destroys every kernel map it owns -- the cgroup
+redirect table, the shared flow table, the TC assignment map, the UDP recovery
+table -- so every established redirect on the host and every tethered client
+breaks at once. Three options avoid that and are applied to the running
+inbound:
+
+- `udp-timeout`. The kernel compares it against each session's last-seen
+  stamp rather than storing a deadline, so a change reaches the sessions that
+  already exist, and the userspace sweep re-paces itself on the next round.
+- `bypass-rule-set`, as long as the list does not become empty or stop being
+  empty. The shared packet-rewrite backend sizes its bypass flow cache to a
+  single entry when nothing is bypassed, and that is fixed when the map is
+  created, so crossing that line still needs a rebuild.
+- `bypass-tun-direct`, which only republishes what a TUN listener reads.
+
+Changing anything else in the section -- or changing one of the three
+alongside something else -- rebuilds the inbound exactly as before. The split
+fails closed: an option added later forces a rebuild until it is explicitly
+classified.
+
+Rule-set *contents* never needed a reload at all. The listener resolves its
+`bypass-rule-set` tags by name each time it recompiles, so a provider that
+refreshes on its own interval reaches the kernel policy without anything else
+happening.
+
 ## Resource limits
 
 The recent performance changes add no required configuration keys. They reuse
