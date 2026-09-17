@@ -179,3 +179,81 @@ func TestUpdateHostStatusClearsEveryRecoverableBlockOnSuccess(t *testing.T) {
 	require.NotNil(t, cached.Codes[1], "a clean close lifted the user's manual block")
 	require.Contains(t, cached.Codes[1].Nodes, node, "a clean close lifted the user's manual block")
 }
+
+// A recovery probe that fails re-blocks the node, and the probe is the only
+// thing that ever re-blocks a node it has just tested. Minting a fresh TTL
+// there turns a bounded exclusion into a permanent one: a host that answers a
+// bare GET with a banned status fails every probe, and the probe comes round
+// every four hours, so the pair is never released at all.
+func TestUpdateHostStatusReblockNeverExtendsTheDeadline(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	original := time.Now().Add(2 * time.Hour).Unix()
+	codes := map[int]*CodeNodeSet{4: {
+		Nodes:     map[string]int64{node: original},
+		NodeHosts: map[string]string{node: "probe.example.com"},
+	}}
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: codes})
+
+	store := &Store{}
+	metadata := &C.Metadata{Host: "probe.example.com"}
+	// What a failed recovery probe does: re-block as code 2.
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, 2)
+
+	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
+	require.True(t, ok)
+	require.NotNil(t, cached.Codes[2])
+	require.Equalf(t, original, cached.Codes[2].Nodes[node],
+		"the re-block moved the deadline to %d; the node is now excluded for another full TTL and the probe will do this again in four hours",
+		cached.Codes[2].Nodes[node])
+}
+
+// A first block still gets the full TTL -- the clamp only ever holds a
+// deadline back, it never shortens a new one.
+func TestUpdateHostStatusFirstBlockGetsTheFullTTL(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{})
+
+	store := &Store{}
+	metadata := &C.Metadata{Host: "probe.example.com"}
+	before := time.Now().Add(HostFailureNodeTTL).Unix()
+	store.UpdateHostStatus(group, config, wildcardTarget, metadata, node, 3, 1_000, true, true, 4)
+
+	cached, ok := hostStatusCache.Get(FormatDBKey(KeyTypeHostFailures, config, group, wildcardTarget))
+	require.True(t, ok)
+	require.GreaterOrEqual(t, cached.Codes[4].Nodes[node], before)
+}
+
+// An expired block is not a block: nothing is excluding the node, so probing it
+// can only mint a new one for a node that is serving fine. Nothing sweeps
+// expired entries for a target that went quiet, so they would otherwise sit
+// there being probed forever.
+func TestCheckHostStatusSkipsALapsedBlock(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "example.com"
+	)
+	codes := map[int]*CodeNodeSet{
+		4: blockedNode("node-lapsed", "lapsed.example.com", -time.Hour),
+		5: blockedNode("node-live", "live.example.com", time.Hour),
+	}
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: codes})
+
+	store := &Store{}
+	result, err := store.CheckHostStatus(group, config, 1_000)
+	require.NoError(t, err)
+
+	probes := result[wildcardTarget]
+	require.NotContains(t, probes, "node-lapsed", "a block that already expired was queued for a probe")
+	require.Equal(t, "live.example.com", probes["node-live"], "the live block stopped being probed")
+}

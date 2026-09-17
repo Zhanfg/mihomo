@@ -1347,14 +1347,20 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 
 	oldLastFailure := hs.LastFailure
 	currentCode := -1
+	// The deadline this node is already blocked until, if any. blockNode below
+	// refuses to push it out; see there for why.
+	currentExpiry := int64(0)
 
 	for code, codeSet := range hs.Codes {
 		if codeSet == nil {
 			continue
 		}
-		if _, ok := codeSet.Nodes[name]; ok {
+		if nodeEntry, ok := codeSet.Nodes[name]; ok {
 			if currentCode == -1 || code < currentCode {
 				currentCode = code
+			}
+			if nodeEntry > now && (currentExpiry == 0 || nodeEntry < currentExpiry) {
+				currentExpiry = nodeEntry
 			}
 		}
 		if codeSet.FailCounts != nil {
@@ -1414,7 +1420,22 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 		}
 
 		blockNode := func() {
-			codeSet.Nodes[name] = time.Now().Add(HostFailureNodeTTL).Unix()
+			expiry := time.Now().Add(HostFailureNodeTTL).Unix()
+			// A re-block never pushes an existing deadline further out. The
+			// recovery probe is the only thing that re-blocks a node it has
+			// just tested, and letting its failure mint a fresh TTL is what
+			// turns a bounded exclusion into a permanent one: a host that
+			// answers a bare GET with 403, 405 or a timeout -- most API and
+			// telemetry endpoints, and exactly what a zero-traffic or
+			// low-weight block lands on -- fails every probe, and the probe
+			// comes round every four hours. HostFailureNodeTTL is a bound on
+			// how long we stay away from a node, so repeated evidence must not
+			// be able to remove the bound. A block that has already lapsed does
+			// not count: currentExpiry only holds deadlines still in the future.
+			if currentExpiry > 0 && currentExpiry < expiry {
+				expiry = currentExpiry
+			}
+			codeSet.Nodes[name] = expiry
 			if host == "" {
 				return
 			}
@@ -1574,7 +1595,15 @@ func (s *Store) CheckHostStatus(group, config string, hostFailLimit int) (map[st
 				continue
 			}
 			for nodeName, nodeEntry := range codeSet.Nodes {
-				if nodeEntry == 0 || nodeEntry-now > int64((HostFailureNodeTTL-hostStatusRetryAfter).Seconds()) {
+				// Permanent (0), still inside hostStatusRetryAfter, or already
+				// lapsed. A lapsed entry is not excluding the node from
+				// anything any more, so probing it can only mint a new block
+				// for a node that is serving fine -- nothing sweeps expired
+				// entries except a later update on the same target, which never
+				// comes for a target that went quiet -- and it spends budget a
+				// live block needs.
+				if nodeEntry == 0 || nodeEntry <= now ||
+					nodeEntry-now > int64((HostFailureNodeTTL-hostStatusRetryAfter).Seconds()) {
 					continue
 				}
 				if host := codeSet.NodeHosts[nodeName]; host != "" {
