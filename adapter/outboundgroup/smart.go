@@ -1520,6 +1520,37 @@ func updateEMAFloat(oldValue, newValue float64) float64 {
 	return newValue
 }
 
+// admitConnectionStats is failure-flood suppression: once recent failures reach
+// the threshold, the heavy per-connection work is skipped so a burst of dead
+// connections cannot turn into a disconnect storm of its own. It reports
+// whether to go on, and whether this call is the one that armed the suppressor
+// (the caller owns the store write that follows).
+//
+// A connection the group closed itself is evidence of nothing and must not
+// clear the suppressor. It reports no read or write error -- closeErr is
+// derived from those alone -- so it used to arrive indistinguishable from a
+// healthy close and reset the counter to zero. Every victim of a sweep did
+// that, which meant the one mechanism written to stop a disconnect storm was
+// held open by the storm it was meant to stop.
+func (s *Smart) admitConnectionStats(metadata *C.Metadata, err error, now int64) (proceed bool, tripped bool) {
+	if err == nil {
+		if metadata.SmartBlock == "degraded" {
+			return true, false
+		}
+		s.suppressStats.Store(false)
+		s.suppressCount.Store(0)
+		return true, false
+	}
+	if now-s.suppressLast.Load() > int64(floodWindow.Seconds()) {
+		s.suppressCount.Store(0)
+	}
+	s.suppressLast.Store(now)
+	if s.suppressCount.Add(1) >= floodThreshold {
+		tripped = s.suppressStats.CompareAndSwap(false, true)
+	}
+	return !s.suppressStats.Load(), tripped
+}
+
 func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error) {
@@ -1528,24 +1559,13 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		return
 	}
 
-	// failure flood suppression: short-circuit heavy work when recent failures reach the threshold to avoid a disconnect storm (including Direct nodes)
 	now := time.Now().Unix()
-	if err == nil {
-		s.suppressStats.Store(false)
-		s.suppressCount.Store(0)
-	} else {
-		if now-s.suppressLast.Load() > int64(floodWindow.Seconds()) {
-			s.suppressCount.Store(0)
-		}
-		s.suppressLast.Store(now)
-		if s.suppressCount.Add(1) >= floodThreshold {
-			if s.suppressStats.CompareAndSwap(false, true) {
-				s.store.ClearFloodRecordsByGroup(s.Name(), s.configName)
-			}
-		}
-		if s.suppressStats.Load() {
-			return
-		}
+	proceed, tripped := s.admitConnectionStats(metadata, err, now)
+	if tripped {
+		s.store.ClearFloodRecordsByGroup(s.Name(), s.configName)
+	}
+	if !proceed {
+		return
 	}
 
 	var lossRate float64
@@ -1922,14 +1942,23 @@ func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asn
 		} else if s.getASNCode(tracker.Info().Metadata) != "" {
 			return true
 		}
-		if force {
-			tracker.Info().Metadata.SmartBlock = "degraded"
-			_ = tracker.Close()
-		} else if proxyName != "" {
-			if !lo.Contains(tracker.Chains(), proxyName) {
-				_ = tracker.Close()
-			}
+		if !force && (proxyName == "" || lo.Contains(tracker.Chains(), proxyName)) {
+			return true
 		}
+		// Marked before it is closed, in both modes. checkNodeQuality reads this
+		// to skip a connection the group killed itself, and leaving the
+		// non-force branch unmarked is what turned one sweep into the next: a
+		// connection closed moments after it was established has moved no
+		// bytes, which is exactly the zero-traffic rule's idea of a broken
+		// node, so every idle HTTPS victim -- a browser's pre-connected spares,
+		// above all -- earned its own node a 24-hour block. Those blocks carry
+		// code 4, and CheckHostStatus only ever probes code 2, so nothing
+		// releases them before the TTL. The degrade then force-closes the whole
+		// target, producing the next round of victims from a pool one node
+		// smaller. Closing a connection is this group's own decision and says
+		// nothing about the node that carried it.
+		tracker.Info().Metadata.SmartBlock = "degraded"
+		_ = tracker.Close()
 		return true
 	})
 }
