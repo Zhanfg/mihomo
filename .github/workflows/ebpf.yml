@@ -59,8 +59,24 @@ jobs:
         id: setup-ndk
         uses: nttld/setup-ndk@v1
         with:
-          ndk-version: r29-beta1
+          # Verified against manifest.txt: r29 ships the exact Clang build the
+          # committed objects came from. r29-beta1, which the other workflows
+          # use for cross-compiling, does not -- it is a different Clang and
+          # the check refused it, which is the check working.
+          ndk-version: r29
           local-cache: true
+
+      # The guard inside the Makefile only says the version is wrong, not what
+      # it found. This class of failure recurs whenever the NDK moves, so the
+      # run should say what it is holding rather than leave the next person
+      # guessing.
+      - name: Report the toolchain
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          clang="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          echo "runner:   $("${clang}" --version | head -n 1)"
+          echo "expected: $(sed -n 's/^clang: //p' common/ebpf/internal/bpfgen/manifest.txt)"
 
       - name: Check the generated eBPF objects are current
         env:
