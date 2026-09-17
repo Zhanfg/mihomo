@@ -1,6 +1,7 @@
 package outboundgroup
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/metacubex/mihomo/component/smart"
@@ -51,6 +52,62 @@ func TestNoResponseVerdictNeedsTheClientToHaveSentSomething(t *testing.T) {
 			if isDegraded != testCase.wantDegraded || blockCode != testCase.wantCode {
 				t.Fatalf("degraded=%v code=%d, want %v and %d",
 					isDegraded, blockCode, testCase.wantDegraded, testCase.wantCode)
+			}
+		})
+	}
+}
+
+// blameTestProxy reports a type recordConnectionStats returns on immediately,
+// so the test exercises the markCloseFailure branch alone.
+type blameTestProxy struct {
+	C.Proxy
+	name string
+}
+
+func (p blameTestProxy) Name() string        { return p.name }
+func (p blameTestProxy) Type() C.AdapterType { return C.Reject }
+
+// A connection this group closed itself says nothing about the node that
+// carried it. checkNodeQuality honours the degraded marker; the close-failure
+// path did not, so a victim whose first read had already failed before the
+// sweep reached it was blamed anyway.
+func TestASweptConnectionIsNotBlamedForItsCloseError(t *testing.T) {
+	const (
+		config         = "config"
+		wildcardTarget = "example.com"
+		node           = "node-a"
+	)
+	smart.InitCache()
+	smart.InitQueue()
+
+	for _, testCase := range []struct {
+		name       string
+		smartBlock string
+		wantBlamed bool
+	}{
+		{name: "closed by this group", smartBlock: "degraded", wantBlamed: false},
+		{name: "closed by the network", smartBlock: "normal", wantBlamed: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			group := "blame-group-" + testCase.name
+			s := sweepGroup(group)
+			s.configName = config
+			s.store = &smart.Store{}
+			s.maxFailedTimes = 1
+
+			metadata := &C.Metadata{
+				Host: "probe.example.com", WildcardTarget: wildcardTarget,
+				SmartBlock: testCase.smartBlock, NetWork: C.TCP,
+			}
+			if !s.submitConnectionStats(metadata, blameTestProxy{name: node},
+				0, 0, 0, 0, 0, 0, 1_000, nil, errors.New("connection reset"), true) {
+				t.Fatal("submission was refused")
+			}
+			s.workWG.Wait()
+
+			failNodes, _, _, _ := s.store.GetHostStatus(group, config, wildcardTarget, 1_000)
+			if blamed := failNodes[node] != 0; blamed != testCase.wantBlamed {
+				t.Fatalf("blamed=%v (code %d), want %v", blamed, failNodes[node], testCase.wantBlamed)
 			}
 		})
 	}

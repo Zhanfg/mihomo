@@ -74,24 +74,48 @@ func TestCheckHostStatusProbesEveryRecoverableCode(t *testing.T) {
 	}
 }
 
-// Code 1 is the dashboard's manual block. It is deliberately permanent and
-// must never be probed back into service behind the user's back.
+// Code 1 is the dashboard's manual block. It must never be probed back into
+// service behind the user's back.
+//
+// The entry here is given a real deadline rather than the TTL 0 production
+// uses, precisely so the code == 1 guard is what the test exercises: with
+// TTL 0 the independent "permanent entries are not probed" gate excludes it
+// and the guard goes unpinned. Production also never records a NodeHosts
+// entry for code 1, which is a third independent reason -- so this is
+// defence in depth, and each layer deserves its own test.
 func TestCheckHostStatusNeverProbesAManualBlock(t *testing.T) {
 	const (
 		group          = "group"
 		config         = "config"
 		wildcardTarget = "manual.example.com"
 	)
-	manual := blockedNode("node-manual", "manual.example.com", time.Hour)
-	manual.Nodes["node-manual"] = 0 // TTL 0 means permanent
 	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
-		1: manual,
+		1: blockedNode("node-manual", "manual.example.com", time.Hour),
 	}})
 
 	store := &Store{}
 	result, err := store.CheckHostStatus(group, config, 1_000)
 	require.NoError(t, err)
 	require.Empty(t, result[wildcardTarget], "a manual block was queued for a recovery probe")
+}
+
+// And the same for the shape production actually writes: TTL 0.
+func TestCheckHostStatusNeverProbesAPermanentEntry(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "permanent.example.com"
+	)
+	permanent := blockedNode("node-permanent", "permanent.example.com", time.Hour)
+	permanent.Nodes["node-permanent"] = 0 // TTL 0 means permanent
+	seedHostStatus(t, group, config, wildcardTarget, &HostStatus{Codes: map[int]*CodeNodeSet{
+		4: permanent,
+	}})
+
+	store := &Store{}
+	result, err := store.CheckHostStatus(group, config, 1_000)
+	require.NoError(t, err)
+	require.Empty(t, result[wildcardTarget], "a permanent block was queued for a recovery probe")
 }
 
 // A probe needs somewhere to aim. Recording the host only for code 2 meant
@@ -148,9 +172,10 @@ func TestUpdateHostStatusRecordsTheHostWhenCode3Blocks(t *testing.T) {
 		"code 3 blocked a node without recording where to probe it")
 }
 
-// A connection that completes cleanly is the positive evidence a block was
-// waiting for, and it has to undo every code the node collected -- except the
-// manual one, which is the user's decision and not the network's.
+// The store-side contract the caller-side fix depends on: told a connection
+// succeeded, UpdateHostStatus drops the node from every code set except the
+// manual one. This branch predates that fix -- it is characterised here, not
+// introduced -- and the fix is only worth anything if it holds.
 func TestUpdateHostStatusClearsEveryRecoverableBlockOnSuccess(t *testing.T) {
 	const (
 		group          = "group"

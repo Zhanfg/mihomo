@@ -296,3 +296,39 @@ func TestTheSafetyValveStillRefusesToRecordAFailure(t *testing.T) {
 		t.Fatal("a failed close was reported as checked, which clears the very blocks the valve is waiting out")
 	}
 }
+
+// The safety valve reports a clean close as checked so blocks can drain, but
+// only for a node that is itself blocked. Reporting every clean close as
+// checked would send a second, pointless UpdateHostStatus write down the
+// SmartTarget scope for every healthy connection while the valve is open.
+func TestTheSafetyValveOnlyReportsClosesOnBlockedNodes(t *testing.T) {
+	const (
+		group          = "valve-scope-group"
+		config         = "config"
+		wildcardTarget = "example.com"
+		blocked        = "node-blocked"
+		healthy        = "node-healthy"
+	)
+	smart.InitCache()
+	smart.InitQueue()
+
+	s := sweepGroup(group)
+	s.configName = config
+	s.store = &smart.Store{}
+	s.maxFailedTimes = 1
+	s.hostFailLimit.Store(0)
+
+	blocking := &C.Metadata{Host: "probe.example.com", WildcardTarget: wildcardTarget}
+	s.store.UpdateHostStatus(group, config, wildcardTarget, blocking, blocked, 1, 1_000, true, true, 4)
+
+	metadata := &C.Metadata{
+		Host: "probe.example.com", WildcardTarget: wildcardTarget,
+		SmartBlock: "normal", NetWork: C.TCP,
+	}
+	_, _, checked, _ := s.checkNodeQuality(
+		nil, metadata, nil, wildcardTarget, "probe.example.com:443", healthy,
+		0.9, 0.9, 1_000, 1.0, 1.0, "tcp", "", false, 0, 0)
+	if checked {
+		t.Fatal("a clean close on an unblocked node was reported as checked, which writes a host-status update with nothing to clear")
+	}
+}
