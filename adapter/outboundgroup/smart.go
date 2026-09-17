@@ -2003,6 +2003,17 @@ func (s *Smart) closeSameConnection(metadata *C.Metadata, proxyName, target, asn
 		// target, producing the next round of victims from a pool one node
 		// smaller. Closing a connection is this group's own decision and says
 		// nothing about the node that carried it.
+		//
+		// The write reaches the reader that matters without synchronisation:
+		// closeCallbackConn.Close runs its callback synchronously in this
+		// goroutine, so the stats goroutine it spawns is created after this
+		// write. It does race with GET /connections marshalling the same field
+		// for display, which predates this and costs at most a garbled string
+		// in one dashboard row -- torn reads here can only produce a value
+		// matching none of the three constants, which every comparison treats
+		// as "not ours". Closing it properly means making Metadata
+		// non-copyable, and it is copied by value in three places including
+		// TUIC's UoT path.
 		tracker.Info().Metadata.SmartBlock = "degraded"
 		_ = tracker.Close()
 		return true
