@@ -64,17 +64,32 @@ jobs:
           # use for cross-compiling, does not -- it is a different Clang and
           # the check refused it, which is the check working.
           ndk-version: r29
-          local-cache: true
+          # Deliberately no local-cache. The first run with it downloaded the
+          # NDK and passed; the next run restored the 708 MB entry, logged
+          # "Cache restored successfully" and "Found in local cache", and left
+          # no compiler under the path it then handed to ANDROID_NDK_HOME. A
+          # poisoned entry stays poisoned for the life of the key, so that is
+          # every subsequent run failing, not one. Downloading each time costs
+          # about a minute, and the path filter means this only runs when the
+          # eBPF sources actually change.
 
       # The guard inside the Makefile only says the version is wrong, not what
       # it found. This class of failure recurs whenever the NDK moves, so the
       # run should say what it is holding rather than leave the next person
-      # guessing.
+      # guessing. It asserts rather than merely printing, because a missing
+      # compiler makes the substitution empty while `echo` still succeeds: the
+      # report passes, and the failure lands two steps later on a message that
+      # blames the version for what is actually an absent install.
       - name: Report the toolchain
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
         run: |
+          set -euo pipefail
           clang="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/clang"
+          if [ ! -x "${clang}" ]; then
+            echo "::error::the NDK install left no usable clang at ${clang}"
+            exit 1
+          fi
           echo "runner:   $("${clang}" --version | head -n 1)"
           echo "expected: $(sed -n 's/^clang: //p' common/ebpf/internal/bpfgen/manifest.txt)"
 
