@@ -852,32 +852,10 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	filteredAll = defaultSort(filteredAll)
 
-	canPrepend := weights == nil
-
-	var prependProxy C.Proxy
-	var hasPrepend bool
-
 	for _, p := range filteredAll {
-		if canPrepend && !hasPrepend && (len(selected) < minCount/2 || len(wtFailNodes) <= 0 || wtBlocked) {
-			prependProxy = p
-			hasPrepend = true
-		} else {
-			selected = append(selected, p)
-		}
-		total := len(selected)
-		if hasPrepend {
-			total++
-		}
-		if total >= minCount {
+		selected = append(selected, p)
+		if len(selected) >= minCount {
 			break
-		}
-	}
-	if hasPrepend {
-		selected = append(selected, nil)
-		copy(selected[1:], selected)
-		selected[0] = prependProxy
-		if len(selected) > minCount {
-			selected = selected[:minCount]
 		}
 	}
 
@@ -905,9 +883,21 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
+				if wtFailNodes[p.Name()] == smart.BlockManual {
+					continue
+				}
 				selected = append(selected, p)
 				if len(selected) >= minCount {
 					break
+				}
+			}
+
+			if len(selected) == 0 {
+				for _, p := range fallbackAll {
+					selected = append(selected, p)
+					if len(selected) >= minCount {
+						break
+					}
 				}
 			}
 		}
@@ -1651,7 +1641,12 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	lock := smart.GetTargetNodeLock(target, s.Name(), proxyName)
 	lock.Lock()
-	defer lock.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			lock.Unlock()
+		}
+	}()
 
 	atomicRecord := s.store.GetOrCreateAtomicRecord(cacheKey, s.Name(), s.configName, target, proxyName)
 
@@ -1738,17 +1733,25 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// block node for the specific domain/IP (wildcardTarget + SmartTarget two-level records)
 	failedBlock := s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode)
 
-	if isDegraded || failedBlock {
-		s.closeSameConnection(metadata, proxyName, target, asnNumber, true)
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnNumber, metadata.WildcardTarget)
-	}
-
 	// average weight (adapted for target adjusting to rule-based and ASN-based cases)
 	newWeight := updateEMAFloat(oldWeight, adjWeight)
 	atomicRecord.Set("lastUsed", time.Now().Unix())
 	atomicRecord.SetWeight(weightType, newWeight, isUDP)
 	statsSnapshot := atomicRecord.CreateStatsSnapshot(cacheKey)
+	// Queued under the lock: the queue keeps the last write per key, so two
+	// closes on this node racing to append would otherwise let the older
+	// snapshot overwrite the newer one.
 	s.saveStatsRecord(target, proxy, statsSnapshot)
+
+	// The sweep closes other connections, and that close can block on I/O,
+	// so it runs without the lock; the stats goroutines it spawns take it.
+	lock.Unlock()
+	locked = false
+
+	if isDegraded || failedBlock {
+		s.closeSameConnection(metadata, proxyName, target, asnNumber, true)
+		s.store.DeleteUnwrapResult(s.Name(), s.configName, target, asnNumber, metadata.WildcardTarget)
+	}
 
 	if s.collectData {
 		collectedWeight := adjWeight / priorityFactor
