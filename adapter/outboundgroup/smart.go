@@ -234,6 +234,16 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 				drainRemaining(n - received - 1)
 				return proxies[res.proxyIndex], res.conn, res.connectTime, nil
 			}
+			// Fatal dial errors (for example a detected transparent-proxy
+			// loopback or an unrecoverable resolver failure) must abort the
+			// whole batch immediately. Waiting for sibling dials can turn the
+			// original fatal error into ctx.Err(), causing Smart to retry the
+			// next batch and amplify a routing loop.
+			if tunnel.ShouldStopRetry(res.error) {
+				cancel()
+				drainRemaining(n - received - 1)
+				return nil, nil, 0, res.error
+			}
 			errs = append(errs, res.error)
 
 		case <-ctx.Done():
