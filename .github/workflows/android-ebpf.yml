@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/android-ebpf-routing
+      - optimize/android-ebpf-smart-core
   workflow_dispatch:
 
 permissions:
@@ -42,9 +43,14 @@ jobs:
           CGO_ENABLED: 1
           CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
         run: |
-          go build -v -tags "with_gvisor with_ebpf" -trimpath \
+          go build -v -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath \
             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-${GITHUB_SHA::7}' -w -s -buildid=" \
             -o mihomo-android-arm64-smart-ebpf
+          BEFORE_SIZE="$(stat -c%s mihomo-android-arm64-smart-ebpf)"
+          "${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded mihomo-android-arm64-smart-ebpf
+          AFTER_SIZE="$(stat -c%s mihomo-android-arm64-smart-ebpf)"
+          echo "binary_size_before_strip=${BEFORE_SIZE}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "binary_size_after_strip=${AFTER_SIZE}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Package artifact
         run: |
