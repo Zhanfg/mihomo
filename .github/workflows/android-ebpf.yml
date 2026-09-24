@@ -34,7 +34,7 @@ jobs:
       - name: Compile Linux eBPF surface
         run: |
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
-            go test ./listener/ebpf ./component/dialer ./config -tags "with_ebpf"
+            go test ./listener/ebpf ./component/dialer ./config ./adapter/outboundgroup -count=1 -tags "with_ebpf"
 
       - name: Build Android arm64 Smart eBPF
         env:
