@@ -108,6 +108,7 @@ func ApplyConfig(cfg *config.Config, force bool) {
 	updateNTP(cfg.NTP) // initialize NTP after DNS because an NTP server may be a hostname.
 	updateListeners(cfg.General, cfg.Listeners, force)
 	updateTun(cfg.General) // tun should not care "force"
+	updateEBPF(cfg.General)
 	updateIPTables(cfg)
 	updateTunnels(cfg.Tunnels)
 
@@ -143,6 +144,7 @@ func GetGeneral() *config.General {
 			TProxyPort:        ports.TProxyPort,
 			MixedPort:         ports.MixedPort,
 			Tun:               listener.GetTunConf(),
+			EBPF:              listener.GetEBPFConf(),
 			TuicServer:        listener.GetTuicConf(),
 			ShadowSocksConfig: ports.ShadowSocksConfig,
 			VmessConfig:       ports.VmessConfig,
@@ -214,6 +216,16 @@ func updateListeners(general *config.General, listeners map[string]C.InboundList
 
 func updateTun(general *config.General) {
 	listener.ReCreateTun(general.Tun, tunnel.Tunnel)
+}
+
+func updateEBPF(general *config.General) {
+	if general.EBPF.Enable && general.Tun.Enable {
+		log.Warnln("[EBPF] TUN is also enabled; eBPF will operate as a separate transparent ingress")
+	}
+	if general.EBPF.Enable && general.TProxyPort != 0 {
+		log.Warnln("[EBPF] tproxy-port is configured; remove external TProxy rules when switching the data plane to eBPF")
+	}
+	listener.ReCreateEBPF(general.EBPF, tunnel.Tunnel)
 }
 
 func updateExperimental(c *config.Experimental) {
