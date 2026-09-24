@@ -134,6 +134,7 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 		}
 	}
 
+	additionalSocketHookToListenConfig(lc)
 	return lc, address, nil
 }
 
@@ -183,9 +184,11 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 		if opt.routingMark != 0 {
 			bindMarkToDialer(opt.routingMark, dialer, network, destination)
 		}
-		if opt.tfo && !DisableTFO {
-			return dialTFO(ctx, *dialer, network, address)
-		}
+	}
+
+	additionalSocketHookToDialer(dialer)
+	if DefaultSocketHook == nil && opt.tfo && !DisableTFO {
+		return dialTFO(ctx, *dialer, network, address)
 	}
 
 	return dialer.DialContext(ctx, network, address)
@@ -194,7 +197,10 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 func ICMPControl(destination netip.Addr) func(network, address string, conn syscall.RawConn) error {
 	return func(network, address string, conn syscall.RawConn) error {
 		if DefaultSocketHook != nil {
-			return DefaultSocketHook(network, address, conn)
+			if err := DefaultSocketHook(network, address, conn); err != nil {
+				return err
+			}
+			return runAdditionalSocketHook(network, address, conn)
 		}
 		dialer := &net.Dialer{}
 		interfaceName := DefaultInterface.Load()
@@ -213,9 +219,11 @@ func ICMPControl(destination netip.Addr) func(network, address string, conn sysc
 			bindMarkToDialer(routingMark, dialer, network, destination)
 		}
 		if dialer.ControlContext != nil {
-			return dialer.ControlContext(context.TODO(), network, address, conn)
+			if err := dialer.ControlContext(context.TODO(), network, address, conn); err != nil {
+				return err
+			}
 		}
-		return nil
+		return runAdditionalSocketHook(network, address, conn)
 	}
 }
 
