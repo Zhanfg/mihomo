@@ -30,7 +30,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const monitorInterval = 2 * time.Second
+const (
+	routeEventDebounce       = 250 * time.Millisecond
+	routeFallbackInterval    = 30 * time.Second
+	routePollFallbackInterval = 2 * time.Second
+)
 
 type Listener struct {
 	config LC.EBPF
@@ -400,7 +404,8 @@ func (l *Listener) readUDP(conn *net.UDPConn) {
 			continue
 		}
 		target := socks5.AddrFromStdAddrPort(destination)
-		packet := &udpPacket{
+		packet := udpPacketPool.Get().(*udpPacket)
+		*packet = udpPacket{
 			pc:         conn,
 			client:     source,
 			destination: destination,
@@ -515,34 +520,90 @@ func collectHostAddresses() []netip.Addr {
 
 func (l *Listener) monitorInterface() {
 	defer l.wg.Done()
-	ticker := time.NewTicker(monitorInterval)
-	defer ticker.Stop()
-	ticks := 0
+
+	updates := make(chan netlink.RouteUpdate, 32)
+	done := make(chan struct{})
+	subscribed := netlink.RouteSubscribe(updates, done) == nil
+	if subscribed {
+		defer close(done)
+	} else {
+		log.Warnln("[EBPF] route subscription unavailable, falling back to polling")
+	}
+
+	fallbackInterval := routeFallbackInterval
+	if !subscribed {
+		fallbackInterval = routePollFallbackInterval
+	}
+	fallback := time.NewTicker(fallbackInterval)
+	defer fallback.Stop()
+
+	var debounce *time.Timer
+	var debounceC <-chan time.Time
+	armDebounce := func() {
+		if debounce == nil {
+			debounce = time.NewTimer(routeEventDebounce)
+			debounceC = debounce.C
+			return
+		}
+		if !debounce.Stop() {
+			select {
+			case <-debounce.C:
+			default:
+			}
+		}
+		debounce.Reset(routeEventDebounce)
+		debounceC = debounce.C
+	}
+
 	for {
 		select {
 		case <-l.ctx.Done():
+			if debounce != nil {
+				debounce.Stop()
+			}
 			return
-		case <-ticker.C:
-			ticks++
-			next, err := detectDefaultInterface()
-			if err != nil {
+		case _, ok := <-updates:
+			if !ok {
+				updates = nil
+				if subscribed {
+					subscribed = false
+					fallback.Reset(routePollFallbackInterval)
+					log.Warnln("[EBPF] route subscription closed, falling back to polling")
+				}
 				continue
 			}
-			current := l.currentInterface()
-			refreshAddresses := ticks%8 == 0
-			if next == current && !refreshAddresses {
-				continue
-			}
-			addresses := collectHostAddresses()
-			if err = l.runtime.Reconcile(next, nil, addresses); err != nil {
-				log.Warnln("[EBPF] interface reconcile failed: %v", err)
-				continue
-			}
-			if next != current {
-				l.setInterfaceName(next)
-				log.Infoln("[EBPF] default interface switched: %s -> %s", current, next)
-			}
+			armDebounce()
+		case <-debounceC:
+			debounceC = nil
+			l.reconcileInterface(true)
+		case <-fallback.C:
+			l.reconcileInterface(true)
 		}
+	}
+}
+
+func (l *Listener) reconcileInterface(refreshAddresses bool) {
+	next, err := detectDefaultInterface()
+	if err != nil {
+		return
+	}
+	current := l.currentInterface()
+	if next == current && !refreshAddresses {
+		return
+	}
+
+	var addresses []netip.Addr
+	if refreshAddresses || next != current {
+		iface.FlushCache()
+		addresses = collectHostAddresses()
+	}
+	if err = l.runtime.Reconcile(next, nil, addresses); err != nil {
+		log.Warnln("[EBPF] interface reconcile failed: %v", err)
+		return
+	}
+	if next != current {
+		l.setInterfaceName(next)
+		log.Infoln("[EBPF] default interface switched: %s -> %s", current, next)
 	}
 }
 
@@ -617,6 +678,10 @@ func addrPort(addr net.Addr) (netip.AddrPort, bool) {
 	return value, value.IsValid()
 }
 
+var udpPacketPool = sync.Pool{
+	New: func() any { return new(udpPacket) },
+}
+
 type udpPacket struct {
 	pc          net.PacketConn
 	client      netip.AddrPort
@@ -641,8 +706,9 @@ func (p *udpPacket) InAddr() net.Addr {
 func (p *udpPacket) Drop() {
 	if p.buf != nil {
 		pool.Put(p.buf)
-		p.buf = nil
 	}
+	*p = udpPacket{}
+	udpPacketPool.Put(p)
 }
 
 func (p *udpPacket) WriteBack(data []byte, addr net.Addr) (int, error) {
