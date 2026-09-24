@@ -82,6 +82,7 @@ type Inbound struct {
 	TProxyPort        int            `json:"tproxy-port"`
 	MixedPort         int            `json:"mixed-port"`
 	Tun               LC.Tun         `json:"tun"`
+	EBPF              LC.EBPF        `json:"ebpf"`
 	TuicServer        LC.TuicServer  `json:"tuic-server"`
 	ShadowSocksConfig string         `json:"ss-config"`
 	VmessConfig       string         `json:"vmess-config"`
@@ -468,6 +469,7 @@ type RawConfig struct {
 	DNS           RawDNS                    `yaml:"dns" json:"dns"`
 	NTP           RawNTP                    `yaml:"ntp" json:"ntp"`
 	Tun           RawTun                    `yaml:"tun" json:"tun"`
+	EBPF          LC.EBPF                   `yaml:"ebpf" json:"ebpf"`
 	TuicServer    RawTuicServer             `yaml:"tuic-server" json:"tuic-server"`
 	IPTables      RawIPTables               `yaml:"iptables" json:"iptables"`
 	Experimental  RawExperimental           `yaml:"experimental" json:"experimental"`
@@ -498,6 +500,7 @@ func DefaultRawConfig() *RawConfig {
 		Mode:              T.Rule,
 		GeoAutoUpdate:     false,
 		GeoUpdateInterval: 24,
+		EBPF:              LC.EBPF{AutoDetectInterface: true, BypassPrivate: true},
 		GeodataMode:       geodata.GeodataMode(),
 		GeodataLoader:     "memconservative",
 		LgbmAutoUpdate:    false,
@@ -790,6 +793,7 @@ func parseGeneral(cfg *RawConfig) (*General, error) {
 			BindAddress:       cfg.BindAddress,
 			InboundTfo:        cfg.InboundTfo,
 			InboundMPTCP:      cfg.InboundMPTCP,
+			EBPF:              cfg.EBPF,
 		},
 		UnifiedDelay: cfg.UnifiedDelay,
 		Mode:         cfg.Mode,
