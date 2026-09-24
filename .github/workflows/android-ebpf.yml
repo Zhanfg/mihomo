@@ -1,0 +1,61 @@
+name: Android eBPF Smart
+
+on:
+  push:
+    branches:
+      - feature/android-ebpf-routing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-arm64-ebpf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Setup NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Resolve eBPF dependencies
+        run: go mod tidy
+
+      - name: Compile Linux eBPF surface
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go test ./listener/ebpf ./component/dialer ./config -tags "with_ebpf"
+
+      - name: Build Android arm64 Smart eBPF
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: 1
+          CC: ${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
+        run: |
+          go build -v -tags "with_gvisor with_ebpf" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-android-arm64-smart-ebpf
+
+      - name: Package artifact
+        run: |
+          chmod +x mihomo-android-arm64-smart-ebpf
+          gzip -9 -c mihomo-android-arm64-smart-ebpf > mihomo-android-arm64-smart-ebpf.gz
+          sha256sum mihomo-android-arm64-smart-ebpf.gz > SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-arm64-smart-ebpf
+          path: |
+            mihomo-android-arm64-smart-ebpf.gz
+            SHA256SUMS
