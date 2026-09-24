@@ -4,7 +4,7 @@ import (
 	"context"
 	"net"
 	"syscall"
-	"sync"
+	"sync/atomic"
 )
 
 // SocketControl
@@ -15,29 +15,30 @@ type SocketControl func(network, address string, conn syscall.RawConn) error
 // never change type traits because it's used in CMFA
 var DefaultSocketHook SocketControl
 
-var (
-	additionalSocketHookMu sync.RWMutex
-	additionalSocketHook   SocketControl
-)
+type socketHookHolder struct {
+	hook SocketControl
+}
+
+var additionalSocketHook atomic.Pointer[socketHookHolder]
 
 // SetAdditionalSocketHook installs an additive socket hook without changing
-// DefaultSocketHook semantics used by CMFA. The hook is applied after normal
-// interface/routing controls and is intended for features such as eBPF
-// socket-cookie self bypass.
+// DefaultSocketHook semantics used by CMFA. Socket creation is a hot path, so
+// readers use a lock-free atomic pointer while configuration changes remain
+// rare.
 func SetAdditionalSocketHook(hook SocketControl) {
-	additionalSocketHookMu.Lock()
-	additionalSocketHook = hook
-	additionalSocketHookMu.Unlock()
+	if hook == nil {
+		additionalSocketHook.Store(nil)
+		return
+	}
+	additionalSocketHook.Store(&socketHookHolder{hook: hook})
 }
 
 func runAdditionalSocketHook(network, address string, conn syscall.RawConn) error {
-	additionalSocketHookMu.RLock()
-	hook := additionalSocketHook
-	additionalSocketHookMu.RUnlock()
-	if hook == nil {
+	holder := additionalSocketHook.Load()
+	if holder == nil {
 		return nil
 	}
-	return hook(network, address, conn)
+	return holder.hook(network, address, conn)
 }
 
 func additionalSocketHookToDialer(dialer *net.Dialer) {
