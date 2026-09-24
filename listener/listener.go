@@ -10,6 +10,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/inbound"
 	C "github.com/metacubex/mihomo/constant"
 	LC "github.com/metacubex/mihomo/listener/config"
+	"github.com/metacubex/mihomo/listener/ebpf"
 	"github.com/metacubex/mihomo/listener/http"
 	"github.com/metacubex/mihomo/listener/mixed"
 	"github.com/metacubex/mihomo/listener/redir"
@@ -43,6 +44,7 @@ var (
 	tunnelUDPListeners  = map[string]*LT.PacketConn{}
 	inboundListeners    = map[string]C.InboundListener{}
 	tunLister           *sing_tun.Listener
+	ebpfLister          *ebpf.Listener
 	shadowSocksListener C.MultiAddrListener
 	vmessListener       *sing_vmess.Listener
 	tuicListener        *tuic.Listener
@@ -56,11 +58,13 @@ var (
 	tunnelMux  sync.Mutex
 	inboundMux sync.Mutex
 	tunMux     sync.Mutex
+	ebpfMux    sync.Mutex
 	ssMux      sync.Mutex
 	vmessMux   sync.Mutex
 	tuicMux    sync.Mutex
 
 	LastTunConf  LC.Tun
+	LastEBPFConf LC.EBPF
 	LastTuicConf LC.TuicServer
 )
 
@@ -79,6 +83,13 @@ func GetTunConf() LC.Tun {
 		return LastTunConf
 	}
 	return tunLister.Config()
+}
+
+func GetEBPFConf() LC.EBPF {
+	if ebpfLister == nil {
+		return LastEBPFConf
+	}
+	return ebpfLister.Config()
 }
 
 func GetTuicConf() LC.TuicServer {
@@ -534,6 +545,39 @@ func ReCreateTun(tunConf LC.Tun, tunnel C.Tunnel) {
 	log.Infoln("[TUN] Tun adapter listening at: %s", tunLister.Address())
 }
 
+
+func ReCreateEBPF(config LC.EBPF, tunnel C.Tunnel) {
+	ebpfMux.Lock()
+	defer func() {
+		LastEBPFConf = config
+		ebpfMux.Unlock()
+	}()
+
+	if config.Equal(LastEBPFConf) {
+		return
+	}
+
+	if ebpfLister != nil {
+		if err := ebpfLister.Close(); err != nil {
+			log.Warnln("[EBPF] close previous listener: %v", err)
+		}
+		ebpfLister = nil
+	}
+
+	if !config.Enable {
+		return
+	}
+
+	listener, err := ebpf.New(config, tunnel)
+	if err != nil {
+		log.Errorln("[EBPF] start failed: %v", err)
+		config.Enable = false
+		return
+	}
+	ebpfLister = listener
+	log.Infoln("[EBPF] transparent router listening at: %s", ebpfLister.Address())
+}
+
 func PatchTunnel(tunnels []LC.Tunnel, tunnel C.Tunnel) {
 	tunnelMux.Lock()
 	defer tunnelMux.Unlock()
@@ -726,4 +770,10 @@ func closeTunListener() {
 
 func Cleanup() {
 	closeTunListener()
+	ebpfMux.Lock()
+	if ebpfLister != nil {
+		_ = ebpfLister.Close()
+		ebpfLister = nil
+	}
+	ebpfMux.Unlock()
 }
