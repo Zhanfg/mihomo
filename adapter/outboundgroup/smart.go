@@ -57,8 +57,10 @@ const (
 	parallelDials           = 5
 	connectThreshold        = 5.0
 
-	floodWindow    = 2 * time.Second
-	floodThreshold = 50
+	floodWindow      = 2 * time.Second
+	floodThreshold   = 50
+	statsWorkerCount = 2
+	statsQueueSize   = 512
 )
 
 var (
@@ -105,6 +107,23 @@ type Smart struct {
 	suppressStats atomic.Bool
 	suppressCount atomic.Int64
 	suppressLast  atomic.Int64
+
+	statsQueue   chan connectionStatsJob
+	statsDropped atomic.Int64
+}
+
+type connectionStatsJob struct {
+	metadata           *C.Metadata
+	proxy              C.Proxy
+	connectTime        int64
+	latency            int64
+	uploadTotal        int64
+	downloadTotal      int64
+	maxUploadRate      int64
+	maxDownloadRate    int64
+	connectionDuration int64
+	tcpStats           *tcpstats.Stats
+	err                error
 }
 
 type dialResult struct {
@@ -269,7 +288,7 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 		}
 		if !errors.Is(err, context.Canceled) && ctx.Err() == nil {
 			// metadata may be re-written by a later retry's selectProxies.
-			go s.recordConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
+			s.enqueueConnectionStats(metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
 		}
 		return nil, connectTime, err
 	}
@@ -436,7 +455,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 					return nil, err
 				}
 				finalErr = err
-				go s.recordConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
+				s.enqueueConnectionStats(metadata, proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
 				continue
 			}
 
@@ -857,6 +876,11 @@ func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
+	s.statsQueue = make(chan connectionStatsJob, statsQueueSize)
+	for i := 0; i < statsWorkerCount; i++ {
+		s.wg.Add(1)
+		go s.statsWorker()
+	}
 
 	smartInitOnce.Do(func() {
 		s.startTimedTask(5*time.Minute, checkInterval, "Global orphaned groups Clean up", s.cleanupOrphanedGroups, true)
@@ -1490,6 +1514,56 @@ func updateEMAFloat(oldValue, newValue float64) float64 {
 	return newValue
 }
 
+func (s *Smart) statsWorker() {
+	defer s.wg.Done()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case job := <-s.statsQueue:
+			s.recordConnectionStats(
+				job.metadata, job.proxy,
+				job.connectTime, job.latency,
+				job.uploadTotal, job.downloadTotal,
+				job.maxUploadRate, job.maxDownloadRate,
+				job.connectionDuration, job.tcpStats, job.err,
+			)
+		}
+	}
+}
+
+func (s *Smart) enqueueConnectionStats(metadata *C.Metadata, proxy C.Proxy,
+	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+	connectionDuration int64, tcpStats *tcpstats.Stats, err error) {
+	if metadata == nil || s.statsQueue == nil {
+		return
+	}
+	job := connectionStatsJob{
+		metadata:           metadata.Clone(),
+		proxy:              proxy,
+		connectTime:        connectTime,
+		latency:            latency,
+		uploadTotal:        uploadTotal,
+		downloadTotal:      downloadTotal,
+		maxUploadRate:      maxUploadRate,
+		maxDownloadRate:    maxDownloadRate,
+		connectionDuration: connectionDuration,
+		tcpStats:           tcpStats,
+		err:                err,
+	}
+	select {
+	case <-s.ctx.Done():
+		return
+	case s.statsQueue <- job:
+		return
+	default:
+		dropped := s.statsDropped.Add(1)
+		if dropped == 1 || dropped%128 == 0 {
+			log.Debugln("[Smart] stats queue saturated for group [%s], dropped=%d", s.Name(), dropped)
+		}
+	}
+}
+
 func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error) {
@@ -1721,7 +1795,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 				s.markNodeFailure(metadata, proxy.Name(), true, true, 3)
 			}
 
-			go s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr)
+			s.enqueueConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr)
 			return
 		}
 	})
@@ -1738,7 +1812,7 @@ func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Pr
 			maxUploadRate := info.MaxUploadRate.Load()
 			maxDownloadRate := info.MaxDownloadRate.Load()
 
-			go s.recordConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
+			s.enqueueConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
 				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, nil)
 			return
 		}
