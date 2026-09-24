@@ -54,13 +54,13 @@ jobs:
           CGO_ENABLED: "1"
         run: |
           SHORT_SHA="$(git rev-parse --short HEAD)"
-          VERSION="alpha-smart-\${SHORT_SHA}"
-          export CC="\${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          VERSION="alpha-smart-${SHORT_SHA}"
+          export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
           go build -v -tags "with_gvisor" -trimpath \
-            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=\${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
             -o mihomo-android-arm64-v8
-          gzip -9 -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-\${VERSION}.gz"
-          sha256sum "mihomo-android-arm64-v8-\${VERSION}.gz" > checksums.txt
+          gzip -9 -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+          sha256sum "mihomo-android-arm64-v8-${VERSION}.gz" > checksums.txt
 
       - name: Upload Android Smart core
         uses: actions/upload-artifact@v7
