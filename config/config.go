@@ -500,7 +500,7 @@ func DefaultRawConfig() *RawConfig {
 		Mode:              T.Rule,
 		GeoAutoUpdate:     false,
 		GeoUpdateInterval: 24,
-		EBPF:              LC.EBPF{AutoDetectInterface: true, BypassPrivate: true},
+		EBPF:              LC.EBPF{AutoDetectInterface: true, BypassPrivate: true, IPv6: true},
 		GeodataMode:       geodata.GeodataMode(),
 		GeodataLoader:     "memconservative",
 		LgbmAutoUpdate:    false,
