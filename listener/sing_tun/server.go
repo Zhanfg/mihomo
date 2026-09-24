@@ -491,6 +491,7 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		err = E.Cause(err, "configure tun interface")
 		return
 	}
+	tunIf = guardTunClose(tunIf)
 
 	l.dnsServerIp = dnsServerIp
 	// after tun.New sing-tun has set DNS to TUN interface
