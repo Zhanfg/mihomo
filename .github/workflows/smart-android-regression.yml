@@ -1,0 +1,72 @@
+name: Smart Android Regression
+
+on:
+  push:
+    branches:
+      - fix/android-box-tproxy-loopback
+    paths:
+      - "adapter/outboundgroup/**"
+      - "component/**"
+      - "tunnel/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/smart-android-regression.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          go-version: "1.26"
+
+      - name: Run Smart regression tests
+        env:
+          SKIP_CONCURRENT_TEST: "1"
+          SKIP_INTEROP_TEST: "1"
+        run: go test ./adapter/outboundgroup -count=1
+
+      - name: Prepare CA bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Build Android arm64-v8 Smart core
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          VERSION="alpha-smart-\${SHORT_SHA}"
+          export CC="\${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          go build -v -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=\${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-android-arm64-v8
+          gzip -9 -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-\${VERSION}.gz"
+          sha256sum "mihomo-android-arm64-v8-\${VERSION}.gz" > checksums.txt
+
+      - name: Upload Android Smart core
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-android-arm64-v8-smart-loopback-fix
+          path: |
+            mihomo-android-arm64-v8-alpha-smart-*.gz
+            checksums.txt
+          retention-days: 14
