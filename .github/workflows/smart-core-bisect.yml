@@ -1,0 +1,84 @@
+name: Smart Core Bisect
+
+on:
+  push:
+    branches:
+      - debug/smart-core-bisect
+    paths:
+      - ".github/workflows/smart-core-bisect.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: smart-20260815
+            ref: 3f46b09cd09552d2a995e8bfdd1a6dbdc31bf958
+          - label: smart-20260830
+            ref: 518713dea0425cbfaa494b7483940ef73cd8e39e
+          - label: smart-20260904
+            ref: 69423f04bad7f02e757481a814702005c7460cf7
+          - label: smart-20260922
+            ref: 06ec497250069f336f91ca9fcdf6b22486d7347a
+    runs-on: ubuntu-latest
+    name: ${{ matrix.label }}
+    steps:
+      - name: Checkout upstream Smart ref
+        uses: actions/checkout@v6
+        with:
+          repository: vernesong/mihomo
+          ref: ${{ matrix.ref }}
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-download-base-url: https://github.com/MetaCubeX/go/releases/download/build
+          go-version: "1.26"
+
+      - name: Run Smart package tests
+        env:
+          SKIP_CONCURRENT_TEST: "1"
+          SKIP_INTEROP_TEST: "1"
+        run: go test ./adapter/outboundgroup -count=1
+
+      - name: Prepare CA bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Build Android arm64-v8 Smart core
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          VERSION="${{ matrix.label }}-${GITHUB_SHA::7}"
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo
+          gzip -9 -c mihomo > "mihomo-android-arm64-v8-${{ matrix.label }}.gz"
+          sha256sum "mihomo-android-arm64-v8-${{ matrix.label }}.gz" > SHA256SUMS
+
+      - name: Upload core
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.label }}
+          path: |
+            mihomo-android-arm64-v8-${{ matrix.label }}.gz
+            SHA256SUMS
+          retention-days: 14
