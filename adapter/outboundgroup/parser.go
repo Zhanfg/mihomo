@@ -96,13 +96,35 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		groupOption.Use = AllProviders
 	}
 	if groupOption.IncludeAllProxies {
+		// GetProxies already hides what exclude-filter matches, but the
+		// compatible provider built from these names health-checks every one
+		// of them. Drop the excluded names here, as filter does below, or the
+		// group probes proxies it can never select.
+		allProxies := AllProxies
+		if groupOption.ExcludeFilter != "" {
+			var excludeFilterRegs []*regexp2.Regexp
+			for _, excludeFilter := range strings.Split(groupOption.ExcludeFilter, "`") {
+				excludeFilterReg := regexp2.MustCompile(excludeFilter, regexp2.None)
+				excludeFilterRegs = append(excludeFilterRegs, excludeFilterReg)
+			}
+			allProxies = nil
+		LOOP:
+			for _, p := range AllProxies {
+				for _, excludeFilterReg := range excludeFilterRegs {
+					if mat, _ := excludeFilterReg.MatchString(p); mat {
+						continue LOOP
+					}
+				}
+				allProxies = append(allProxies, p)
+			}
+		}
 		if groupOption.Filter != "" {
 			var filterRegs []*regexp2.Regexp
 			for _, filter := range strings.Split(groupOption.Filter, "`") {
 				filterReg := regexp2.MustCompile(filter, regexp2.None)
 				filterRegs = append(filterRegs, filterReg)
 			}
-			for _, p := range AllProxies {
+			for _, p := range allProxies {
 				for _, filterReg := range filterRegs {
 					if mat, _ := filterReg.MatchString(p); mat {
 						groupOption.Proxies = append(groupOption.Proxies, p)
@@ -110,7 +132,7 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 				}
 			}
 		} else {
-			groupOption.Proxies = append(groupOption.Proxies, AllProxies...)
+			groupOption.Proxies = append(groupOption.Proxies, allProxies...)
 		}
 		if len(groupOption.Proxies) == 0 && len(groupOption.Use) == 0 {
 			groupOption.Proxies = []string{groupOption.EmptyFallback}
