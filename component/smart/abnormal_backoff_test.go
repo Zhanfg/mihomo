@@ -101,3 +101,36 @@ func TestAbnormalStatusDoesNotMarkTheTargetBlocked(t *testing.T) {
 	_, _, _, blocked = store.GetHostStatus(group, config, wildcardTarget, 1)
 	require.True(t, blocked, "verdicts about the nodes themselves still count")
 }
+
+// A quiet host drops its back-off memory, but not for a node whose back-off
+// block is still in force: CheckHostStatus tells that block from a legacy
+// day-long one by the count, and would purge it early without it.
+func TestQuietHostKeepsTheCountOfALiveBackOffBlock(t *testing.T) {
+	const (
+		group          = "group"
+		config         = "config"
+		wildcardTarget = "quiet.example.com"
+	)
+	day := time.Now().Add(24 * time.Hour).Unix()
+	cachePath := seedHostStatus(t, group, config, wildcardTarget, &HostStatus{
+		LastFailure: time.Now().Add(-5 * time.Hour).Unix(),
+		Codes: map[BlockCode]*CodeNodeSet{
+			BlockAbnormalStatus: {
+				Nodes:      map[string]int64{"backed-off": day},
+				NodeHosts:  map[string]string{"backed-off": wildcardTarget},
+				FailCounts: map[string]int{"backed-off": 5, "lapsed": 3},
+			},
+		},
+	})
+	store := &Store{}
+
+	// Any update runs the expiry pass; a clean close on another node will do.
+	store.UpdateHostStatus(group, config, wildcardTarget, &C.Metadata{Host: wildcardTarget}, "other", 3, 1_000, false, true, BlockNone, 0)
+	_, err := store.CheckHostStatus(group, config, 1_000)
+	require.NoError(t, err)
+
+	codeSet := hostStatusFor(t, cachePath).Codes[BlockAbnormalStatus]
+	require.NotNil(t, codeSet)
+	require.Contains(t, codeSet.Nodes, "backed-off", "the live back-off block was purged")
+	require.NotContains(t, codeSet.FailCounts, "lapsed")
+}

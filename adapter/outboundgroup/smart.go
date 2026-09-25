@@ -2548,7 +2548,14 @@ func (s *Smart) needsASNKey(target, asn string) bool {
 			}
 		}
 	}
-	return smart.NeedsASNKey(target, ruleCount, s.asnDiversityOf(target, asn))
+	// Only a provider-defined rule name is judged by its diversity; every other
+	// kind is decided by its name alone. Counting for all of them kept a set per
+	// domain in asnDiversity for the life of the group, which nothing reads.
+	diversity := 0
+	if smart.ClassifyTargetName(target) == smart.TargetKindRuleName {
+		diversity = s.asnDiversityOf(target, asn)
+	}
+	return smart.NeedsASNKey(target, ruleCount, diversity)
 }
 
 // asnDiversityOf counts the unrelated networks a target was seen on, which is how a
@@ -2582,10 +2589,14 @@ func (s *Smart) claimedRule(asn string, needsASNKey bool) (string, bool) {
 // claimASNEvidence rebuilds the network to service rule claims from the evidence
 // collected per target (see TargetASNEvidence), it runs on its own timer.
 func (s *Smart) claimASNEvidence() {
-	claims := smart.ClaimedASNRules(s.store.TargetASNEvidence(s.Name(), s.configName))
-	if len(claims) == 0 {
+	// claimedRule consults the claims only under prefer-asn, and building them
+	// decodes every stats record of the group.
+	if !s.preferASN {
 		return
 	}
+	// An empty result still has to go through: it is what clears the claims
+	// whose evidence has aged out.
+	claims := smart.ClaimedASNRules(s.store.TargetASNEvidence(s.Name(), s.configName))
 
 	s.asnRule.Range(func(asn, _ string) bool {
 		if _, ok := claims[asn]; !ok {

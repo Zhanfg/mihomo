@@ -1328,8 +1328,15 @@ func (s *Store) UpdateHostStatus(group, config, wildcardTarget string, metadata 
 					delete(codeSet.NodeHosts, nodeName)
 				}
 			}
+			// Not for a node still blocked, though: its count is what marks a
+			// long back-off block as current rather than a legacy leftover for
+			// CheckHostStatus to purge.
 			if now-hs.LastFailure > int64(hostStatusRetryAfter.Seconds()) {
-				codeSet.FailCounts = nil
+				for nodeName := range codeSet.FailCounts {
+					if _, blocked := codeSet.Nodes[nodeName]; !blocked {
+						delete(codeSet.FailCounts, nodeName)
+					}
+				}
 			}
 			if len(codeSet.Nodes) == 0 && len(codeSet.FailCounts) == 0 {
 				delete(hs.Codes, code)
