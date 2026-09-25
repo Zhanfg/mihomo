@@ -99,8 +99,11 @@ func TestCloseGuardEndsTheDarwinReadLoop(t *testing.T) {
 	device := &guardedFakeUtun{fakeUtun: &fakeUtun{}}
 	closeUnderTraffic(t, device)
 
-	require.Zero(t, device.readsAfterClose.Load(),
-		"a read reached the closed descriptor")
+	// One read can still land: a call that passed the guard's check just
+	// before Close reaches the device after it (see closeGuard). What the
+	// guard rules out is the loop carrying on.
+	require.LessOrEqual(t, device.readsAfterClose.Load(), int64(1),
+		"reads kept reaching the closed descriptor")
 	require.LessOrEqual(t, device.callsAfterClose.Load(), int64(1),
 		"the loop kept reading after the guard reported the device closed")
 }

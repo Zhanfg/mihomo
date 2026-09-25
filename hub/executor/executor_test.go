@@ -50,6 +50,15 @@ func startAnsweringDNSServer(t *testing.T, answer netip.Addr, host string, queri
 	return pc.LocalAddr().String()
 }
 
+// useTempHomeDir points the process-wide home directory at a temporary one
+// for the test and puts the previous one back afterwards.
+func useTempHomeDir(t *testing.T) {
+	t.Helper()
+	previous := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	t.Cleanup(func() { C.SetHomeDir(previous) })
+}
+
 // A 'rule-set:' nameserver-policy can only match once its rule provider has
 // loaded, and the providers load after the DNS resolver is already serving:
 // proxy-provider health checks, rule-provider downloads and hijacked queries
@@ -60,7 +69,7 @@ func startAnsweringDNSServer(t *testing.T, answer netip.Addr, host string, queri
 // The rule provider here is fetched from a host that its own rule set lists,
 // so the download resolves that host exactly while the set is still empty.
 func TestRuleSetNameserverPolicyAppliesOnceTheRuleProviderHasLoaded(t *testing.T) {
-	C.SetHomeDir(t.TempDir())
+	useTempHomeDir(t)
 	// Applying a config opens the process-wide cache file in the home directory;
 	// close it before the directory is removed, which Windows refuses otherwise.
 	t.Cleanup(func() {
@@ -142,7 +151,9 @@ rules:
 // the next GEOIP match opened an MMDB file that does not exist
 // (MetaCubeX/mihomo#2837).
 func TestAParseDoesNotRollBackAConfigAppliedWhileItRan(t *testing.T) {
-	C.SetHomeDir(t.TempDir())
+	useTempHomeDir(t)
+	previousGeodataMode := geodata.GeodataMode()
+	t.Cleanup(func() { geodata.SetGeodataMode(previousGeodataMode) })
 	geodata.SetGeodataMode(false)
 
 	cfg, err := ParseWithBytes([]byte("geodata-mode: true\nprofile:\n  store-selected: false\n"))
