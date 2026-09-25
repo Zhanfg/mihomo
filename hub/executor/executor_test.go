@@ -12,12 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/tunnel"
 
 	D "github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
 )
 
 // startAnsweringDNSServer serves every A query with answer on a loopback UDP
@@ -130,4 +132,37 @@ rules:
 	if len(ips) != 1 || ips[0] != policyAnswer {
 		t.Fatalf("expected %s to be answered by the rule-set nameserver-policy (%s) once the rule set had loaded, got %v (policy nameserver queried %d times)", host, policyAnswer, ips, policyQueries.Load())
 	}
+}
+
+// ParseRawConfig applies the general section it is parsing through
+// temporaryUpdateGeneral and restores, on return, the general it found when
+// it started. An ApplyConfig that ran in between -- the startup apply racing a
+// PUT /configs, or a reload racing a profile validation -- was undone by that
+// restore: geodata-mode went back to false under rules built for geodata, and
+// the next GEOIP match opened an MMDB file that does not exist
+// (MetaCubeX/mihomo#2837).
+func TestAParseDoesNotRollBackAConfigAppliedWhileItRan(t *testing.T) {
+	C.SetHomeDir(t.TempDir())
+	geodata.SetGeodataMode(false)
+
+	cfg, err := ParseWithBytes([]byte("geodata-mode: true\nprofile:\n  store-selected: false\n"))
+	require.NoError(t, err)
+	require.False(t, geodata.GeodataMode(), "a finished parse keeps its general to itself")
+
+	// A parse begins, and while it runs the same config is applied.
+	rollback := temporaryUpdateGeneral(cfg.General)
+	applied := make(chan struct{})
+	go func() {
+		ApplyConfig(cfg, true)
+		close(applied)
+	}()
+	select {
+	case <-applied:
+	case <-time.After(500 * time.Millisecond):
+		// ApplyConfig is waiting for the parse, which is what it should do.
+	}
+	rollback()
+	<-applied
+
+	require.True(t, geodata.GeodataMode(), "the parse rolled back geodata-mode from the config applied while it ran")
 }

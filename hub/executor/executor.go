@@ -419,10 +419,18 @@ func updateUpdater(cfg *config.Config) {
 
 //go:linkname temporaryUpdateGeneral github.com/metacubex/mihomo/config.temporaryUpdateGeneral
 func temporaryUpdateGeneral(general *config.General) func() {
+	// Hold mux from here until the rollback, so no ApplyConfig runs while a
+	// parse has its general applied. The rollback restores the general found
+	// here; an ApplyConfig in between -- the startup apply racing a PUT
+	// /configs, a reload racing a profile validation -- was silently undone,
+	// e.g. geodata-mode reset to false under rules built for geodata, which
+	// sends the next GEOIP match to an MMDB file that may not exist.
+	mux.Lock()
 	oldGeneral := GetGeneral()
 	updateGeneral(general, false)
 	return func() {
 		updateGeneral(oldGeneral, false)
+		mux.Unlock()
 	}
 }
 
