@@ -96,16 +96,22 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 		groupOption.Use = AllProviders
 	}
 	if groupOption.IncludeAllProxies {
-		// GetProxies already hides what exclude-filter matches, but the
-		// compatible provider built from these names health-checks every one
-		// of them. Drop the excluded names here, as filter does below, or the
-		// group probes proxies it can never select.
+		// GetProxies already hides what exclude-filter and exclude-type
+		// match, but the compatible provider built from these names
+		// health-checks every one of them. Drop the excluded names here, as
+		// filter does below, or the group probes proxies it can never select.
 		allProxies := AllProxies
-		if groupOption.ExcludeFilter != "" {
+		if groupOption.ExcludeFilter != "" || groupOption.ExcludeType != "" {
 			var excludeFilterRegs []*regexp2.Regexp
-			for _, excludeFilter := range strings.Split(groupOption.ExcludeFilter, "`") {
-				excludeFilterReg := regexp2.MustCompile(excludeFilter, regexp2.None)
-				excludeFilterRegs = append(excludeFilterRegs, excludeFilterReg)
+			if groupOption.ExcludeFilter != "" {
+				for _, excludeFilter := range strings.Split(groupOption.ExcludeFilter, "`") {
+					excludeFilterReg := regexp2.MustCompile(excludeFilter, regexp2.None)
+					excludeFilterRegs = append(excludeFilterRegs, excludeFilterReg)
+				}
+			}
+			var excludeTypes []string
+			if groupOption.ExcludeType != "" {
+				excludeTypes = strings.Split(groupOption.ExcludeType, "|")
 			}
 			allProxies = nil
 		LOOP:
@@ -113,6 +119,13 @@ func ParseProxyGroup(config map[string]any, proxyMap map[string]C.Proxy, provide
 				for _, excludeFilterReg := range excludeFilterRegs {
 					if mat, _ := excludeFilterReg.MatchString(p); mat {
 						continue LOOP
+					}
+				}
+				if proxy, ok := proxyMap[p]; ok {
+					for _, excludeType := range excludeTypes {
+						if strings.EqualFold(proxy.Type().String(), excludeType) {
+							continue LOOP
+						}
 					}
 				}
 				allProxies = append(allProxies, p)

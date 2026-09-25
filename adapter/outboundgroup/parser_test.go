@@ -66,3 +66,41 @@ func TestIncludeAllHealthCheckSkipsProxiesTheExcludeFilterRemoves(t *testing.T) 
 	require.Zero(t, proxies["日本 01"].tests.Load(), "excluded proxy was health checked")
 	require.Zero(t, proxies["美国 01"].tests.Load(), "excluded proxy was health checked")
 }
+
+type typedHealthCheckCountingProxy struct {
+	*healthCheckCountingProxy
+	adapterType C.AdapterType
+}
+
+func (p typedHealthCheckCountingProxy) Type() C.AdapterType { return p.adapterType }
+
+// exclude-type has the same gap as exclude-filter above: GetProxies hides the
+// excluded types, but the provider built from the collected names probed them.
+func TestIncludeAllHealthCheckSkipsProxiesTheExcludeTypeRemoves(t *testing.T) {
+	socks := &healthCheckCountingProxy{name: "socks 01"}
+	http := &healthCheckCountingProxy{name: "http 01"}
+	proxyMap := map[string]C.Proxy{
+		"COMPATIBLE": adapter.NewProxy(outbound.NewCompatible()),
+		socks.name:   typedHealthCheckCountingProxy{socks, C.Socks5},
+		http.name:    http,
+	}
+
+	group, err := ParseProxyGroup(map[string]any{
+		"name":         "no-socks",
+		"type":         "url-test",
+		"include-all":  true,
+		"exclude-type": "socks5",
+	}, proxyMap, map[string]P.ProxyProvider{}, []string{socks.name, http.name}, nil)
+	require.NoError(t, err)
+
+	selectable := group.Proxies()
+	require.Len(t, selectable, 1)
+	require.Equal(t, http.name, selectable[0].Name())
+
+	for _, pd := range group.Providers() {
+		pd.HealthCheck()
+	}
+
+	require.EqualValues(t, 1, http.tests.Load())
+	require.Zero(t, socks.tests.Load(), "excluded proxy was health checked")
+}
