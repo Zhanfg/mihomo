@@ -21,6 +21,7 @@ const (
 	OpSavePrefetch
 	OpSaveRanking
 	OpSaveHostFailures
+	OpSaveVector
 	OpDeleteData
 )
 
@@ -30,6 +31,7 @@ const (
 	KeyTypeStats        = "stats"
 	KeyTypeRanking      = "ranking"
 	KeyTypeHostFailures = "failures"
+	KeyTypeVector       = "vector"
 
 	WeightTypeTCP = "tcp"
 	WeightTypeUDP = "udp"
@@ -236,6 +238,8 @@ func formatOperationKey(op *StoreOperation) string {
 		return FormatDBKey(KeyTypeRanking, op.Config, op.Group)
 	case OpSaveHostFailures:
 		return FormatDBKey(KeyTypeHostFailures, op.Config, op.Group, op.Target)
+	case OpSaveVector:
+		return FormatDBKey(KeyTypeVector, op.Config, op.Group, op.Target)
 	case OpDeleteData:
 		kt := op.KeyType
 		if kt == "" {
