@@ -34,7 +34,6 @@ func TestModelCalibrationWeightType(t *testing.T) {
 	require.Equal(t, WeightTypeModelCalibrationUDP, ModelCalibrationWeightType(true))
 }
 
-
 func TestModelCalibrationWeightTypeForIP(t *testing.T) {
 	require.Equal(t, WeightTypeModelCalibrationTCP4, ModelCalibrationWeightTypeForIP(false, netip.MustParseAddr("1.1.1.1")))
 	require.Equal(t, WeightTypeModelCalibrationTCP6, ModelCalibrationWeightTypeForIP(false, netip.MustParseAddr("2606:4700:4700::1111")))
