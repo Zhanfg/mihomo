@@ -64,7 +64,6 @@ jobs:
             component/keepalive/default_other.go
             component/smart/memory.go
             component/smart/memory_test.go
-            component/smart/weight.go
             component/smart/weight_adaptive_test.go
             dns/connection_pool.go
             hub/executor/concurrent_load_android.go
