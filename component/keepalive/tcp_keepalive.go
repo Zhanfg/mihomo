@@ -2,7 +2,6 @@ package keepalive
 
 import (
 	"net"
-	"runtime"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -30,12 +29,14 @@ func KeepAliveInterval() time.Duration {
 	return time.Duration(keepAliveInterval.Load())
 }
 
+// SetDisableKeepAlive follows the configured policy on every platform.
+//
+// Older Android builds forced keepalive off here as a compatibility workaround.
+// Modern Android kernels and Go expose TCP_KEEPIDLE/TCP_KEEPINTVL/TCP_KEEPCNT,
+// and forcibly disabling probes makes long-lived proxy sessions much more likely
+// to die behind mobile NAT while the app is in the background.
 func SetDisableKeepAlive(disable bool) {
-	if runtime.GOOS == "android" {
-		setDisableKeepAlive(true)
-	} else {
-		setDisableKeepAlive(disable)
-	}
+	setDisableKeepAlive(disable)
 }
 
 func setDisableKeepAlive(disable bool) {
