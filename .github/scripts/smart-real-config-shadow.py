@@ -218,6 +218,22 @@ def structural_checks(m,cfg):
         "rule_type_counts":dict(Counter(expand_types(m["rle"]))),
     }
 
+
+def make_hermetic_runtime_cfg(cfg):
+    # Preserve production Smart/geodata requirements in structural validation,
+    # but keep the runtime shadow fully offline and reproducible.
+    runtime=json.loads(json.dumps(cfg, ensure_ascii=False))
+    for g in runtime["proxy-groups"]:
+        if g.get("type")=="smart":
+            g["uselightgbm"]=False
+            g["prefer-asn"]=False
+    for i,r in enumerate(runtime["rules"]):
+        if r.startswith("GEOSITE,"):
+            runtime["rules"][i]="DOMAIN-SUFFIX,shadow-geosite-cn.test,🇨🇳 本地直连"
+        elif r.startswith("GEOIP,"):
+            runtime["rules"][i]="IP-CIDR,203.0.113.0/24,🇨🇳 本地直连,no-resolve"
+    return runtime
+
 class State:
     lock=threading.Lock()
     provider_hits=Counter()
@@ -234,7 +250,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/health/"):
             self.send_body(204); return
-        m=re.match(r"^/providers/([^/?]+)\\.yaml",self.path)
+        m=re.match(r"^/providers/([^/?]+)\.yaml",self.path)
         if m:
             name=m.group(1)
             with State.lock:
@@ -243,7 +259,7 @@ class Handler(BaseHTTPRequestHandler):
             body=yaml.safe_dump({"proxies":[{"name":f"{name}:{n}","type":"direct","udp":True} for n in REGION_NODES]},
                                 allow_unicode=True,sort_keys=False).encode()
             self.send_body(200,body,"text/yaml"); return
-        m=re.match(r"^/rules/([^/?]+)\\.yaml",self.path)
+        m=re.match(r"^/rules/([^/?]+)\.yaml",self.path)
         if m:
             name=m.group(1)
             with State.lock:
@@ -332,7 +348,8 @@ def runtime_checks(bin_path,cfg,work,art):
 
         summary={"groups_loaded":88,"proxy_providers_loaded":11,"rule_providers_loaded":71,
                  "rules_loaded":1357,"smart_rule_bootstrap":"pass",
-                 "provider_last_good_containment":"pass","rule_provider_recovery":"pass"}
+                 "provider_last_good_containment":"pass","rule_provider_recovery":"pass",
+                 "external_downloads":"disabled-in-shadow-runtime"}
         (art/"runtime-summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2))
         return summary
     finally:
@@ -353,7 +370,8 @@ def main():
     art=Path(a.artifacts); art.mkdir(parents=True,exist_ok=True)
     structural=structural_checks(m,cfg)
     (art/"structural-summary.json").write_text(json.dumps(structural,ensure_ascii=False,indent=2))
-    runtime=runtime_checks(a.bin,cfg,Path(a.work),art)
+    runtime_cfg=make_hermetic_runtime_cfg(cfg)
+    runtime=runtime_checks(a.bin,runtime_cfg,Path(a.work),art)
     print(json.dumps({"structural":structural,"runtime":runtime},ensure_ascii=False,indent=2))
     print("REAL_CONFIG_SHADOW_PASS")
 
