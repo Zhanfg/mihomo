@@ -79,12 +79,13 @@ jobs:
         with:
           ndk-version: r29-beta1
 
-      - name: Prepare embedded CA bundle
+      - name: Prepare embedded CA bundle and patch dependencies
         shell: bash
         run: |
           set -euo pipefail
           test -s /etc/ssl/certs/ca-certificates.crt
           cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+          go mod tidy
 
       - name: Build final Android arm64 Smart eBPF core
         shell: bash
