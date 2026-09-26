@@ -12,6 +12,8 @@ on:
       - ".github/scripts/smart-ebpf-routing-smoke.sh"
       - ".github/scripts/smart-accelerated-day-soak.sh"
       - ".github/scripts/smart-accelerated-week-soak.sh"
+      - ".github/fixtures/substore-smart-refined-20260925.shadow.yaml.gz.b64"
+      - ".github/scripts/smart-real-config-shadow.py"
       - "adapter/**"
       - "component/**"
       - "config/**"
@@ -138,6 +140,68 @@ jobs:
           name: smart-profile-diagnostics-${{ github.run_id }}
           path: |
             .profile-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+
+  real-config-shadow:
+    name: Real config shadow / 11 providers / 88 groups / 71 rulesets / 1357 rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: smart-unit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install shadow-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl jq python3 python3-yaml
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build real-config shadow core
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-real-shadow-${GITHUB_SHA::7}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-real-shadow-test
+
+      - name: Validate uploaded production topology and hermetic runtime shadow
+        run: |
+          python3 .github/scripts/smart-real-config-shadow.py \
+            --fixture .github/fixtures/substore-smart-refined-20260925.shadow.yaml.gz.b64 \
+            --bin "$PWD/mihomo-real-shadow-test"
+
+      - name: Publish real-config shadow summary
+        if: always()
+        run: |
+          echo "### Real configuration shadow" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f .real-shadow-artifacts/structural-summary.json ]]; then
+            echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
+            cat .real-shadow-artifacts/structural-summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f .real-shadow-artifacts/runtime-summary.json ]]; then
+            echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
+            cat .real-shadow-artifacts/runtime-summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload real-config shadow diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-real-config-shadow-${{ github.run_id }}
+          path: |
+            .real-shadow-artifacts/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
