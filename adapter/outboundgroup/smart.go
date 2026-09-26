@@ -2017,17 +2017,18 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// snapshot overwrite the newer one.
 	s.saveStatsRecord(target, proxy, statsSnapshot)
 
-	// Learn one compact target centroid from the same close event. This is a
-	// projection of data we already collected; no extra network request or
-	// background worker is created. Successful and failed profiles are kept
-	// separately so Smart can move toward proven shapes and away from repeated
-	// bad ones without memorising one exact node name.
+	// Decide whether this close is informative while the consistent stats
+	// snapshot is still under the (target,node) lock. The actual vector
+	// projection/write happens after releasing this lock so it can safely take
+	// its own target-vector shard without any lock-order cycle.
 	vectorSuccess := err == nil && !isDegraded && !failedBlock && blockCode == smart.BlockNone
-	// Failures are rare and information-dense, so learn every one. Successful
-	// closes are sampled from stats we already have: learn the first few
-	// quickly, then one in eight. This avoids vector projection/MMDB/cache work
-	// on every short mobile connection without adding another timer/map.
 	vectorSample := !vectorSuccess || statsSnapshot.Success <= 4 || statsSnapshot.Success%8 == 0
+
+	// Closing stalled connections and vector learning can block/take other
+	// locks, so both run outside the per-(target,node) stats lock.
+	lock.Unlock()
+	locked = false
+
 	if vectorSample {
 		vectorProfile := adapter.BuildNodeVector(proxy, s.testUrl, newWeight)
 		vectorStrength := float32(0.75)
@@ -2036,11 +2037,6 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		}
 		s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorProfile.Tags[:], vectorSuccess, vectorStrength)
 	}
-
-	// Closing stalled connections can block on I/O, so it runs without the
-	// lock; the stats goroutines those closes spawn take it.
-	lock.Unlock()
-	locked = false
 
 	if isDegraded || failedBlock {
 		s.closeStalledConnections(metadata, proxyName, target)
