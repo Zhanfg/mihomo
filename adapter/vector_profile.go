@@ -12,7 +12,10 @@ import (
 // Smart has already narrowed the candidate set; a fixed float32 vector is
 // cheaper than maintaining a heavyweight ANN index for tens/hundreds of
 // proxies and keeps Android heap/GC pressure predictable.
-const NodeVectorSize = 12
+const (
+	NodeVectorSize = 12
+	NodeVectorTags = 8
+)
 
 const (
 	vectorHealth = iota
@@ -37,6 +40,7 @@ const (
 // comparable qualities used by the Smart reranker.
 type NodeVectorProfile struct {
 	Vector [NodeVectorSize]float32
+	Tags   [NodeVectorTags]uint64
 
 	Protocol string
 	Provider string
@@ -61,6 +65,29 @@ func clamp01(v float64) float32 {
 	default:
 		return float32(v)
 	}
+}
+
+func vectorTagHash(value string) uint64 {
+	value = strings.TrimSpace(strings.ToLower(value))
+	if value == "" {
+		return 0
+	}
+	// FNV-1a 64. The tag's position defines its semantic type, so the raw
+	// string is enough; keeping only 64 bits makes persistent target memory
+	// fixed-size without retaining duplicate provider/vendor strings.
+	const (
+		offset uint64 = 14695981039346656037
+		prime  uint64 = 1099511628211
+	)
+	h := offset
+	for i := 0; i < len(value); i++ {
+		h ^= uint64(value[i])
+		h *= prime
+	}
+	if h == 0 {
+		return 1
+	}
+	return h
 }
 
 func capabilityValue(known, ok bool) float32 {
@@ -212,6 +239,18 @@ func BuildNodeVector(p C.Proxy, testURL string, learnedWeight float64) NodeVecto
 	} else {
 		profile.Vector[vectorLearnedTrust] = 0.5
 	}
+
+	// Fixed sparse tags let target memory learn categorical preferences without
+	// one-hot vectors or heap maps. Exact strings stay available in the profile
+	// for API/debug output; persistence stores only stable 64-bit fingerprints.
+	profile.Tags[0] = vectorTagHash(profile.Protocol)
+	profile.Tags[1] = vectorTagHash(profile.Provider)
+	profile.Tags[2] = vectorTagHash(profile.Country4)
+	profile.Tags[3] = vectorTagHash(profile.Country6)
+	profile.Tags[4] = vectorTagHash(profile.ASN4)
+	profile.Tags[5] = vectorTagHash(profile.ASN6)
+	profile.Tags[6] = vectorTagHash(profile.Vendor4)
+	profile.Tags[7] = vectorTagHash(profile.Vendor6)
 
 	return profile
 }
