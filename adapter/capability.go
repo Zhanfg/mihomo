@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -71,9 +72,18 @@ var (
 	capabilityCache          sync.Map // proxy identity -> *capabilityState
 	capabilityCacheSweepRun  atomic.Uint32
 	capabilityCacheSweepNext atomic.Int64
-	// limit concurrent probes so a large provider doesn't stampede
-	capabilityProbeSem = make(chan struct{}, 8)
+	// Limit concurrent probes so a large provider doesn't stampede. Android
+	// runs fewer capability probes in parallel to avoid waking many radios,
+	// sockets and TLS handshakes at once during provider refresh.
+	capabilityProbeSem = make(chan struct{}, capabilityProbeConcurrency())
 )
+
+func capabilityProbeConcurrency() int {
+	if runtime.GOOS == "android" {
+		return 4
+	}
+	return 8
+}
 
 const (
 	capabilityCacheSweepInterval = 5 * time.Minute
