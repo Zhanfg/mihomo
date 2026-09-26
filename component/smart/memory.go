@@ -3,6 +3,7 @@ package smart
 import (
 	"encoding/json"
 	"math"
+	"runtime"
 	"sync"
 	"time"
 
@@ -67,37 +68,37 @@ func InitCache() {
 	globalCacheParams.MaxTargets = MinTargetsLimit
 
 	targetCache = lru.New[string, string](
-		lru.WithSize[string, string](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, string](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, string](300),
 		lru.WithStale[string, string](true),
 	)
 
 	unwrapCache = lru.New[string, UnwrapMap](
-		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, UnwrapMap](600),
 		lru.WithStale[string, UnwrapMap](true),
 	)
 
 	recordCache = lru.New[string, *AtomicStatsRecord](
-		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, *AtomicStatsRecord](300),
 		lru.WithStale[string, *AtomicStatsRecord](true),
 	)
 
 	dbResultCache = lru.New[string, map[string][]byte](
-		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, map[string][]byte](300),
 		lru.WithStale[string, map[string][]byte](true),
 	)
 
 	blockedNodesCache = lru.New[string, map[string]bool](
-		lru.WithSize[string, map[string]bool](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, map[string]bool](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, map[string]bool](300),
 		lru.WithStale[string, map[string]bool](true),
 	)
 
 	hostStatusCache = lru.New[string, *HostStatus](
-		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, *HostStatus](300),
 		lru.WithStale[string, *HostStatus](true),
 	)
@@ -239,20 +240,62 @@ func (s *Store) UpdateBlockedNodesCache(group, config string, updates map[string
 	blockedNodesCache.Set(cacheKey, newBlocked)
 }
 
+const (
+	androidCacheSoftHeap   = 96 << 20
+	androidCacheHighHeap   = 160 << 20
+	androidCacheMaxHeap    = 224 << 20
+	androidCacheMaxTargets = 2000
+)
+
+// smartCacheTargetLimit keeps the learning caches proportional to both system
+// pressure and the core's own live heap. Android phones can have huge physical
+// RAM, so system percentage alone lets a long-running Smart database grow far
+// beyond what one proxy process needs. This cap changes only cache residency;
+// persisted learning records stay in bbolt and are reloaded on demand.
+func smartCacheTargetLimit(memoryUsage float64, heapAlloc uint64, android bool) int {
+	limit := MinTargetsLimit
+	if memoryUsage <= 0.9 {
+		adjustFactor := (1 - memoryUsage) * 0.5
+		limit += int(float64(MaxTargetsLimit-MinTargetsLimit) * adjustFactor)
+	}
+	if !android {
+		return limit
+	}
+	if limit > androidCacheMaxTargets {
+		limit = androidCacheMaxTargets
+	}
+	switch {
+	case heapAlloc >= androidCacheMaxHeap:
+		return MinTargetsLimit
+	case heapAlloc >= androidCacheHighHeap:
+		if limit > 750 {
+			return 750
+		}
+	case heapAlloc >= androidCacheSoftHeap:
+		if limit > 1200 {
+			return 1200
+		}
+	}
+	return limit
+}
+
 // 调整缓存参数
 func (s *Store) AdjustCacheParameters() {
 	cacheAdjustMutex.Lock()
 	defer cacheAdjustMutex.Unlock()
 
 	memoryUsage := GetSystemMemoryUsage()
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	maxTargets := smartCacheTargetLimit(memoryUsage, mem.HeapAlloc, runtime.GOOS == "android")
 
 	globalCacheParams.mutex.Lock()
 
 	isFirstRun := globalCacheParams.LastMemoryUsage == 0
-	needAdjust := isFirstRun
-
-	if !isFirstRun {
-		memoryChanged := math.Abs(memoryUsage - globalCacheParams.LastMemoryUsage) > 0.05
+	oldTargets := globalCacheParams.MaxTargets
+	needAdjust := isFirstRun || oldTargets != maxTargets
+	if !isFirstRun && !needAdjust {
+		memoryChanged := math.Abs(memoryUsage-globalCacheParams.LastMemoryUsage) > 0.05
 		needAdjust = memoryChanged
 	}
 
@@ -263,21 +306,25 @@ func (s *Store) AdjustCacheParameters() {
 		return
 	}
 
-	if memoryUsage > 0.9 {
-		globalCacheParams.MaxTargets = MinTargetsLimit
-		globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit
-	} else {
-		adjustFactor := (1 - memoryUsage) * 0.5
-		globalCacheParams.MaxTargets = MinTargetsLimit + int(float64(MaxTargetsLimit-MinTargetsLimit)*adjustFactor)
-		globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit + int(float64(MaxBatchThreshLimit-MinBatchThreshLimit)*adjustFactor)
+	globalCacheParams.MaxTargets = maxTargets
+	// Smaller resident sets also need smaller write batches so dirty records do
+	// not sit in RAM waiting for a desktop-sized threshold.
+	ratio := float64(maxTargets-MinTargetsLimit) / float64(MaxTargetsLimit-MinTargetsLimit)
+	if ratio < 0 {
+		ratio = 0
 	}
-	maxTargets := globalCacheParams.MaxTargets
+	if ratio > 1 {
+		ratio = 1
+	}
+	globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit +
+		int(float64(MaxBatchThreshLimit-MinBatchThreshLimit)*ratio)
 	batchSaveThreshold := globalCacheParams.BatchSaveThreshold
 	globalCacheParams.mutex.Unlock()
 
-	log.Infoln("[SmartStore] Parameters adjusted: MaxTargets=%d, BatchThreshold=%d",
+	log.Debugln("[SmartStore] Cache budget adjusted: MaxTargets=%d, BatchThreshold=%d, Heap=%d MiB",
 		maxTargets,
-		batchSaveThreshold)
+		batchSaveThreshold,
+		mem.HeapAlloc>>20)
 
 	cacheSize := maxTargets / 4
 	targetCache.Resize(cacheSize)

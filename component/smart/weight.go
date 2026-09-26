@@ -21,6 +21,58 @@ var presetSceneParams = [4]SceneParams{
 	sceneTransfer:    {0.5, 0.2, 0.3, 1.8, 0.7, 0.9, 1.0, 0.1},
 }
 
+const (
+	WeightTypeModelCalibrationTCP = "model-cal:tcp"
+	WeightTypeModelCalibrationUDP = "model-cal:udp"
+)
+
+// ModelCalibrationWeightType returns the persistent online-calibration slot for
+// a transport. It is stored in the existing StatsRecord weights map, so the
+// loaded LightGBM model gains per-target/node adaptation without a second model
+// file, a new database, or an unbounded in-memory learner.
+func ModelCalibrationWeightType(isUDP bool) string {
+	if isUDP {
+		return WeightTypeModelCalibrationUDP
+	}
+	return WeightTypeModelCalibrationTCP
+}
+
+// AdaptModelPrediction turns the static LightGBM score into a small online
+// ensemble. The model remains the primary signal; the traditional scorer acts
+// as a continuously observed residual target. A bounded EWMA calibration is
+// persisted with the normal Smart stats, so restarts retain what the core
+// learned while RAM stays O(existing records).
+func AdaptModelPrediction(modelWeight, observedWeight, oldCalibration float64, samples int64) (weight, calibration float64) {
+	if math.IsNaN(modelWeight) || math.IsInf(modelWeight, 0) || modelWeight <= 0 ||
+		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) || observedWeight <= 0 {
+		if oldCalibration <= 0 {
+			oldCalibration = 1
+		}
+		return modelWeight, oldCalibration
+	}
+	if oldCalibration <= 0 || math.IsNaN(oldCalibration) || math.IsInf(oldCalibration, 0) {
+		oldCalibration = 1
+	}
+
+	target := observedWeight / modelWeight
+	target = math.Max(0.60, math.Min(1.40, target))
+
+	// Learn slowly at first, then a little faster once the target/node pair has
+	// enough evidence. The cap prevents one bad session from rewriting the
+	// loaded model's behavior.
+	evidence := math.Min(1, math.Log1p(float64(max(int64(0), samples)))/math.Log(65))
+	alpha := 0.08 + 0.10*evidence
+	calibration = oldCalibration*(1-alpha) + target*alpha
+	calibration = math.Max(0.65, math.Min(1.35, calibration))
+
+	// The global model keeps most of the vote. The local heuristic contributes
+	// more while evidence is sparse, then becomes a smaller stabilizing term.
+	modelShare := 0.60 + 0.25*evidence
+	adaptedModel := modelWeight * calibration
+	weight = adaptedModel*modelShare + observedWeight*(1-modelShare)
+	return weight, calibration
+}
+
 type (
 	SceneParams struct {
 		successRateWeight float64

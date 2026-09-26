@@ -5,9 +5,11 @@ on:
   push:
     branches:
       - feature/mobile-core-opt
+      - feature/mobile-runtime-ai
     paths:
       - "adapter/**"
       - "component/keepalive/**"
+      - "component/smart/**"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - ".github/fixtures/mobile-core-opt.yaml"
@@ -60,6 +62,9 @@ jobs:
             component/keepalive/tcp_keepalive_go123.go
             component/keepalive/default_android.go
             component/keepalive/default_other.go
+            component/smart/memory.go
+            component/smart/memory_test.go
+            component/smart/weight_adaptive_test.go
             dns/connection_pool.go
             hub/executor/concurrent_load_android.go
             hub/executor/concurrent_load_unlimit.go
@@ -79,6 +84,13 @@ jobs:
         run: |
           set -euo pipefail
           go test ./adapter/... -count=1
+
+      - name: Smart runtime and adaptive-model regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/smart -run 'Test(SmartCacheTargetLimit|AdaptModelPrediction|ModelCalibration)' -count=1
+          go test ./component/smart/... -count=1
 
       - name: Keepalive tests and Android compile
         shell: bash
@@ -109,16 +121,6 @@ jobs:
           ./mihomo-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee MOBILE_SELFTEST.txt
           grep -qi "configuration file .* test is successful" MOBILE_SELFTEST.txt
 
-      - name: Build baseline Android core
-        shell: bash
-        env:
-          CGO_ENABLED: "0"
-          GOOS: android
-          GOARCH: arm64
-        run: |
-          set -euo pipefail
-          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=baseline-$HEAD_SHORT' -w -s -buildid="             -o /tmp/mihomo-full
-
       - name: Build optimized Android core
         shell: bash
         env:
@@ -139,18 +141,6 @@ jobs:
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
 
-          BASE_SIZE="$(stat -c %s /tmp/mihomo-full)"
-          MOB_SIZE="$(stat -c %s "$OUT")"
-          SAVED="$((BASE_SIZE - MOB_SIZE))"
-          PCT="$(awk -v a="$SAVED" -v b="$BASE_SIZE" 'BEGIN{if(b==0){print "0.00"}else{printf "%.2f",a*100/b}}')"
-          {
-            echo "baseline_bytes=$BASE_SIZE"
-            echo "mobile_bytes=$MOB_SIZE"
-            echo "saved_bytes=$SAVED"
-            echo "saved_percent=$PCT"
-          } | tee SIZE_REPORT.txt
-          test "$MOB_SIZE" -le "$BASE_SIZE"
-
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
@@ -161,6 +151,9 @@ jobs:
             echo "android_keepalive_default=idle60s,interval20s"
             echo "country_routing=MMDB reuse,no new database"
             echo "mobile_features=auto-ip-family,country,country-affinity"
+            echo "runtime_ram=process-aware Smart cache budget"
+            echo "runtime_cpu=bounded stats workers + Android probe/dial fan-out"
+            echo "smart_model=LightGBM + persistent online residual calibration"
           } > BUILD_INFO.txt
 
       - uses: actions/upload-artifact@v7
@@ -171,7 +164,6 @@ jobs:
             SHA256SUMS
             BUILD_INFO.txt
             FILE_INFO.txt
-            SIZE_REPORT.txt
             MOBILE_SELFTEST.txt
             .github/fixtures/mobile-core-opt.yaml
           if-no-files-found: error

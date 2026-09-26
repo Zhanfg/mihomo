@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,6 +59,8 @@ const (
 	deterministicDialPrefix = 3
 	parallelDials           = 5
 	connectThreshold        = 5.0
+	statsQueueSize          = 512
+	maintenanceActiveWindow = 30 * time.Minute
 
 	floodWindow    = 2 * time.Second
 	floodThreshold = 50
@@ -99,6 +102,53 @@ const (
 // this every smart group in the config would pay that timeout again on every
 // reload.
 const asnInitRetryAfter = 5 * time.Minute
+
+var (
+	smartStatsOnce  sync.Once
+	smartStatsQueue chan func()
+)
+
+func smartWorkerCount() int {
+	if runtime.GOOS == "android" {
+		return 2
+	}
+	return 4
+}
+
+func smartParallelism() int {
+	if runtime.GOOS == "android" {
+		return 3
+	}
+	return parallelDials
+}
+
+func startSmartStatsWorkers() {
+	smartStatsQueue = make(chan func(), statsQueueSize)
+	for i := 0; i < smartWorkerCount(); i++ {
+		go func() {
+			for job := range smartStatsQueue {
+				job()
+			}
+		}()
+	}
+}
+
+// enqueueSmartStats deliberately backpressures the close path when the bounded
+// queue is full instead of spawning an unbounded goroutine per connection.
+// Under normal load it is non-blocking; under a burst it trades a little close
+// latency for bounded RAM and scheduler pressure.
+func enqueueSmartStats(ctx context.Context, job func()) bool {
+	smartStatsOnce.Do(startSmartStatsWorkers)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case smartStatsQueue <- job:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
 
 var (
 	asnInitAccess    sync.Mutex
@@ -423,11 +473,12 @@ func smartDialBatchBounds(total, iteration int, pinned bool) (begin, end int) {
 		}
 		return iteration, iteration + 1
 	}
-	begin = deterministicDialPrefix + (iteration-deterministicDialPrefix)*parallelDials
+	width := smartParallelism()
+	begin = deterministicDialPrefix + (iteration-deterministicDialPrefix)*width
 	if begin >= total {
 		return 0, 0
 	}
-	end = begin + parallelDials
+	end = begin + width
 	if end > total {
 		end = total
 	}
@@ -1219,6 +1270,9 @@ func (s *Smart) InitSmart() {
 }
 
 func (s *Smart) runPrefetch() {
+	if !s.maintenanceRecentlyActive(time.Now()) {
+		return
+	}
 	proxies := s.GetProxies(true)
 	proxyMap := make(map[string]bool, len(proxies))
 	for _, proxy := range proxies {
@@ -1228,6 +1282,9 @@ func (s *Smart) runPrefetch() {
 }
 
 func (s *Smart) updateNodeRanking() {
+	if !s.maintenanceRecentlyActive(time.Now()) {
+		return
+	}
 	proxies := s.GetProxies(true)
 	rankingWrapper, _ := s.store.GetNodeWeightRankingCache(s.Name(), s.configName)
 
@@ -1530,6 +1587,9 @@ func (s *Smart) calcMADMetrics(delays []float64) (currentAnomaly bool, unstable 
 }
 
 func (s *Smart) checkNodesStable() {
+	if !s.maintenanceRecentlyActive(time.Now()) {
+		return
+	}
 	if s.suppressStats.Load() {
 		return
 	}
@@ -1919,6 +1979,24 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	if s.useLightGBM && s.weightModel != nil {
 		calculatedWeight, ModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
+		if ModelPredicted {
+			// The shipped LightGBM model is global; calibrate it online with this
+			// target/node pair's real outcomes. The calibration lives in the
+			// existing Smart record, so it survives restarts without another
+			// resident model or a second database.
+			if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
+				calKey := smart.ModelCalibrationWeightType(isUDP)
+				oldCalibration := atomicRecord.GetWeight(calKey)
+				var newCalibration float64
+				calculatedWeight, newCalibration = smart.AdaptModelPrediction(
+					calculatedWeight,
+					observedWeight,
+					oldCalibration,
+					input.Success+input.Failure,
+				)
+				atomicRecord.SetWeight(calKey, newCalibration)
+			}
+		}
 	} else {
 		calculatedWeight, ModelPredicted = smart.CalculateWeight(input, priorityFactor)
 	}
@@ -1982,7 +2060,7 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		return false
 	}
 
-	go func() {
+	job := func() {
 		defer s.finishBackgroundWork()
 		// The degraded marker means this group closed the connection itself, so
 		// nothing about the close is the node's doing. checkNodeQuality honours
@@ -1992,7 +2070,11 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
 		}
 		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err)
-	}()
+	}
+	if !enqueueSmartStats(s.ctx, job) {
+		s.finishBackgroundWork()
+		return false
+	}
 	return true
 }
 
@@ -2309,6 +2391,11 @@ func (s *Smart) markTrafficActivity() {
 	s.lastTrafficActivity.Store(time.Now().UnixNano())
 }
 
+func (s *Smart) maintenanceRecentlyActive(now time.Time) bool {
+	last := s.lastTrafficActivity.Load()
+	return last != 0 && now.Sub(time.Unix(0, last)) <= maintenanceActiveWindow
+}
+
 func (s *Smart) trafficRecentlyActive(now time.Time) bool {
 	last := s.lastTrafficActivity.Load()
 	return last != 0 && now.Sub(time.Unix(0, last)) <= hostRecoveryActiveWindow
@@ -2415,7 +2502,7 @@ func (s *Smart) checkHostStatus() {
 
 	jobs := make(chan hostRecoveryItem)
 	var wg sync.WaitGroup
-	for i := 0; i < parallelDials; i++ {
+	for i := 0; i < smartParallelism(); i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
