@@ -216,7 +216,6 @@ func TestProxyIdentitySeparatesDelimiterCollisions(t *testing.T) {
 	}
 }
 
-
 func TestIPv4CapabilityProbeDoesNotMutateHealth(t *testing.T) {
 	p := &capabilityProbeProxy{}
 	entry := &capabilityEntry{}
