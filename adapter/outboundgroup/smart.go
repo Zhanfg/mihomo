@@ -817,46 +817,18 @@ func (s *Smart) setAffinityCountry(country string) {
 
 // desiredCountry returns the country constraint for this selection.
 //
-// Explicit country is strict. country-affinity is sticky but self-healing: it
-// keeps the last successful exit country across IPv4/IPv6, and drops the pin
-// only after every currently-known candidate for the target family proves it
-// cannot satisfy that country. Unknown capability is kept eligible while the
-// tiny exit probe warms up so startup does not go dark.
-func (s *Smart) desiredCountry(metadata *C.Metadata, all []C.Proxy) (country string, strict bool) {
+// Explicit country is strict. country-affinity is sticky and intentionally
+// constant-time on the hot path: we do not scan the whole provider on every
+// connection. If the pinned country yields no eligible node, filterProxies
+// clears it once and retries selection without the pin.
+func (s *Smart) desiredCountry() (country string, strict bool) {
 	if s.country != "" {
 		return s.country, true
 	}
 	if !s.countryAffinity {
 		return "", false
 	}
-	country = s.currentAffinityCountry()
-	if country == "" {
-		return "", false
-	}
-	knownFamily, ipv6 := metadataIPFamily(metadata)
-	if !knownFamily {
-		return country, false
-	}
-
-	anyUnknown := false
-	for _, p := range all {
-		known, candidateCountry := adapter.ExitCountryForProxy(p, ipv6)
-		if !known {
-			anyUnknown = true
-			continue
-		}
-		if strings.EqualFold(candidateCountry, country) {
-			return country, false
-		}
-	}
-	if anyUnknown {
-		return country, false
-	}
-
-	// The pinned country has no usable member for this address family anymore.
-	// Release it and let the next successful dial establish a new common exit.
-	s.setAffinityCountry("")
-	return "", false
+	return s.currentAffinityCountry(), false
 }
 
 func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
@@ -925,7 +897,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// enough. auto-ip-family is adaptive: confirmed mismatches are excluded,
 	// while unknown nodes may be used briefly as probes warm up.
 	preferIPv4, preferIPv6, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
-	desiredCountry, strictCountry := s.desiredCountry(metadata, all)
+	desiredCountry, strictCountry := s.desiredCountry()
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
 	}
@@ -1097,7 +1069,15 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		}
 	}
 
-	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || autoIPv4 || autoIPv6) {
+	if len(selected) == 0 && desiredCountry != "" && !strictCountry && s.countryAffinity {
+		// The sticky country is no longer usable for this family. Clear it and
+		// retry exactly once without a country pin; the successful winner will
+		// establish the next affinity country.
+		s.setAffinityCountry("")
+		return s.filterProxies(metadata, wildcardTarget, names, weights, all, minCount, isUDP)
+	}
+
+	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || autoIPv4 || autoIPv6 || strictCountry) {
 		// Caller-controlled empty-fallback defines the fail-closed behavior.
 		// For strict routing configurations this should be REJECT/REJECT-DROP.
 		selected = append(selected, s.EmptyFallback())
@@ -1138,14 +1118,16 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	}
 
 	if s.selected != "" {
+		desiredCountry, strictCountry := s.desiredCountry()
 		for _, p := range proxies {
-			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) {
+			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) &&
+				s.countryEligible(metadata, p, desiredCountry, strictCountry) {
 				return []C.Proxy{p}, true
 			}
 		}
-		// A fixed node that violates an explicit/automatic family constraint
-		// is not allowed to bypass that constraint; continue with normal Smart
-		// selection and let empty-fallback define the fail-closed outcome.
+		// A fixed node that violates an explicit/automatic family or country
+		// constraint is not allowed to bypass that constraint; continue with
+		// normal Smart selection and let empty-fallback define the outcome.
 	}
 
 	// use prefetch cache or compute in real time
