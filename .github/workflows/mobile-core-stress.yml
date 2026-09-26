@@ -1,0 +1,215 @@
+name: Mobile Core Stress
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/boxproxy-native-ebpf
+    paths:
+      - ".github/workflows/mobile-core-stress.yml"
+      - "adapter/**"
+      - "component/smart/**"
+      - "component/keepalive/**"
+      - "dns/**"
+      - "listener/sing_ebpf/**"
+      - "common/ebpf/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-core-stress
+  cancel-in-progress: true
+
+jobs:
+  race:
+    name: Race / Smart / DNS
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Race detector
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race ./adapter/outboundgroup ./component/smart ./dns ./component/keepalive             -count=1 -timeout=25m 2>&1 | tee RACE.txt
+
+      - name: Upload race report
+        uses: actions/upload-artifact@v7
+        with:
+          name: stress-race
+          path: RACE.txt
+
+  repeat:
+    name: Repeated Smart / eBPF regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Smart and DNS repeated stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v go test ./adapter/outboundgroup ./component/smart ./dns             -count=20 -timeout=30m 2>&1 | tee REPEAT_SMART_DNS.txt
+
+      - name: eBPF repeated stress
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v go test -tags "with_gvisor with_ebpf"             ./listener/sing_ebpf ./common/ebpf             -count=5 -timeout=30m 2>&1 | tee REPEAT_EBPF.txt
+
+      - name: Hot-path benchmarks
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "=== Smart benchmarks ==="
+            go test ./component/smart -run '^$' -bench '.' -benchmem -benchtime=2s || true
+            echo "=== eBPF benchmarks ==="
+            go test -tags "with_gvisor with_ebpf" ./listener/sing_ebpf               -run '^$' -bench '.' -benchmem -benchtime=2s || true
+          } | tee BENCH.txt
+
+      - name: Upload repeat reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: stress-repeat
+          path: |
+            REPEAT_SMART_DNS.txt
+            REPEAT_EBPF.txt
+            BENCH.txt
+
+  churn:
+    name: 5000-connection mixed-port churn
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Build Linux stress core
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHORT="$(git rev-parse --short=7 HEAD)"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=stress-$HEAD_SHORT' -w -s -buildid="               -o mihomo-stress
+
+      - name: Prepare local stress config
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mihomo-stress/www
+          printf 'ok\n' > /tmp/mihomo-stress/www/index.html
+          cat > /tmp/mihomo-stress/config.yaml <<'YAML'
+          mixed-port: 17890
+          allow-lan: false
+          mode: rule
+          log-level: error
+          ipv6: true
+          find-process-mode: off
+          profile:
+            store-selected: false
+            store-fake-ip: false
+          proxy-groups:
+            - name: STRESS
+              type: smart
+              proxies: [DIRECT]
+              url: http://127.0.0.1:18080/
+              interval: 60
+              lazy: false
+              uselightgbm: false
+              auto-ip-family: true
+              empty-fallback: REJECT
+          rules:
+            - MATCH,STRESS
+          YAML
+          ./mihomo-stress -t -d /tmp/mihomo-stress -f /tmp/mihomo-stress/config.yaml
+
+      - name: Run high-concurrency connection churn
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /tmp/mihomo-stress/www
+          python3 -m http.server 18080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
+          HTTP_PID=$!
+          cd "$GITHUB_WORKSPACE"
+
+          ./mihomo-stress -d /tmp/mihomo-stress -f /tmp/mihomo-stress/config.yaml             >/tmp/mihomo.log 2>&1 &
+          MIHOMO_PID=$!
+
+          cleanup() {
+            kill "$MIHOMO_PID" "$HTTP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 100); do
+            if curl -fsS --max-time 2 -x http://127.0.0.1:17890               http://127.0.0.1:18080/ >/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          (
+            while kill -0 "$MIHOMO_PID" 2>/dev/null; do
+              TS=$(date +%s%3N)
+              RSS=$(awk '/VmRSS:/{print $2}' /proc/$MIHOMO_PID/status 2>/dev/null || echo 0)
+              THR=$(awk '/Threads:/{print $2}' /proc/$MIHOMO_PID/status 2>/dev/null || echo 0)
+              CPU=$(ps -p "$MIHOMO_PID" -o %cpu= 2>/dev/null | xargs || echo 0)
+              echo "$TS $RSS $THR $CPU"
+              sleep 0.2
+            done
+          ) > RESOURCE_SAMPLES.txt &
+          MON_PID=$!
+
+          /usr/bin/time -v sh -c '
+            seq 1 5000 | xargs -P 32 -n 1 sh -c '"'"'
+              curl -fsS --connect-timeout 2 --max-time 4                 -x http://127.0.0.1:17890                 http://127.0.0.1:18080/ >/dev/null
+            '"'"' sh
+          ' 2> LOAD_TIME.txt
+
+          sleep 2
+          kill "$MON_PID" 2>/dev/null || true
+          wait "$MON_PID" 2>/dev/null || true
+
+          kill -0 "$MIHOMO_PID"
+          curl -fsS --max-time 3 -x http://127.0.0.1:17890             http://127.0.0.1:18080/ >/dev/null
+
+          awk '
+            BEGIN { maxrss=0; maxthr=0; maxcpu=0 }
+            {
+              if ($2+0 > maxrss) maxrss=$2+0
+              if ($3+0 > maxthr) maxthr=$3+0
+              if ($4+0 > maxcpu) maxcpu=$4+0
+            }
+            END {
+              printf "max_core_rss_kb=%d\nmax_core_threads=%d\nmax_core_cpu_percent=%.2f\n",
+                maxrss,maxthr,maxcpu
+            }
+          ' RESOURCE_SAMPLES.txt | tee RESOURCE_SUMMARY.txt
+
+          echo "requests=5000" | tee -a RESOURCE_SUMMARY.txt
+          echo "parallelism=32" | tee -a RESOURCE_SUMMARY.txt
+          echo "core_alive_after_load=YES" | tee -a RESOURCE_SUMMARY.txt
+          tail -n 120 /tmp/mihomo.log > MIHOMO_TAIL.txt
+
+      - name: Upload churn reports
+        uses: actions/upload-artifact@v7
+        with:
+          name: stress-churn
+          path: |
+            RESOURCE_SAMPLES.txt
+            RESOURCE_SUMMARY.txt
+            LOAD_TIME.txt
+            MIHOMO_TAIL.txt
