@@ -468,6 +468,11 @@ TOTAL_REQ=0
 TOTAL_BYTES=0
 DAY_FAILS=0
 FAKE6_FAILS=0
+HOST_IPV6_CAPABLE=0
+if ip -6 route show default | grep -q '^default'; then
+  HOST_IPV6_CAPABLE=1
+fi
+echo "host_ipv6_capable=$HOST_IPV6_CAPABLE" | tee "$ART/ipv6-capability.txt"
 START_NS="$(date +%s%N)"
 : > "$ART/hourly.jsonl"
 : > "$ART/events.log"
@@ -522,15 +527,17 @@ for vh in $(seq 0 167); do
     (( dns_ok >= 94 )) || die "day $day fake-IP burst below 94/96: $dns_ok"
     before="$(fakeip_query stable-d$day.week.test A)"
     v6_before="$(fakeip_query stable-d$day.week.test AAAA)"
-    if [[ ! "$v6_before" =~ ^fc ]]; then
+    if [[ "$HOST_IPV6_CAPABLE" == "1" && ! "$v6_before" =~ ^fc ]]; then
       FAKE6_FAILS=$((FAKE6_FAILS+1))
       echo "day=$day event=fakeip6-missing value=$v6_before" >> "$ART/events.log"
+    elif [[ "$HOST_IPV6_CAPABLE" == "0" && -z "$v6_before" ]]; then
+      echo "day=$day event=fakeip6-capability-skip" >> "$ART/events.log"
     fi
     cache_status /cache/dns/flush "$ART/dns-flush-d$day.txt"
     after="$(fakeip_query stable-d$day.week.test A)"
     v6_after="$(fakeip_query stable-d$day.week.test AAAA)"
     [[ "$before" == "$after" ]] || die "DNS-cache flush changed fake-IP mapping on day $day"
-    if [[ "$v6_before" != "$v6_after" ]]; then
+    if [[ "$HOST_IPV6_CAPABLE" == "1" && "$v6_before" != "$v6_after" ]]; then
       echo "day=$day event=fakeip6-changed before=$v6_before after=$v6_after" >> "$ART/events.log"
       FAKE6_FAILS=$((FAKE6_FAILS+1))
     fi
@@ -543,9 +550,11 @@ for vh in $(seq 0 167); do
     fresh="$(fakeip_query "post-flush-d$day.week.test" A)"
     fresh6="$(fakeip_query "post-flush-d$day.week.test" AAAA)"
     [[ "$fresh" =~ ^198\.18\. ]] || die "fake-IP did not recover after flush on day $day"
-    if [[ ! "$fresh6" =~ ^fc ]]; then
+    if [[ "$HOST_IPV6_CAPABLE" == "1" && ! "$fresh6" =~ ^fc ]]; then
       FAKE6_FAILS=$((FAKE6_FAILS+1))
       echo "day=$day hour=11 event=fakeip6-postflush-missing value=$fresh6" >> "$ART/events.log"
+    elif [[ "$HOST_IPV6_CAPABLE" == "0" && -z "$fresh6" ]]; then
+      echo "day=$day hour=11 event=fakeip6-postflush-capability-skip" >> "$ART/events.log"
     fi
     echo "day=$day hour=11 event=fakeip-flush fresh4=$fresh fresh6=$fresh6" >> "$ART/events.log"
   fi
@@ -673,6 +682,7 @@ success=$TOTAL_OK
 success_basis_points=$SUCCESS_BP
 bytes=$TOTAL_BYTES
 low_success_hours=$DAY_FAILS
+host_ipv6_capable=$HOST_IPV6_CAPABLE
 fakeip6_failures=$FAKE6_FAILS
 base_rss_kb=$BASE_RSS
 end_rss_kb=$END_RSS
