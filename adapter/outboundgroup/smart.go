@@ -1014,10 +1014,22 @@ func (s *Smart) ipFamilyEligible(metadata *C.Metadata, p C.Proxy) bool {
 	// Only explicit require-* directives are hard admission rules.
 	//
 	// auto-ip-family is availability-first: it contributes ranking penalties
-	// through ipFamilyPolicy/AddCapabilityPenaltyExtended, but never removes a
-	// node solely because an external capability probe failed. A transient
-	// api4/api6 failure must not turn every Smart group into REJECT.
+	// and invalidates a stale cached pin after a confirmed mismatch, but never
+	// makes the whole group unavailable solely because public probe endpoints
+	// are temporarily bad.
 	return adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false)
+}
+
+func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
+	if p == nil || !s.autoIPFamily {
+		return false
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return false
+	}
+	known, ok := adapter.IPFamilyCapabilityKnown(p, ipv6)
+	return known && !ok
 }
 
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
@@ -1034,16 +1046,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
 	}
 	autoFamilyMismatch := func(p C.Proxy) bool {
-		switch {
-		case autoIPv4:
-			known, ok := adapter.IPFamilyCapabilityKnown(p, false)
-			return known && !ok
-		case autoIPv6:
-			known, ok := adapter.IPFamilyCapabilityKnown(p, true)
-			return known && !ok
-		default:
-			return false
-		}
+		return s.autoIPFamilyMismatch(metadata, p)
 	}
 
 	var proxyByName map[string]C.Proxy
