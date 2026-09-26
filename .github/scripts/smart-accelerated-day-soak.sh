@@ -186,7 +186,8 @@ bind-address: '*'
 ipv6: true
 mode: rule
 log-level: warning
-rules: [MATCH,DIRECT]
+rules:
+  - MATCH,DIRECT
 YAML
 cp "$PF_CFG" "$PS_CFG"
 
