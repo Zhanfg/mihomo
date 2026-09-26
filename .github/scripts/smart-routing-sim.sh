@@ -211,6 +211,18 @@ sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" http 2001:db8:20:
 sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" udp 10.20.0.3 18081 foreign-udp-v4 >"${ART}/wan-udp-v4.log" 2>&1 &
 sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" udp 2001:db8:20::3 18081 foreign-udp-v6 >"${ART}/wan-udp-v6.log" 2>&1 &
 
+sleep 0.5
+log "Preflight WAN IPv4/IPv6 endpoints before transparent interception"
+sudo ip netns exec "$NS_WAN" ss -lntup | tee "${ART}/wan-listeners.txt"
+curl --noproxy '*' -fsS --max-time 5 http://10.20.0.2:18080/preflight-v4 | tee "${ART}/preflight-host-v4.txt"
+curl --noproxy '*' -g -6 -v --max-time 5 'http://[2001:db8:20::2]:18080/preflight-v6' \
+  >"${ART}/preflight-host-v6.txt" 2>"${ART}/preflight-host-v6.stderr"
+grep -q 'domestic-v6' "${ART}/preflight-host-v6.txt" || {
+  echo "IPv6 WAN server preflight failed before TProxy" >&2
+  cat "${ART}/preflight-host-v6.stderr" >&2 || true
+  exit 1
+}
+
 cat > "$PF_CFG" <<'YAML'
 socks-port: 1080
 allow-lan: true
@@ -361,9 +373,27 @@ echo "$FAILOVER" | tee "${ART}/failover-v4.txt"
 grep -q "$EXPECT_PEER" <<<"$FAILOVER" || die "Smart did not fail over to surviving node"
 
 log "E: transparent IPv6 DIRECT and Smart"
-DIRECT6="$(sudo ip netns exec "$NS_CLIENT" env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY curl -g -6 -fsS --max-time 10 'http://[2001:db8:20::2]:18080/direct-v6')"
-echo "$DIRECT6" | tee "${ART}/transparent-direct-v6.txt"
-grep -q 'domestic-v6' <<<"$DIRECT6" || die "transparent DIRECT v6 failed"
+sudo ip -6 addr show | tee "${ART}/host-ip6-addr.txt"
+sudo ip -6 route show table all | tee "${ART}/host-ip6-route-all.txt"
+sudo ip netns exec "$NS_CLIENT" ip -6 addr show | tee "${ART}/client-ip6-addr.txt"
+sudo ip netns exec "$NS_CLIENT" ip -6 route show table all | tee "${ART}/client-ip6-route-all-pre.txt"
+sudo ip6tables -t mangle -L PREROUTING -v -n -x | tee "${ART}/ip6tables-prerouting-before-v6.txt"
+
+set +e
+sudo ip netns exec "$NS_CLIENT" env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY \
+  curl -g -6 -v --max-time 10 'http://[2001:db8:20::2]:18080/direct-v6' \
+  >"${ART}/transparent-direct-v6.txt" 2>"${ART}/transparent-direct-v6.stderr"
+DIRECT6_RC=$?
+set -e
+DIRECT6="$(cat "${ART}/transparent-direct-v6.txt")"
+cat "${ART}/transparent-direct-v6.stderr" >&2 || true
+echo "$DIRECT6"
+sudo ip6tables -t mangle -L PREROUTING -v -n -x | tee "${ART}/ip6tables-prerouting-after-direct-v6.txt"
+if [[ "$DIRECT6_RC" -ne 0 ]] || ! grep -q 'domestic-v6' <<<"$DIRECT6"; then
+  echo "IPv6 DIRECT transparent path failed rc=$DIRECT6_RC" >&2
+  curl -fsS http://127.0.0.1:9090/connections | jq . > "${ART}/connections-after-v6-failure.json" 2>/dev/null || true
+  exit 52
+fi
 
 FOREIGN6=""
 for _ in $(seq 1 5); do
