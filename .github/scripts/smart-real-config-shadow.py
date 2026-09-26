@@ -5,7 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import yaml
 
-EXPECTED_SHA256 = "cfbc0d61b5087cef2e7e3991db82fff77080b3cc79c34126fa5e09e16186a8bf"
+EXPECTED_SHA256 = "62cfbb8ca3b4a704c8922bd169d5a78f42e9275d378f9a7879bedb4e1fc3e938"
 EXPECTED_COUNTS = {"proxy_providers": 11, "proxy_groups": 88, "rule_providers": 71, "rules": 1357, "proxies": 5}
 EXPECTED_GROUP_TYPES = {"select": 66, "url-test": 13, "smart": 8, "fallback": 1}
 EXPECTED_RULE_TYPES = {
