@@ -1,4 +1,4 @@
-name: Smart Alpha Routing Simulation
+name: Smart Alpha Comprehensive Validation
 
 on:
   workflow_dispatch:
@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/smart-alpha-routing-sim.yml"
       - ".github/scripts/smart-routing-sim.sh"
+      - ".github/scripts/smart-profile-regression.sh"
       - "adapter/**"
       - "component/**"
       - "config/**"
@@ -22,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: smart-alpha-routing-${{ github.ref }}
+  group: smart-alpha-comprehensive-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -31,9 +32,9 @@ env:
 
 jobs:
   smart-unit:
-    name: Smart unit / race / upstream baseline
+    name: Upstream baseline / Smart unit / race / full regression
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
 
     steps:
       - name: Checkout test branch
@@ -78,6 +79,9 @@ jobs:
             ./adapter/outboundgroup \
             ./component/smart/...
 
+      - name: Full repository regression
+        run: go test -count=1 ./...
+
       - name: Linux build smoke test
         run: |
           go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
@@ -89,10 +93,56 @@ jobs:
           ./mihomo-linux-amd64 -v
           ./mihomo-linux-amd64 -h >/dev/null
 
-  routing-simulation:
-    name: TProxy route simulation / failover / v4+v6 / TCP+UDP
+
+  profile-regression:
+    name: Production-shaped config / 8 Smart groups / fake-IP / rules
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
+    needs: smart-unit
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install config-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl dnsutils jq
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build profile-test core
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-profile-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-profile-test
+
+      - name: Run production-shaped config regression
+        run: |
+          chmod +x .github/scripts/smart-profile-regression.sh
+          .github/scripts/smart-profile-regression.sh
+
+      - name: Upload profile diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-profile-diagnostics-${{ github.run_id }}
+          path: |
+            .profile-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+  routing-simulation:
+    name: TProxy matrix / failover / v4+v6 / TCP+UDP / stress
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     needs: smart-unit
 
     steps:
@@ -143,6 +193,105 @@ jobs:
             .route-artifacts/**
           if-no-files-found: warn
           include-hidden-files: true
+          retention-days: 14
+
+
+  ebpf-forward-compat:
+    name: Latest Alpha + existing Android eBPF patch compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    needs: smart-unit
+
+    steps:
+      - name: Checkout with history
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Fetch existing eBPF development branch
+        run: git fetch origin feature/android-ebpf-routing:refs/remotes/origin/feature/android-ebpf-routing
+
+      - name: Apply eBPF patch stack onto latest Alpha
+        run: |
+          set -euo pipefail
+          git config user.name "Smart CI"
+          git config user.email "smart-ci@users.noreply.github.com"
+          PATCHES=(
+            a2a6b2f6bc9dd7a1bf00ffd275c92202e001bb8f
+            47d088f34775ff8733e839372c135d235d7fac72
+            1e145e4fc75f04d2a6e67d2406819edc37a01de1
+            01c43bf02c8a42be7891c50cc8509279337f4032
+            ef06639bc8af6cd721c9f93cc0f0f70b986c951e
+            c967e100385d29980a2158cd777405d2ac71a296
+            938c1cc5c06115dd6cd67a5143bab03c47606161
+            b22228b1967035449de8dd0059918f708d08caf8
+            45767839f0a785822cf91ca9fcdf6b22486d7347a
+            33fb54474043a22dcc73ae28678fffe69ac62632
+            6c3591ecbd096287ae970679074ea9fd8ca09c9a
+            4f88f5a5eafe6d304ab8e7c2c8dcb050e5cdfc9d
+          )
+          for sha in "${PATCHES[@]}"; do
+            echo "Applying $sha"
+            if ! git cherry-pick "$sha"; then
+              git status --short
+              git diff --cc || true
+              exit 1
+            fi
+          done
+          git log --oneline -15 > ebpf-applied-commits.txt
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Prepare CA bundle and modules
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+          go mod tidy
+
+      - name: Linux eBPF + Smart tests
+        run: |
+          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+            go test -count=1 -tags "with_ebpf" \
+              ./listener/ebpf \
+              ./component/dialer \
+              ./config \
+              ./adapter/outboundgroup
+
+      - name: Build Android arm64 Smart eBPF
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          go build -v -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-ebpf-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-android-arm64-smart-ebpf
+          gzip -9 -c mihomo-android-arm64-smart-ebpf > mihomo-android-arm64-smart-ebpf.gz
+          sha256sum mihomo-android-arm64-smart-ebpf.gz > EBPF_SHA256SUMS
+
+      - name: Upload eBPF compatibility artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-alpha-ebpf-compat-${{ github.run_id }}
+          path: |
+            mihomo-android-arm64-smart-ebpf.gz
+            EBPF_SHA256SUMS
+            ebpf-applied-commits.txt
+          if-no-files-found: warn
           retention-days: 14
 
   android-arm64:
