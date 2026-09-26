@@ -21,23 +21,23 @@ const (
 )
 
 type smartStatsJob struct {
-	group               *Smart
-	metadata            *C.Metadata
-	proxy               C.Proxy
-	connectTime          int64
-	latency              int64
-	uploadTotal          int64
-	downloadTotal        int64
-	maxUploadRate        int64
-	maxDownloadRate      int64
-	connectionDuration   int64
-	tcpStats             *tcpstats.Stats
-	err                  error
-	markCloseFailure     bool
+	group              *Smart
+	metadata           *C.Metadata
+	proxy              C.Proxy
+	connectTime        int64
+	latency            int64
+	uploadTotal        int64
+	downloadTotal      int64
+	maxUploadRate      int64
+	maxDownloadRate    int64
+	connectionDuration int64
+	tcpStats           *tcpstats.Stats
+	err                error
+	markCloseFailure   bool
 }
 
 var (
-	smartStatsQueue     = make(chan smartStatsJob, smartStatsQueueSize)
+	smartStatsQueue      = make(chan smartStatsJob, smartStatsQueueSize)
 	smartStatsWorkerOnce sync.Once
 )
 
@@ -88,15 +88,15 @@ func (s *Smart) enqueueConnectionStats(
 	startSmartStatsWorkers()
 
 	job := smartStatsJob{
-		group:             s,
-		metadata:          metadata,
-		proxy:             proxy,
-		connectTime:       connectTime,
-		latency:           latency,
-		uploadTotal:       uploadTotal,
-		downloadTotal:     downloadTotal,
-		maxUploadRate:     maxUploadRate,
-		maxDownloadRate:   maxDownloadRate,
+		group:              s,
+		metadata:           metadata,
+		proxy:              proxy,
+		connectTime:        connectTime,
+		latency:            latency,
+		uploadTotal:        uploadTotal,
+		downloadTotal:      downloadTotal,
+		maxUploadRate:      maxUploadRate,
+		maxDownloadRate:    maxDownloadRate,
 		connectionDuration: connectionDuration,
 		tcpStats:           tcpStatsValue,
 		err:                err,
