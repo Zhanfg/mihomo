@@ -504,8 +504,15 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 		return false, ""
 	}
 
-	codes := mmdb.IPInstance().LookupCode(exitIP.AsSlice())
-	if len(codes) == 0 || codes[0] == "" {
+	codes, err := mmdb.LookupCodeOptional(C.Path.MMDB(), exitIP.AsSlice())
+	if err != nil || len(codes) == 0 || codes[0] == "" {
+		// Country routing is advisory unless the user explicitly selected a
+		// strict country. Missing/invalid GeoIP data must never terminate the
+		// proxy process; unknown country simply lets affinity mode fall back to
+		// normal Smart selection.
+		if err != nil {
+			log.Debugln("[Capability] country lookup unavailable for %s: %v", p.Name(), err)
+		}
 		return false, ""
 	}
 	country = strings.ToUpper(codes[0])
