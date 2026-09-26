@@ -52,14 +52,14 @@ type capabilityEntry struct {
 	mu              sync.Mutex
 	known           bool
 	ok              bool
-	expire           time.Time
-	probing          bool
-	exitIP           netip.Addr
-	country          string
-	asn              string
-	asnOrg           string
-	datacenterKnown  bool
-	datacenter       bool
+	expire          time.Time
+	probing         bool
+	exitIP          netip.Addr
+	country         string
+	asn             string
+	asnOrg          string
+	datacenterKnown bool
+	datacenter      bool
 }
 
 type capabilityState struct {
@@ -503,25 +503,25 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 }
 
 var knownDatacenterASNs = map[string]struct{}{
-	"16509": {},  // Amazon
-	"14618": {},  // Amazon
-	"8075":  {},  // Microsoft/Azure
+	"16509":  {}, // Amazon
+	"14618":  {}, // Amazon
+	"8075":   {}, // Microsoft/Azure
 	"396982": {}, // Google Cloud
-	"14061": {},  // DigitalOcean
-	"20473": {},  // Vultr / Choopa
-	"63949": {},  // Linode / Akamai Connected Cloud
-	"24940": {},  // Hetzner
-	"16276": {},  // OVH
-	"9009":  {},  // M247
-	"30058": {},  // FDCservers
-	"51167": {},  // Contabo
+	"14061":  {}, // DigitalOcean
+	"20473":  {}, // Vultr / Choopa
+	"63949":  {}, // Linode / Akamai Connected Cloud
+	"24940":  {}, // Hetzner
+	"16276":  {}, // OVH
+	"9009":   {}, // M247
+	"30058":  {}, // FDCservers
+	"51167":  {}, // Contabo
 	"197540": {}, // netcup
-	"12876": {},  // Scaleway
-	"36351": {},  // IBM SoftLayer
-	"31898": {},  // Oracle
-	"45102": {},  // Alibaba Cloud
+	"12876":  {}, // Scaleway
+	"36351":  {}, // IBM SoftLayer
+	"31898":  {}, // Oracle
+	"45102":  {}, // Alibaba Cloud
 	"132203": {}, // Tencent Cloud
-	"55990": {},  // Huawei Cloud
+	"55990":  {}, // Huawei Cloud
 }
 
 var datacenterOrgTokens = [...]string{
