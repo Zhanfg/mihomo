@@ -59,24 +59,18 @@ jobs:
           set -euo pipefail
           CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/inbound ./listener/sing_ebpf -count=1
 
-      - name: Capability regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          CGO_ENABLED=0 go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|AddCapability)' -count=1
-
-      - name: Smart regressions
-        shell: bash
-        run: |
-          set -euo pipefail
-          CGO_ENABLED=0 go test ./adapter/outboundgroup ./component/smart/... -count=1
-
       - name: IP-family capability regressions
         shell: bash
         run: |
           set -euo pipefail
           CGO_ENABLED=0 go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|AddCapability)' -count=1
           CGO_ENABLED=0 go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart)' -count=1
+
+      - name: Smart regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test ./adapter/outboundgroup ./component/smart/... -count=1
 
       - name: Build Linux parser self-test core
         shell: bash
@@ -90,13 +84,6 @@ jobs:
           set -euo pipefail
           ./mihomo-boxproxy-ebpf-selftest             -t -f .github/fixtures/boxproxy-ebpf-listener.yaml             2>&1 | tee BOXPROXY_SCHEMA_SELFTEST.txt
           grep -qi "configuration file .* test is successful" BOXPROXY_SCHEMA_SELFTEST.txt
-
-      - name: Parse custom IP-family directives
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./mihomo-boxproxy-ebpf-selftest -t -f .github/fixtures/ip-family-routing.yaml 2>&1 | tee IP_FAMILY_SELFTEST.txt
-          grep -qi "configuration file .* test is successful" IP_FAMILY_SELFTEST.txt
 
       - name: Parse custom IP-family directives
         shell: bash
