@@ -31,14 +31,18 @@ const (
 
 	// STUN binding request target for the UDP probe.
 	capabilityStunServer = "stun.l.google.com:19302"
-	// IPv6-only URL for the IPv6 egress probe.
-	capabilityIPv6URL = "https://ipv6.google.com/generate_204"
+	// Family-specific egress probes. api4/api6 are deliberately single-stack:
+	// a successful probe therefore proves that the proxy can actually reach
+	// that address family instead of merely resolving a dual-stack hostname.
+	capabilityIPv4URL = "https://api4.ipify.org"
+	capabilityIPv6URL = "https://api6.ipify.org"
 )
 
 type capabilityKind uint8
 
 const (
 	capabilityUDP capabilityKind = iota
+	capabilityIPv4
 	capabilityIPv6
 )
 
@@ -52,6 +56,7 @@ type capabilityEntry struct {
 
 type capabilityState struct {
 	udp  capabilityEntry
+	ipv4 capabilityEntry
 	ipv6 capabilityEntry
 	// lastUsed lets the opportunistic cache sweep remove identities that are
 	// no longer present after a provider refresh. TTLs invalidate verdicts but
@@ -117,10 +122,13 @@ func maybeSweepCapabilityCache(now time.Time) {
 			state.udp.mu.Lock()
 			udpIdle := !state.udp.probing && (!state.udp.known || !sweepNow.Before(state.udp.expire))
 			state.udp.mu.Unlock()
+			state.ipv4.mu.Lock()
+			ipv4Idle := !state.ipv4.probing && (!state.ipv4.known || !sweepNow.Before(state.ipv4.expire))
+			state.ipv4.mu.Unlock()
 			state.ipv6.mu.Lock()
 			ipv6Idle := !state.ipv6.probing && (!state.ipv6.known || !sweepNow.Before(state.ipv6.expire))
 			state.ipv6.mu.Unlock()
-			if udpIdle && ipv6Idle {
+			if udpIdle && ipv4Idle && ipv6Idle {
 				capabilityCache.CompareAndDelete(key, state)
 			}
 			return true
@@ -171,7 +179,10 @@ const (
 // while the refresh runs.
 func (s *capabilityState) stateOrProbe(p C.Proxy, kind capabilityKind) int {
 	entry := &s.udp
-	if kind == capabilityIPv6 {
+	switch kind {
+	case capabilityIPv4:
+		entry = &s.ipv4
+	case capabilityIPv6:
 		entry = &s.ipv6
 	}
 	entry.mu.Lock()
@@ -210,11 +221,13 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	switch kind {
 	case capabilityUDP:
 		ok = probeUDP(ctx, p)
+	case capabilityIPv4:
+		// StatusTest is deliberately non-mutating: capability telemetry must
+		// not rewrite the proxy's normal health/alive history.
+		_, ok, _ = p.StatusTest(ctx, capabilityIPv4URL)
 	case capabilityIPv6:
-		// URLTest updates the proxy's global alive flag and delay history. A
-		// capability probe is auxiliary telemetry and must not make a proxy
-		// appear dead (or reset its health history), so use the non-mutating
-		// status probe instead.
+		// StatusTest is deliberately non-mutating: capability telemetry must
+		// not rewrite the proxy's normal health/alive history.
 		_, ok, _ = p.StatusTest(ctx, capabilityIPv6URL)
 	}
 
@@ -230,7 +243,10 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	entry.mu.Unlock()
 
 	kindName := "udp"
-	if kind == capabilityIPv6 {
+	switch kind {
+	case capabilityIPv4:
+		kindName = "ipv4"
+	case capabilityIPv6:
 		kindName = "ipv6"
 	}
 	log.Debugln("[Capability] %s %s=%v", p.Name(), kindName, ok)
@@ -342,6 +358,55 @@ func validSTUNBindingSuccess(message, txid []byte) bool {
 	return true
 }
 
+// IPFamilyRequirementsMet evaluates hard address-family requirements.
+//
+// When allowUnknown is false, a capability has to be positively proven before
+// the proxy is eligible (fail-closed). When allowUnknown is true, an unprobed
+// node remains eligible while the asynchronous probe warms up, but a confirmed
+// mismatch is still rejected. The latter mode is useful for auto-ip-family.
+func IPFamilyRequirementsMet(p C.Proxy, requireIPv4, requireIPv6, allowUnknown bool) bool {
+	if p == nil || (!requireIPv4 && !requireIPv6) {
+		return p != nil
+	}
+	state := capabilityStateForProxy(p)
+	check := func(kind capabilityKind) bool {
+		verdict := state.stateOrProbe(p, kind)
+		if verdict == capNo {
+			return false
+		}
+		if verdict == capUnknown && !allowUnknown {
+			return false
+		}
+		return true
+	}
+	if requireIPv4 && !check(capabilityIPv4) {
+		return false
+	}
+	return !requireIPv6 || check(capabilityIPv6)
+}
+
+// IPFamilyCapabilityKnown reports the current cached family verdict and also
+// schedules a refresh when it is absent/stale. It is mainly intended for
+// diagnostics and group policy code.
+func IPFamilyCapabilityKnown(p C.Proxy, ipv6 bool) (known, ok bool) {
+	if p == nil {
+		return false, false
+	}
+	state := capabilityStateForProxy(p)
+	kind := capabilityIPv4
+	if ipv6 {
+		kind = capabilityIPv6
+	}
+	switch state.stateOrProbe(p, kind) {
+	case capYes:
+		return true, true
+	case capNo:
+		return true, false
+	default:
+		return false, false
+	}
+}
+
 // Capability preferences only ever reorder a group, never shrink it. A node
 // that lacks a preferred capability gets extra latency added when ranking, so
 // it sinks below the nodes that have it while staying selectable as a last
@@ -366,8 +431,8 @@ const (
 // groups with an explicit user-chosen or configured order (select, fallback)
 // deliberately ignore it, since a probe result must not silently rewrite what
 // the user picked.
-func CapabilityPenalty(p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
-	if p == nil || (!preferUDP && !preferIPv6) {
+func CapabilityPenaltyExtended(p C.Proxy, preferUDP, preferIPv4, preferIPv6 bool) uint16 {
+	if p == nil || (!preferUDP && !preferIPv4 && !preferIPv6) {
 		return 0
 	}
 	state := capabilityStateForProxy(p)
@@ -375,10 +440,21 @@ func CapabilityPenalty(p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
 	if preferUDP {
 		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityUDP))
 	}
+	if preferIPv4 {
+		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityIPv4))
+	}
 	if preferIPv6 {
 		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityIPv6))
 	}
+	if penalty > 0xFFFF {
+		return 0xFFFF
+	}
 	return uint16(penalty)
+}
+
+// CapabilityPenalty preserves the historical API for existing callers.
+func CapabilityPenalty(p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
+	return CapabilityPenaltyExtended(p, preferUDP, false, preferIPv6)
 }
 
 // CapabilityDemoted reports whether a probe has CONFIRMED that this proxy
@@ -410,8 +486,8 @@ func capabilityPenaltyFor(verdict int) int {
 
 // AddCapabilityPenalty adds the capability penalty to a measured delay,
 // saturating instead of wrapping so a penalized node never sorts as fast.
-func AddCapabilityPenalty(delay uint16, p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
-	penalty := CapabilityPenalty(p, preferUDP, preferIPv6)
+func AddCapabilityPenaltyExtended(delay uint16, p C.Proxy, preferUDP, preferIPv4, preferIPv6 bool) uint16 {
+	penalty := CapabilityPenaltyExtended(p, preferUDP, preferIPv4, preferIPv6)
 	if penalty == 0 {
 		return delay
 	}
@@ -419,4 +495,9 @@ func AddCapabilityPenalty(delay uint16, p C.Proxy, preferUDP, preferIPv6 bool) u
 		return 0xFFFF
 	}
 	return delay + penalty
+}
+
+// AddCapabilityPenalty preserves the historical API for existing callers.
+func AddCapabilityPenalty(delay uint16, p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
+	return AddCapabilityPenaltyExtended(delay, p, preferUDP, false, preferIPv6)
 }
