@@ -2,6 +2,7 @@ package smart
 
 import (
 	"math"
+	"net/netip"
 	"time"
 )
 
@@ -35,6 +36,54 @@ func ModelCalibrationWeightType(isUDP bool) string {
 		return WeightTypeModelCalibrationUDP
 	}
 	return WeightTypeModelCalibrationTCP
+}
+
+// ModelCalibrationWeightTypeForInput keeps the online residual small but
+// contextual. The global LightGBM model remains shared; only its residual is
+// learned per transport + destination family + traffic scene. This captures
+// mobile realities such as "this node is excellent for IPv4 web traffic but
+// poor for IPv6 streaming" without loading another model or allocating a
+// second learner.
+func ModelCalibrationWeightTypeForInput(input *ModelInput) string {
+	if input == nil {
+		return WeightTypeModelCalibrationTCP
+	}
+
+	base := WeightTypeModelCalibrationTCP
+	if input.IsUDP {
+		base = WeightTypeModelCalibrationUDP
+	}
+
+	family := "ipx"
+	if ip, err := netip.ParseAddr(input.DestIP); err == nil {
+		switch ip.Unmap().BitLen() {
+		case 32:
+			family = "v4"
+		case 128:
+			family = "v6"
+		}
+	}
+
+	scene := identifyConnectionScene(
+		input.IsUDP,
+		input.Latency,
+		input.UploadTotal,
+		input.DownloadTotal,
+		input.MaxuploadRate,
+		input.MaxdownloadRate,
+		input.ConnectionDuration,
+	)
+	sceneName := "web"
+	switch scene {
+	case sceneInteractive:
+		sceneName = "interactive"
+	case sceneStreaming:
+		sceneName = "stream"
+	case sceneTransfer:
+		sceneName = "transfer"
+	}
+
+	return base + ":" + family + ":" + sceneName
 }
 
 // AdaptModelPrediction turns the static LightGBM score into a small online
