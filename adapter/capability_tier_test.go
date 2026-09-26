@@ -349,12 +349,10 @@ func TestExitDatacenterUsesCachedTelemetry(t *testing.T) {
 	state.ipv4.expire = time.Now().Add(time.Hour)
 	state.ipv4.datacenterKnown = true
 	state.ipv4.datacenter = true
-	state.ipv4.asn = "30058"
-	state.ipv4.asnOrg = "FDCservers.net"
 	state.ipv4.mu.Unlock()
 
-	known, dc, asn, org := ExitDatacenterForProxy(p, false)
-	if !known || !dc || asn != "30058" || org != "FDCservers.net" {
-		t.Fatalf("cached IDC telemetry=(%v,%v,%q,%q)", known, dc, asn, org)
+	known, dc := ExitDatacenterForProxy(p, false)
+	if !known || !dc {
+		t.Fatalf("cached IDC telemetry=(%v,%v)", known, dc)
 	}
 }
