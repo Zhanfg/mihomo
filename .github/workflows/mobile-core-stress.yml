@@ -9,6 +9,7 @@ on:
       - ".github/workflows/mobile-core-stress.yml"
       - "adapter/**"
       - "component/smart/**"
+      - "component/mmdb/**"
       - "component/keepalive/**"
       - "dns/**"
       - "listener/sing_ebpf/**"
@@ -89,7 +90,7 @@ jobs:
             BENCH.txt
 
   churn:
-    name: 5000-connection mixed-port churn
+    name: 8000-connection mixed-port churn
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -112,6 +113,21 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/mihomo-stress/www
           printf 'ok\n' > /tmp/mihomo-stress/www/index.html
+          cat > /tmp/mihomo-stress/server.py <<'PY'
+          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+          import os
+
+          class StressServer(ThreadingHTTPServer):
+              request_queue_size = 512
+              daemon_threads = True
+
+          class QuietHandler(SimpleHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  pass
+
+          os.chdir("/tmp/mihomo-stress/www")
+          StressServer(("127.0.0.1", 18080), QuietHandler).serve_forever()
+          PY
           cat > /tmp/mihomo-stress/config.yaml <<'YAML'
           mixed-port: 17890
           allow-lan: false
@@ -131,6 +147,7 @@ jobs:
               lazy: false
               uselightgbm: false
               auto-ip-family: true
+              country-affinity: true
               empty-fallback: REJECT
           rules:
             - MATCH,STRESS
@@ -141,10 +158,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cd /tmp/mihomo-stress/www
-          python3 -m http.server 18080 --bind 127.0.0.1 >/tmp/http.log 2>&1 &
+          python3 /tmp/mihomo-stress/server.py >/tmp/http.log 2>&1 &
           HTTP_PID=$!
-          cd "$GITHUB_WORKSPACE"
 
           ./mihomo-stress -d /tmp/mihomo-stress -f /tmp/mihomo-stress/config.yaml             >/tmp/mihomo.log 2>&1 &
           MIHOMO_PID=$!
@@ -174,7 +189,7 @@ jobs:
           MON_PID=$!
 
           /usr/bin/time -v sh -c '
-            seq 1 5000 | xargs -P 32 -n 1 sh -c '"'"'
+            seq 1 8000 | xargs -P 48 -n 1 sh -c '"'"'
               curl -fsS --connect-timeout 2 --max-time 4                 -x http://127.0.0.1:17890                 http://127.0.0.1:18080/ >/dev/null
             '"'"' sh
           ' 2> LOAD_TIME.txt
@@ -199,8 +214,8 @@ jobs:
             }
           ' RESOURCE_SAMPLES.txt | tee RESOURCE_SUMMARY.txt
 
-          echo "requests=5000" | tee -a RESOURCE_SUMMARY.txt
-          echo "parallelism=32" | tee -a RESOURCE_SUMMARY.txt
+          echo "requests=8000" | tee -a RESOURCE_SUMMARY.txt
+          echo "parallelism=48" | tee -a RESOURCE_SUMMARY.txt
           echo "core_alive_after_load=YES" | tee -a RESOURCE_SUMMARY.txt
           tail -n 120 /tmp/mihomo.log > MIHOMO_TAIL.txt
 
