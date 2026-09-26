@@ -1,0 +1,31 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: true
+
+proxy-groups:
+  - name: IPv6严格
+    type: url-test
+    proxies: [DIRECT]
+    url: https://api6.ipify.org
+    interval: 600
+    lazy: false
+    expected-status: 200
+    require-ipv6: true
+    empty-fallback: REJECT
+
+  - name: 双栈智能
+    type: smart
+    proxies: [DIRECT]
+    url: https://www.apple.com/library/test/success.html
+    interval: 300
+    require-ipv4: false
+    require-ipv6: false
+    prefer-ipv4: false
+    prefer-ipv6: false
+    auto-ip-family: true
+    empty-fallback: REJECT
+
+rules:
+  - MATCH,双栈智能
