@@ -1991,14 +1991,17 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	atomicRecord.Add("uploadTotal", uploadTotalMB)
 	atomicRecord.Add("downloadTotal", downloadTotalMB)
 
+	peakImproved := false
 	oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
 	if maxUploadRateKB > oldMaxUploadRate {
 		atomicRecord.Set("maxUploadRate", maxUploadRateKB)
+		peakImproved = true
 	}
 
 	oldMaxDownloadRate := atomicRecord.Get("maxDownloadRate").(float64)
 	if maxDownloadRateKB > oldMaxDownloadRate {
 		atomicRecord.Set("maxDownloadRate", maxDownloadRateKB)
+		peakImproved = true
 	}
 
 	input := lightgbm.CreateModelInputFromStatsRecord(
@@ -2008,24 +2011,45 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	)
 	input.ConnectionFailed = err != nil
 
+	samples := input.Success + input.Failure
+	refreshModel := shouldRefreshSmartModel(
+		oldWeight,
+		samples,
+		err != nil,
+		connectionDuration,
+		lossRate,
+		peakImproved,
+	)
+
 	if s.useLightGBM && s.weightModel != nil {
-		calculatedWeight, ModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
-		if ModelPredicted {
-			// The shipped LightGBM model is global; calibrate it online with this
-			// target/node pair's real outcomes. The calibration lives in the
-			// existing Smart record, so it survives restarts without another
-			// resident model or a second database.
-			if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
-				calKey := smart.ModelCalibrationWeightType(isUDP)
-				oldCalibration := atomicRecord.GetWeight(calKey)
-				var newCalibration float64
-				calculatedWeight, newCalibration = smart.AdaptModelPrediction(
-					calculatedWeight,
-					observedWeight,
-					oldCalibration,
-					input.Success+input.Failure,
-				)
-				atomicRecord.SetWeight(calKey, newCalibration)
+		if !refreshModel && oldWeight > 0 {
+			// Every observation is already folded into atomicRecord. Reusing the
+			// previous score here only defers inference; the next scheduled
+			// refresh consumes all accumulated evidence.
+			calculatedWeight = oldWeight
+			ModelPredicted = true
+		} else {
+			calculatedWeight, ModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
+			if ModelPredicted {
+				// The global model gets a bounded online residual per transport,
+				// address family and traffic scene. Fall back to the legacy
+				// transport-only calibration once so existing learned state
+				// carries forward after an upgrade.
+				if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
+					calKey := smart.ModelCalibrationWeightTypeForInput(input)
+					oldCalibration := atomicRecord.GetWeight(calKey)
+					if oldCalibration <= 0 {
+						oldCalibration = atomicRecord.GetWeight(smart.ModelCalibrationWeightType(isUDP))
+					}
+					var newCalibration float64
+					calculatedWeight, newCalibration = smart.AdaptModelPrediction(
+						calculatedWeight,
+						observedWeight,
+						oldCalibration,
+						samples,
+					)
+					atomicRecord.SetWeight(calKey, newCalibration)
+				}
 			}
 		}
 	} else {
