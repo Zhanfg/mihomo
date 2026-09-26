@@ -6,6 +6,7 @@ on:
     branches:
       - feature/mobile-core-opt
       - feature/mobile-runtime-ai
+      - feature/mobile-full-opt
     paths:
       - "adapter/**"
       - "component/keepalive/**"
@@ -56,6 +57,7 @@ jobs:
             adapter/capability.go
             adapter/capability_tier_test.go
             adapter/outboundgroup/smart.go
+            adapter/outboundgroup/smart_tasks.go
             adapter/outboundgroup/capability_test.go
             component/keepalive/tcp_keepalive.go
             component/keepalive/tcp_keepalive_go122.go
@@ -76,7 +78,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|ExitCountry|ProxyIdentity)' -count=1
+          go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|ExitCountry|ExitDatacenter|Datacenter|ProxyIdentity)' -count=1
           go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart)' -count=1
 
       - name: Full adapter regressions
@@ -138,6 +140,8 @@ jobs:
           strings "$OUT" | grep -q "api4.ipify.org"
           strings "$OUT" | grep -q "api6.ipify.org"
           strings "$OUT" | grep -q "country-affinity"
+          strings "$OUT" | grep -q "avoid-datacenter"
+          strings "$OUT" | grep -q "FDCservers"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
 
@@ -150,9 +154,9 @@ jobs:
             echo "with_low_memory=excluded"
             echo "android_keepalive_default=idle60s,interval20s"
             echo "country_routing=MMDB reuse,no new database"
-            echo "mobile_features=auto-ip-family,country,country-affinity"
+            echo "mobile_features=auto-ip-family,country,country-affinity,avoid-datacenter"
             echo "runtime_ram=process-aware Smart cache budget"
-            echo "runtime_cpu=bounded stats workers + Android probe/dial fan-out"
+            echo "runtime_cpu=bounded workers/fan-out + idle maintenance gating + 30s Android heap sampling"
             echo "smart_model=LightGBM + persistent online residual calibration"
           } > BUILD_INFO.txt
 
