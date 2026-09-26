@@ -62,3 +62,16 @@ func TestAdjustCacheParametersConcurrentRecordCreation(t *testing.T) {
 	require.Same(t, originalBlockedNodesCache, blockedNodesCache)
 	require.Same(t, originalHostStatusCache, hostStatusCache)
 }
+
+
+func TestSmartCacheTargetLimitAndroidBoundsHeapGrowth(t *testing.T) {
+	require.Equal(t, 2000, smartCacheTargetLimit(0.10, 32<<20, true))
+	require.Equal(t, 1200, smartCacheTargetLimit(0.10, androidCacheSoftHeap, true))
+	require.Equal(t, 750, smartCacheTargetLimit(0.10, androidCacheHighHeap, true))
+	require.Equal(t, MinTargetsLimit, smartCacheTargetLimit(0.10, androidCacheMaxHeap, true))
+}
+
+func TestSmartCacheTargetLimitStillHonorsSystemPressure(t *testing.T) {
+	require.Equal(t, MinTargetsLimit, smartCacheTargetLimit(0.95, 32<<20, true))
+	require.Equal(t, MinTargetsLimit, smartCacheTargetLimit(0.95, 32<<20, false))
+}
