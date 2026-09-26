@@ -63,7 +63,6 @@ func TestAdjustCacheParametersConcurrentRecordCreation(t *testing.T) {
 	require.Same(t, originalHostStatusCache, hostStatusCache)
 }
 
-
 func TestSmartCacheTargetLimitAndroidBoundsHeapGrowth(t *testing.T) {
 	require.Equal(t, 2000, smartCacheTargetLimit(0.10, 32<<20, true))
 	require.Equal(t, 1200, smartCacheTargetLimit(0.10, androidCacheSoftHeap, true))
