@@ -18,6 +18,8 @@ on:
       - "adapter/outboundgroup/**"
       - "component/smart/**"
       - "component/keepalive/**"
+      - "dns/connection_pool.go"
+      - "hub/executor/concurrent_load_*.go"
 
 permissions:
   contents: read
@@ -81,6 +83,13 @@ jobs:
           set -euo pipefail
           go test ./component/keepalive -count=1
           GOOS=android GOARCH=arm64 CGO_ENABLED=0 go test -c ./component/keepalive -o /tmp/keepalive-android.test
+
+      - name: DNS/executor regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./dns -count=1
+          go test ./hub/executor -count=1
 
       - name: Build Linux parser self-test core
         shell: bash
