@@ -13,8 +13,8 @@ type TCPConn interface {
 func keepAliveConfig() net.KeepAliveConfig {
 	config := net.KeepAliveConfig{
 		Enable:   true,
-		Idle:     KeepAliveIdle(),
-		Interval: KeepAliveInterval(),
+		Idle:     EffectiveKeepAliveIdle(),
+		Interval: EffectiveKeepAliveInterval(),
 	}
 	if !SupportTCPKeepAliveCount() {
 		// it's recommended to set both Idle and Interval to non-negative values in conjunction with a -1
