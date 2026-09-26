@@ -29,6 +29,20 @@ func KeepAliveInterval() time.Duration {
 	return time.Duration(keepAliveInterval.Load())
 }
 
+func EffectiveKeepAliveIdle() time.Duration {
+	if configured := KeepAliveIdle(); configured > 0 {
+		return configured
+	}
+	return platformKeepAliveIdle()
+}
+
+func EffectiveKeepAliveInterval() time.Duration {
+	if configured := KeepAliveInterval(); configured > 0 {
+		return configured
+	}
+	return platformKeepAliveInterval()
+}
+
 // SetDisableKeepAlive follows the configured policy on every platform.
 //
 // Older Android builds forced keepalive off here as a compatibility workaround.
