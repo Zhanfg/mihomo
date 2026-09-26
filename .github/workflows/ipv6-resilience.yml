@@ -16,8 +16,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ipv6-resilience
-  cancel-in-progress: true
+  group: ipv6-resilience-${{ github.sha }}
+  cancel-in-progress: false
 
 jobs:
   test-build:
