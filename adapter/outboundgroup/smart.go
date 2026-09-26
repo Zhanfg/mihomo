@@ -872,6 +872,20 @@ func (s *Smart) setAffinityCountry(country string) {
 	s.affinityMu.Unlock()
 }
 
+func (s *Smart) setAffinityCountryIfEmpty(country string) bool {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	if country == "" {
+		return false
+	}
+	s.affinityMu.Lock()
+	defer s.affinityMu.Unlock()
+	if s.affinityCountry != "" {
+		return strings.EqualFold(s.affinityCountry, country)
+	}
+	s.affinityCountry = country
+	return true
+}
+
 // desiredCountry returns the country constraint for this selection.
 //
 // Explicit country is strict. country-affinity is sticky and intentionally
@@ -912,7 +926,7 @@ func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string,
 }
 
 func (s *Smart) rememberAffinityCountry(metadata *C.Metadata, p C.Proxy) {
-	if p == nil || !s.countryAffinity || s.country != "" || s.currentAffinityCountry() != "" {
+	if p == nil || !s.countryAffinity || s.country != "" {
 		return
 	}
 	knownFamily, ipv6 := metadataIPFamily(metadata)
@@ -920,7 +934,10 @@ func (s *Smart) rememberAffinityCountry(metadata *C.Metadata, p C.Proxy) {
 		return
 	}
 	if known, country := adapter.ExitCountryForProxy(p, ipv6); known && country != "" {
-		s.setAffinityCountry(country)
+		// First successful measured exit establishes the affinity. Concurrent
+		// IPv4/IPv6 winners cannot overwrite each other and make the group
+		// oscillate between countries.
+		s.setAffinityCountryIfEmpty(country)
 	}
 }
 
