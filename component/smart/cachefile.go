@@ -183,7 +183,7 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 
 	strict := false
 	switch keyType {
-	case KeyTypeNode, KeyTypePrefetch, KeyTypeHostFailures:
+	case KeyTypeNode, KeyTypePrefetch, KeyTypeHostFailures, KeyTypeVector:
 		if depth == 5 {
 			strict = true
 		}
@@ -251,6 +251,13 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 				}
 				result[FormatDBKey(KeyTypeHostFailures, op.Config, op.Group, op.Target)] = op.Data
 			}
+		case KeyTypeVector:
+			if op.Type == OpSaveVector && op.Target != "" {
+				if depth >= 5 && seg4 != op.Target {
+					continue
+				}
+				result[FormatDBKey(KeyTypeVector, op.Config, op.Group, op.Target)] = op.Data
+			}
 		}
 	}
 
@@ -267,7 +274,7 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 	var groupPrefix string
 
 	switch keyType {
-	case KeyTypeStats, KeyTypeNode, KeyTypePrefetch, KeyTypeHostFailures, KeyTypeRanking:
+	case KeyTypeStats, KeyTypeNode, KeyTypePrefetch, KeyTypeHostFailures, KeyTypeRanking, KeyTypeVector:
 		if depth >= 4 {
 			hasGroupLevel = true
 			groupPrefix = FormatDBKey(keyType, config, group)
@@ -319,7 +326,7 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 		}
 
 		if isStale && !hasGroupLevel {
-			if keyType != KeyTypeStats && keyType != KeyTypeHostFailures {
+			if keyType != KeyTypeStats && keyType != KeyTypeHostFailures && keyType != KeyTypeVector {
 				if _, loading := dbResultRefreshFlags.LoadOrStore(prefix, true); !loading {
 					go func() {
 						defer dbResultRefreshFlags.Delete(prefix)
@@ -336,7 +343,7 @@ func (s *Store) GetSubBytesByPath(prefix string) (map[string][]byte, error) {
 			return result, nil
 		}
 		if maxResults > 0 && !hasGroupLevel {
-			if keyType != KeyTypeStats && keyType != KeyTypeHostFailures {
+			if keyType != KeyTypeStats && keyType != KeyTypeHostFailures && keyType != KeyTypeVector {
 				dbResultCache.Set(prefix, dbResult)
 			}
 		}
