@@ -232,6 +232,25 @@ def make_hermetic_runtime_cfg(cfg):
             runtime["rules"][i]="DOMAIN-SUFFIX,shadow-geosite-cn.test,🇨🇳 本地直连"
         elif r.startswith("GEOIP,"):
             runtime["rules"][i]="IP-CIDR,203.0.113.0/24,🇨🇳 本地直连,no-resolve"
+
+    # Production registers 71 rule providers but contains 70 RULE-SET rules.
+    # Keep that exact fact in structural validation; only in the hermetic runtime
+    # shadow, inject a temporary RULE-SET for each otherwise-unreferenced provider
+    # so every provider is exercised through the real rule-loading path. This also
+    # avoids the controller path-parameter limitation for names containing '/'.
+    referenced=set()
+    for r in runtime["rules"]:
+        if r.startswith("RULE-SET,"):
+            parts=r.split(",",3)
+            if len(parts) >= 2:
+                referenced.add(parts[1])
+    missing=[name for name in runtime["rule-providers"] if name not in referenced]
+    replaceable=[i for i,r in enumerate(runtime["rules"]) if r.startswith("DOMAIN,shadow-")]
+    if len(replaceable) < len(missing):
+        die("not enough placeholder DOMAIN rules to exercise unreferenced rule providers")
+    for idx,name in zip(replaceable,missing):
+        runtime["rules"][idx]=f"RULE-SET,{name},主力智能"
+    runtime["_shadow_forced_rule_providers"]=missing
     return runtime
 
 class State:
@@ -301,8 +320,11 @@ def put_expect_503(url):
 def runtime_checks(bin_path,cfg,work,art):
     work.mkdir(parents=True,exist_ok=True); art.mkdir(parents=True,exist_ok=True)
     (work/"providers").mkdir(exist_ok=True); (work/"rules").mkdir(exist_ok=True)
+    forced_meta=list(cfg.get("_shadow_forced_rule_providers", []))
+    runtime_cfg=json.loads(json.dumps(cfg, ensure_ascii=False))
+    runtime_cfg.pop("_shadow_forced_rule_providers", None)
     y=work/"shadow.yaml"
-    y.write_text(yaml.safe_dump(cfg,allow_unicode=True,sort_keys=False,width=240),encoding="utf-8")
+    y.write_text(yaml.safe_dump(runtime_cfg,allow_unicode=True,sort_keys=False,width=240),encoding="utf-8")
     State.behaviors={k:v["behavior"] for k,v in cfg["rule-providers"].items()}
     server=ThreadingHTTPServer(("127.0.0.1",33000),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -354,35 +376,8 @@ def runtime_checks(bin_path,cfg,work,art):
             die("runtime missing rule providers after convergence: " + ", ".join(last_missing["rule_providers"][:8]))
         if last_missing["rules"]!=1357:
             die(f"runtime rule count != 1357 after convergence: {last_missing['rules']}")
-        with State.lock:
-            initial_ph=dict(State.provider_hits); initial_rh=dict(State.rule_hits)
-        # The real production topology has 71 rule providers but only 70
-        # RULE-SET rules, so one provider may legitimately remain registered
-        # but cold on startup. Force-refresh every registered rule provider to
-        # validate the full Smart-proxied bootstrap path instead of assuming
-        # all 71 must be referenced during initial rule evaluation.
-        import urllib.parse, urllib.error
-        refresh_failures={}
-        for name in sorted(expected_rule_providers):
-            enc=urllib.parse.quote(name, safe="")
-            last=None
-            for attempt in range(8):
-                try:
-                    get_json(f"http://127.0.0.1:29091/providers/rules/{enc}",method="PUT")
-                    last=None
-                    break
-                except urllib.error.HTTPError as e:
-                    last=f"HTTP {e.code}"
-                    if e.code not in (503, 429):
-                        break
-                except Exception as e:
-                    last=repr(e)
-                time.sleep(0.25 + attempt * 0.1)
-            if last is not None:
-                refresh_failures[name]=last
-        (art/"forced-refresh-failures.json").write_text(json.dumps(refresh_failures,ensure_ascii=False,indent=2))
-        if refresh_failures:
-            die("rule-provider forced refresh failed: " + "; ".join(f"{k}={v}" for k,v in list(refresh_failures.items())[:8]))
+        forced_names=forced_meta
+        (art/"runtime-forced-rule-provider-refs.json").write_text(json.dumps(forced_names,ensure_ascii=False,indent=2))
         for _ in range(120):
             with State.lock:
                 ph=len(State.provider_hits); rh=len(State.rule_hits)
@@ -391,13 +386,11 @@ def runtime_checks(bin_path,cfg,work,art):
         with State.lock:
             ph=dict(State.provider_hits); rh=dict(State.rule_hits)
         (art/"mock-hits.json").write_text(json.dumps({
-            "initial_proxy":initial_ph,
-            "initial_rules":initial_rh,
-            "after_forced_refresh_proxy":ph,
-            "after_forced_refresh_rules":rh,
+            "proxy":ph,
+            "rules":rh,
         },ensure_ascii=False,indent=2))
         if len(ph)!=11: die(f"only {len(ph)}/11 proxy providers fetched")
-        if len(rh)!=71: die(f"only {len(rh)}/71 rule providers fetched after forced refresh")
+        if len(rh)!=71: die(f"only {len(rh)}/71 rule providers fetched through rule-loading path")
 
         target=next(iter(cfg["proxy-providers"]))
         with State.lock: State.fail_provider=target
