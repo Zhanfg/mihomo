@@ -912,7 +912,15 @@ func (s *Smart) desiredCountry() (country string, strict bool) {
 	if !s.countryAffinity {
 		return "", false
 	}
-	return s.currentAffinityCountry(), false
+	country = s.currentAffinityCountry()
+	if country == "" {
+		return "", false
+	}
+	// Once affinity learns a country, both IPv4 and IPv6 are constrained to
+	// that same country. Silently dropping the pin on one-family trouble makes
+	// a dual-stack app appear to come from two countries, which is exactly what
+	// affinity is meant to prevent.
+	return country, true
 }
 
 func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
@@ -1151,14 +1159,6 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 				}
 			}
 		}
-	}
-
-	if len(selected) == 0 && desiredCountry != "" && !strictCountry && s.countryAffinity {
-		// The sticky country is no longer usable for this family. Clear it and
-		// retry exactly once without a country pin; the successful winner will
-		// establish the next affinity country.
-		s.setAffinityCountry("")
-		return s.filterProxies(metadata, wildcardTarget, names, weights, all, minCount, isUDP)
 	}
 
 	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || autoIPv4 || autoIPv6 || strictCountry) {
