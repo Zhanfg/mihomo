@@ -1,0 +1,84 @@
+name: Smart Real Config Shadow Fast
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/smart-alpha-routing-sim
+    paths:
+      - ".github/workflows/smart-real-config-shadow-fast.yml"
+      - ".github/scripts/smart-real-config-shadow.py"
+      - ".github/fixtures/substore-smart-refined-20260925.structure.json.gz.b64"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-real-shadow-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shadow-fast:
+    name: Fast shadow / 11 providers / 88 groups / 71 rulesets / 1357 rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Verify preinstalled runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml
+          print("PyYAML", yaml.__version__)
+          PY
+          test -s /etc/ssl/certs/ca-certificates.crt
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build shadow core
+        run: |
+          go build -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-real-shadow-fast-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-real-shadow-test
+
+      - name: Run production-structure shadow
+        run: |
+          python3 .github/scripts/smart-real-config-shadow.py \
+            --manifest .github/fixtures/substore-smart-refined-20260925.structure.json.gz.b64 \
+            --bin "$PWD/mihomo-real-shadow-test"
+
+      - name: Publish summary
+        if: always()
+        shell: bash
+        run: |
+          echo "### Fast real-config shadow" >> "$GITHUB_STEP_SUMMARY"
+          for f in .real-shadow-artifacts/structural-summary.json \
+                   .real-shadow-artifacts/runtime-readiness.json \
+                   .real-shadow-artifacts/runtime-summary.json; do
+            if [[ -f "$f" ]]; then
+              echo "#### `$f`" >> "$GITHUB_STEP_SUMMARY"
+              echo '~~~json' >> "$GITHUB_STEP_SUMMARY"
+              cat "$f" >> "$GITHUB_STEP_SUMMARY"
+              echo '~~~' >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-real-config-shadow-fast-${{ github.run_id }}
+          path: |
+            .real-shadow-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
