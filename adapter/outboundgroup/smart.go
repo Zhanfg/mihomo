@@ -2022,8 +2022,13 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 			// existing Smart record, so it survives restarts without another
 			// resident model or a second database.
 			if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
-				calKey := smart.ModelCalibrationWeightType(isUDP)
+				calKey := smart.ModelCalibrationWeightTypeForIP(isUDP, metadata.DstIP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
+				if oldCalibration <= 0 {
+					// Preserve learning from builds that used one calibration
+					// slot per transport before family-aware residuals existed.
+					oldCalibration = atomicRecord.GetWeight(smart.ModelCalibrationWeightType(isUDP))
+				}
 				var newCalibration float64
 				calculatedWeight, newCalibration = smart.AdaptModelPrediction(
 					calculatedWeight,
