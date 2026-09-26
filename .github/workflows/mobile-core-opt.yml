@@ -1,0 +1,165 @@
+name: Mobile Core Opt
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/mobile-core-opt
+    paths:
+      - "adapter/**"
+      - "component/keepalive/**"
+      - ".github/fixtures/mobile-core-opt.yaml"
+      - ".github/workflows/mobile-core-opt.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-core-opt
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    name: Mobile Smart eBPF / Android arm64
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          HEAD_SHORT="$(printf '%s' "$HEAD_SHA" | cut -c1-7)"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          echo "HEAD_SHORT=$HEAD_SHORT" >> "$GITHUB_ENV"
+          go version
+          git log -1 --oneline
+
+      - name: gofmt gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=(
+            adapter/adapter.go
+            adapter/capability.go
+            adapter/capability_tier_test.go
+            adapter/outboundgroup/smart.go
+            adapter/outboundgroup/capability_test.go
+            component/keepalive/tcp_keepalive.go
+            component/keepalive/tcp_keepalive_go122.go
+            component/keepalive/tcp_keepalive_go123.go
+            component/keepalive/default_android.go
+            component/keepalive/default_other.go
+          )
+          gofmt -d "${FILES[@]}" | tee /tmp/gofmt.diff
+          test ! -s /tmp/gofmt.diff
+
+      - name: Focused routing tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|ExitCountry|ProxyIdentity)' -count=1
+          go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart)' -count=1
+
+      - name: Full adapter regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter/... -count=1
+
+      - name: Keepalive tests and Android compile
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/keepalive -count=1
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go test -c ./component/keepalive -o /tmp/keepalive-android.test
+          ! grep -R 'runtime.GOOS == "android"' component/keepalive
+
+      - name: Build Linux parser core
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
+
+      - name: Parse mobile integration fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mihomo-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee MOBILE_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" MOBILE_SELFTEST.txt
+
+      - name: Build baseline Android core
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=baseline-$HEAD_SHORT' -w -s -buildid="             -o /tmp/mihomo-full
+
+      - name: Build optimized Android core
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          VERSION="smart-ebpf-$HEAD_SHORT"
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
+          TAGS="with_ebpf no_tailscale no_zerotier no_easytier"
+          go build -buildvcs=false -tags "$TAGS" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          test -s "$OUT"
+          file "$OUT" | tee FILE_INFO.txt
+          strings "$OUT" | grep -q "api4.ipify.org"
+          strings "$OUT" | grep -q "api6.ipify.org"
+          strings "$OUT" | grep -q "country-affinity"
+          gzip -9 -c "$OUT" > "$OUT.gz"
+          sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
+
+          BASE_SIZE="$(stat -c %s /tmp/mihomo-full)"
+          MOB_SIZE="$(stat -c %s "$OUT")"
+          SAVED="$((BASE_SIZE - MOB_SIZE))"
+          PCT="$(awk -v a="$SAVED" -v b="$BASE_SIZE" 'BEGIN{if(b==0){print "0.00"}else{printf "%.2f",a*100/b}}')"
+          {
+            echo "baseline_bytes=$BASE_SIZE"
+            echo "mobile_bytes=$MOB_SIZE"
+            echo "saved_bytes=$SAVED"
+            echo "saved_percent=$PCT"
+          } | tee SIZE_REPORT.txt
+          test "$MOB_SIZE" -le "$BASE_SIZE"
+
+          {
+            echo "source=$HEAD_SHA"
+            echo "version=$VERSION"
+            echo "target=android/arm64"
+            echo "tags=$TAGS"
+            echo "gvisor=excluded"
+            echo "with_low_memory=excluded"
+            echo "android_keepalive_default=idle60s,interval20s"
+            echo "country_routing=MMDB reuse,no new database"
+            echo "mobile_features=auto-ip-family,country,country-affinity"
+          } > BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-ebpf-mobile-a64-${{ env.HEAD_SHORT }}
+          path: |
+            mihomo-a64-smart-ebpf-*
+            SHA256SUMS
+            BUILD_INFO.txt
+            FILE_INFO.txt
+            SIZE_REPORT.txt
+            MOBILE_SELFTEST.txt
+            .github/fixtures/mobile-core-opt.yaml
+          if-no-files-found: error
+          retention-days: 30
