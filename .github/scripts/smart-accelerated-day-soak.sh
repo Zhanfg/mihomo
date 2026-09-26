@@ -26,6 +26,10 @@ VF_H="mhsfh"
 VF_N="mhsfn"
 VS_H="mhsslh"
 VS_N="mhssln"
+VF_W="mhsfw"
+VW_F="mhswf"
+VS_W="mhssw"
+VW_S="mhsws"
 
 TPROXY_PORT=19898
 TPROXY_MARK=0x1
@@ -124,6 +128,35 @@ sudo ip -n "$NS_SLOW" -6 addr add fd94::2/64 dev "$VS_N" nodad
 sudo ip -n "$NS_SLOW" link set "$VS_N" up
 sudo ip -n "$NS_SLOW" route add default via 10.94.0.1
 sudo ip -n "$NS_SLOW" -6 route add default via fd94::1
+
+# Dedicated proxy->WAN transit links keep soak results independent of hosted-runner FORWARD policy.
+sudo ip link add "$VF_W" type veth peer name "$VW_F"
+sudo ip link set "$VF_W" netns "$NS_FAST"
+sudo ip link set "$VW_F" netns "$NS_WAN"
+sudo ip -n "$NS_FAST" addr add 10.95.0.1/30 dev "$VF_W"
+sudo ip -n "$NS_FAST" -6 addr add fd95::1/64 dev "$VF_W" nodad
+sudo ip -n "$NS_WAN" addr add 10.95.0.2/30 dev "$VW_F"
+sudo ip -n "$NS_WAN" -6 addr add fd95::2/64 dev "$VW_F" nodad
+sudo ip -n "$NS_FAST" link set "$VF_W" up
+sudo ip -n "$NS_WAN" link set "$VW_F" up
+sudo ip -n "$NS_FAST" route replace 10.92.0.0/24 via 10.95.0.2 dev "$VF_W" src 10.93.0.2
+sudo ip -n "$NS_FAST" -6 route replace fd92::/64 via fd95::2 dev "$VF_W" src fd93::2
+sudo ip -n "$NS_WAN" route replace 10.93.0.0/24 via 10.95.0.1 dev "$VW_F"
+sudo ip -n "$NS_WAN" -6 route replace fd93::/64 via fd95::1 dev "$VW_F"
+
+sudo ip link add "$VS_W" type veth peer name "$VW_S"
+sudo ip link set "$VS_W" netns "$NS_SLOW"
+sudo ip link set "$VW_S" netns "$NS_WAN"
+sudo ip -n "$NS_SLOW" addr add 10.96.0.1/30 dev "$VS_W"
+sudo ip -n "$NS_SLOW" -6 addr add fd96::1/64 dev "$VS_W" nodad
+sudo ip -n "$NS_WAN" addr add 10.96.0.2/30 dev "$VW_S"
+sudo ip -n "$NS_WAN" -6 addr add fd96::2/64 dev "$VW_S" nodad
+sudo ip -n "$NS_SLOW" link set "$VS_W" up
+sudo ip -n "$NS_WAN" link set "$VW_S" up
+sudo ip -n "$NS_SLOW" route replace 10.92.0.0/24 via 10.96.0.2 dev "$VS_W" src 10.94.0.2
+sudo ip -n "$NS_SLOW" -6 route replace fd92::/64 via fd96::2 dev "$VS_W" src fd94::2
+sudo ip -n "$NS_WAN" route replace 10.94.0.0/24 via 10.96.0.1 dev "$VW_S"
+sudo ip -n "$NS_WAN" -6 route replace fd94::/64 via fd96::1 dev "$VW_S"
 
 sudo iptables -I FORWARD 1 -j ACCEPT
 sudo ip6tables -I FORWARD 1 -j ACCEPT
