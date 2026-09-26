@@ -849,6 +849,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 			FormatDBKey(KeyTypeRanking, config),
 			FormatDBKey(KeyTypePrefetch, config),
 			FormatDBKey(KeyTypeHostFailures, config),
+			FormatDBKey(KeyTypeVector, config),
 		}, false)
 	} else if level == "group" {
 		s.DBBatchDeletePrefix([]string{
@@ -857,6 +858,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 			FormatDBKey(KeyTypeRanking, config, group),
 			FormatDBKey(KeyTypePrefetch, config, group),
 			FormatDBKey(KeyTypeHostFailures, config, group),
+			FormatDBKey(KeyTypeVector, config, group),
 		}, false)
 	}
 
