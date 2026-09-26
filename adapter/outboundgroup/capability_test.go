@@ -38,13 +38,16 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 		"prefer-ipv6":    true,
 		"require-ipv4":   false,
 		"require-ipv6":   true,
-		"auto-ip-family": true,
+		"auto-ip-family":  true,
+		"country":         "JP",
+		"country-affinity": true,
 	}
 	smartOpt := SmartOption{}
 	if err := decoder.Decode(smartRaw, &smartOpt); err != nil {
 		t.Fatalf("decode smart directives: %v", err)
 	}
-	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily {
+	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily ||
+		smartOpt.Country != "JP" || !smartOpt.CountryAffinity {
 		t.Fatalf("unexpected smart directives: %+v", smartOpt)
 	}
 
