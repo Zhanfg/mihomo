@@ -1054,13 +1054,15 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		sort.SliceStable(proxies, func(i, j int) bool {
 			ni, nj := adapter.ProxyIdentity(proxies[i]), adapter.ProxyIdentity(proxies[j])
 			ki, kj := allKeys[ni], allKeys[nj]
-			if hasPriority && ki.factor != kj.factor {
-				return ki.factor > kj.factor
-			}
 			// Known IDC exits remain available as a last resort, but every
-			// non-IDC/unknown candidate ranks ahead of them.
+			// non-IDC/unknown candidate ranks ahead of them. This precedes
+			// policy-priority so a country/name preference cannot accidentally
+			// promote a hosting ASN above a usable access-network exit.
 			if ki.datacenter != kj.datacenter {
 				return !ki.datacenter
+			}
+			if hasPriority && ki.factor != kj.factor {
+				return ki.factor > kj.factor
 			}
 			// Tolerance: delays within tolerance are treated as equal, preventing jitter
 			if s.tolerance > 0 {
