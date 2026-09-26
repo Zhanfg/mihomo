@@ -1,0 +1,101 @@
+name: MMDB Country Bootstrap Fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/mmdb-country-bootstrap
+    paths:
+      - "component/mmdb/**"
+      - "component/geodata/**"
+      - "adapter/outboundgroup/smart.go"
+      - ".github/workflows/mmdb-country-bootstrap.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mmdb-country-bootstrap
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          HEAD_SHORT="$(printf '%s' "$HEAD_SHA" | cut -c1-7)"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          echo "HEAD_SHORT=$HEAD_SHORT" >> "$GITHUB_ENV"
+
+      - name: gofmt
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=(
+            component/mmdb/mmdb.go
+            component/mmdb/reader.go
+            component/mmdb/reader_failsafe_test.go
+            component/geodata/init.go
+            component/geodata/init_atomic_test.go
+            adapter/outboundgroup/smart.go
+          )
+          gofmt -d "${FILES[@]}" | tee /tmp/gofmt.diff
+          test ! -s /tmp/gofmt.diff
+
+      - name: MMDB / geodata tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/mmdb ./component/geodata -count=1
+
+      - name: Smart regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter/outboundgroup ./component/smart/... -count=1
+
+      - name: Android arm64 build
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          VERSION="smart-ebpf-$HEAD_SHORT"
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
+          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          test -s "$OUT"
+          file "$OUT" | tee FILE_INFO.txt
+          gzip -9 -c "$OUT" > "$OUT.gz"
+          sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
+          {
+            echo "source=$HEAD_SHA"
+            echo "version=$VERSION"
+            echo "fix=missing-MMDB-fail-soft+atomic-bootstrap"
+            echo "target=android/arm64"
+            echo "tags=with_gvisor with_ebpf"
+          } > BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-ebpf-mmdbfix-a64-${{ env.HEAD_SHORT }}
+          path: |
+            mihomo-a64-smart-ebpf-*
+            SHA256SUMS
+            BUILD_INFO.txt
+            FILE_INFO.txt
+          if-no-files-found: error
+          retention-days: 30
