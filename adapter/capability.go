@@ -49,13 +49,17 @@ const (
 )
 
 type capabilityEntry struct {
-	mu      sync.Mutex
-	known   bool
-	ok      bool
-	expire  time.Time
-	probing bool
-	exitIP  netip.Addr
-	country string
+	mu              sync.Mutex
+	known           bool
+	ok              bool
+	expire           time.Time
+	probing          bool
+	exitIP           netip.Addr
+	country          string
+	asn              string
+	asnOrg           string
+	datacenterKnown  bool
+	datacenter       bool
 }
 
 type capabilityState struct {
@@ -270,11 +274,19 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	if ok && exitIP.IsValid() {
 		if entry.exitIP != exitIP {
 			entry.country = ""
+			entry.asn = ""
+			entry.asnOrg = ""
+			entry.datacenterKnown = false
+			entry.datacenter = false
 		}
 		entry.exitIP = exitIP
 	} else if kind == capabilityIPv4 || kind == capabilityIPv6 {
 		entry.exitIP = netip.Addr{}
 		entry.country = ""
+		entry.asn = ""
+		entry.asnOrg = ""
+		entry.datacenterKnown = false
+		entry.datacenter = false
 	}
 	entry.mu.Unlock()
 
@@ -488,6 +500,99 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	}
 	entry.mu.Unlock()
 	return true, country
+}
+
+var datacenterOrgTokens = [...]string{
+	"hosting",
+	"host",
+	"server",
+	"cloud",
+	"data center",
+	"datacenter",
+	"colocation",
+	"colo",
+	"vps",
+	"digitalocean",
+	"vultr",
+	"choopa",
+	"linode",
+	"akamai connected cloud",
+	"hetzner",
+	"ovh",
+	"leaseweb",
+	"fdcserver",
+	"contabo",
+	"netcup",
+	"scaleway",
+	"softlayer",
+	"zenlayer",
+}
+
+// isDatacenterASNOrganization is intentionally conservative. It classifies the
+// ASN organization already present in Mihomo's ASN MMDB and does not introduce
+// a residential-IP database, remote reputation API or another background
+// worker. False positives are harmless because Smart uses this as a soft
+// preference and falls back to IDC nodes when no better exit exists.
+func isDatacenterASNOrganization(organization string) bool {
+	org := strings.ToLower(strings.TrimSpace(organization))
+	if org == "" {
+		return false
+	}
+	for _, token := range datacenterOrgTokens {
+		if strings.Contains(org, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExitDatacenterForProxy classifies the measured public exit for one address
+// family with the existing ASN MMDB. It reuses the same capability probe and
+// caches the result on the family entry, so avoid-datacenter adds no network
+// request on the selection hot path.
+func ExitDatacenterForProxy(p C.Proxy, ipv6 bool) (known, datacenter bool, asn, organization string) {
+	if p == nil {
+		return false, false, "", ""
+	}
+	state := capabilityStateForProxy(p)
+	entry := &state.ipv4
+	kind := capabilityIPv4
+	if ipv6 {
+		entry = &state.ipv6
+		kind = capabilityIPv6
+	}
+	if state.stateOrProbe(p, kind) != capYes {
+		return false, false, "", ""
+	}
+
+	entry.mu.Lock()
+	if entry.datacenterKnown {
+		known, datacenter, asn, organization =
+			true, entry.datacenter, entry.asn, entry.asnOrg
+		entry.mu.Unlock()
+		return
+	}
+	exitIP := entry.exitIP
+	entry.mu.Unlock()
+	if !exitIP.IsValid() {
+		return false, false, "", ""
+	}
+
+	asn, organization = mmdb.ASNInstance().LookupASN(exitIP.AsSlice())
+	if asn == "" && organization == "" {
+		return false, false, "", ""
+	}
+	datacenter = isDatacenterASNOrganization(organization)
+
+	entry.mu.Lock()
+	if entry.exitIP == exitIP {
+		entry.asn = asn
+		entry.asnOrg = organization
+		entry.datacenter = datacenter
+		entry.datacenterKnown = true
+	}
+	entry.mu.Unlock()
+	return true, datacenter, asn, organization
 }
 
 // ExitIPForProxy exposes the cached observed public source address for
