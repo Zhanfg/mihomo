@@ -61,6 +61,11 @@ const (
 	floodWindow    = 2 * time.Second
 	floodThreshold = 50
 
+	// A node that just failed a real dial is kept out of new Smart selections for
+	// a short window. This prevents a thundering herd from repeatedly choosing
+	// the same stale-but-still-"alive" node before async stats/health checks catch up.
+	dialFailureQuarantine = 8 * time.Second
+
 	siteKeyCacheLimit = 4096 // sites remembered as site keys, relearned after eviction
 )
 
@@ -115,6 +120,10 @@ type Smart struct {
 	suppressLast  atomic.Int64
 
 	probeThrottle smart.ProbeThrottle
+
+	// node name -> quarantine expiry (UnixNano). sync.Map is used because dial
+	// failures and Smart selections happen concurrently on the hot path.
+	dialQuarantine sync.Map
 }
 
 type dialResult struct {
@@ -200,6 +209,33 @@ func (s *Smart) GetConfigFilename() string {
 	return s.configName
 }
 
+func (s *Smart) quarantineNode(name string) {
+	if name == "" {
+		return
+	}
+	s.dialQuarantine.Store(name, time.Now().Add(dialFailureQuarantine).UnixNano())
+}
+
+func (s *Smart) clearNodeQuarantine(name string) {
+	if name == "" {
+		return
+	}
+	s.dialQuarantine.Delete(name)
+}
+
+func (s *Smart) nodeQuarantined(name string) bool {
+	value, ok := s.dialQuarantine.Load(name)
+	if !ok {
+		return false
+	}
+	expiry, ok := value.(int64)
+	if !ok || time.Now().UnixNano() >= expiry {
+		s.dialQuarantine.Delete(name)
+		return false
+	}
+	return true
+}
+
 // ref: component/dialer/dialer.go:314
 func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, metadata *C.Metadata, start time.Time, singleDialFunc func(context.Context, C.Proxy, *C.Metadata, time.Time) (C.Conn, int64, error)) (C.Proxy, C.Conn, int64, error) {
 	if len(proxies) == 1 {
@@ -268,12 +304,14 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 			return nil, connectTime, err
 		}
 		if !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+			s.quarantineNode(proxy.Name())
 			// metadata may be re-written by a later retry's selectProxies.
 			go s.recordConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
 		}
 		return nil, connectTime, err
 	}
 
+	s.clearNodeQuarantine(proxy.Name())
 	return c, connectTime, nil
 }
 
@@ -443,10 +481,14 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 					return nil, err
 				}
 				finalErr = err
+				if !errors.Is(err, context.Canceled) {
+					s.quarantineNode(proxy.Name())
+				}
 				go s.recordConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err)
 				continue
 			}
 
+			s.clearNodeQuarantine(proxy.Name())
 			s.adoptUnwrapWinner(metadata, proxy)
 			s.onDialSuccess()
 			return s.WrapPacketConnWithMetric(pc, proxy, metadata, connectTime), nil
@@ -630,7 +672,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	for i, name := range names {
 		checkNodeUsed[name] = true
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) {
+		if proxy == nil || s.nodeQuarantined(name) || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) {
 			continue
 		}
 		w := 0.0
@@ -709,6 +751,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	for _, p := range all {
 		name := p.Name()
+		if s.nodeQuarantined(name) {
+			continue
+		}
 		if checkNodeUsed[name] {
 			continue
 		}
@@ -738,6 +783,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	if len(selected) == 0 {
 		fallbackAll := defaultSort(slices.Clone(all))
 		for _, p := range fallbackAll {
+			if s.nodeQuarantined(p.Name()) {
+				continue
+			}
 			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
 				selected = append(selected, p)
 			}
@@ -748,6 +796,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
+				if s.nodeQuarantined(p.Name()) {
+					continue
+				}
 				if p.AliveForTestUrl(s.testUrl) {
 					selected = append(selected, p)
 				}
@@ -759,7 +810,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if wtFailNodes[p.Name()] == 1 {
+				if s.nodeQuarantined(p.Name()) || wtFailNodes[p.Name()] == 1 {
 					continue
 				}
 				selected = append(selected, p)
