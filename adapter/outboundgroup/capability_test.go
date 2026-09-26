@@ -66,3 +66,23 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 		t.Fatalf("unexpected url-test directives: %+v", urlOpt)
 	}
 }
+
+
+func TestCountryAffinityBecomesStrictAfterLearning(t *testing.T) {
+	s := &Smart{countryAffinity: true}
+	if country, strict := s.desiredCountry(); country != "" || strict {
+		t.Fatalf("unlearned affinity = (%q,%v), want empty/non-strict", country, strict)
+	}
+	s.setAffinityCountry("JP")
+	if country, strict := s.desiredCountry(); country != "JP" || !strict {
+		t.Fatalf("learned affinity = (%q,%v), want JP/strict", country, strict)
+	}
+}
+
+func TestExplicitCountryRemainsStrict(t *testing.T) {
+	s := &Smart{country: "SG", countryAffinity: true}
+	s.setAffinityCountry("JP")
+	if country, strict := s.desiredCountry(); country != "SG" || !strict {
+		t.Fatalf("explicit country = (%q,%v), want SG/strict", country, strict)
+	}
+}
