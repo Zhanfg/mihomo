@@ -395,7 +395,6 @@ func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
 	}
 }
 
-
 func TestIPFamilyProbeFallsBackToSecondEndpoint(t *testing.T) {
 	p := &capabilityProbeProxy{failFirst: true}
 	entry := &capabilityEntry{}
