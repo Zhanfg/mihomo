@@ -341,7 +341,6 @@ func TestSmartTaskScheduleRunsWhatCameDueWhilePaused(t *testing.T) {
 	}
 }
 
-
 func TestRunLearningMaintenanceHonorsTrafficActivity(t *testing.T) {
 	s := &Smart{}
 	calls := 0
