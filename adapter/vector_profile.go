@@ -167,13 +167,17 @@ func BuildNodeVector(p C.Proxy, testURL string, learnedWeight float64) NodeVecto
 		profile.IPv6Exit = ip
 	}
 
-	country4Known, profile.Country4 := ExitCountryForProxy(p, false)
-	country6Known, profile.Country6 := ExitCountryForProxy(p, true)
+	country4Known, country4 := ExitCountryForProxy(p, false)
+	country6Known, country6 := ExitCountryForProxy(p, true)
+	profile.Country4 = country4
+	profile.Country6 = country6
 	profile.Vector[vectorFamilyCountryConsistency] = familyConsistency(
 		country4Known, profile.Country4, country6Known, profile.Country6)
 
-	net4Known, profile.ASN4, profile.Vendor4 := ExitNetworkForProxy(p, false)
-	net6Known, profile.ASN6, profile.Vendor6 := ExitNetworkForProxy(p, true)
+	net4Known, asn4, vendor4 := ExitNetworkForProxy(p, false)
+	net6Known, asn6, vendor6 := ExitNetworkForProxy(p, true)
+	profile.ASN4, profile.Vendor4 = asn4, vendor4
+	profile.ASN6, profile.Vendor6 = asn6, vendor6
 	switch {
 	case net4Known && net6Known && profile.ASN4 != "" && profile.ASN4 == profile.ASN6:
 		profile.Vector[vectorFamilyNetworkConsistency] = 1
