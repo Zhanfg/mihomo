@@ -6,6 +6,7 @@ on:
     branches:
       - feature/mobile-core-opt
       - feature/mobile-runtime-ai
+      - opt/android-runtime
     paths:
       - "adapter/**"
       - "component/keepalive/**"
@@ -64,6 +65,7 @@ jobs:
             component/keepalive/default_other.go
             component/smart/memory.go
             component/smart/memory_test.go
+            component/smart/weight.go
             component/smart/weight_adaptive_test.go
             dns/connection_pool.go
             hub/executor/concurrent_load_android.go
@@ -112,7 +114,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
 
       - name: Parse mobile integration fixture
         shell: bash
@@ -131,7 +133,7 @@ jobs:
           set -euo pipefail
           VERSION="smart-ebpf-$HEAD_SHORT"
           OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
-          TAGS="with_ebpf no_tailscale no_zerotier no_easytier"
+          TAGS="with_gvisor with_ebpf no_tailscale no_zerotier no_easytier"
           go build -buildvcs=false -tags "$TAGS" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
           test -s "$OUT"
           file "$OUT" | tee FILE_INFO.txt
@@ -146,7 +148,7 @@ jobs:
             echo "version=$VERSION"
             echo "target=android/arm64"
             echo "tags=$TAGS"
-            echo "gvisor=excluded"
+            echo "gvisor=included-for-fallback"
             echo "with_low_memory=excluded"
             echo "android_keepalive_default=idle60s,interval20s"
             echo "country_routing=MMDB reuse,no new database"
