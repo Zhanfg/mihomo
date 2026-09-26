@@ -20,6 +20,7 @@ proxy-groups:
     interval: 300
     auto-ip-family: true
     country-affinity: true
+    avoid-datacenter: true
     empty-fallback: REJECT
 
   - name: 日本智能
