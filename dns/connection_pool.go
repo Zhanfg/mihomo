@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -89,7 +90,17 @@ func dnsPoolMaxIdle(disableReuse bool) int {
 	if disableReuse {
 		return 0
 	}
+	if runtime.GOOS == "android" {
+		return 4
+	}
 	return 8
+}
+
+func dnsStreamMaxOpen() int {
+	if runtime.GOOS == "android" {
+		return 12
+	}
+	return dnsMaxOpenConnections
 }
 
 // newDNSStreamPool builds the pool used for TCP and DoT, where reuse saves a
@@ -97,7 +108,7 @@ func dnsPoolMaxIdle(disableReuse bool) int {
 // worth having.
 func newDNSStreamPool(maxIdle int) *dnsConnectionPool {
 	return newDNSConnectionPool(dnsConnectionPoolOptions{
-		maxOpen:     dnsMaxOpenConnections,
+		maxOpen:     dnsStreamMaxOpen(),
 		maxIdle:     maxIdle,
 		idleTimeout: dnsStreamIdleTimeout,
 		maxLifetime: dnsStreamMaxLifetime,

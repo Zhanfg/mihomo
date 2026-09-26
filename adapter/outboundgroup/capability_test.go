@@ -32,19 +32,22 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
 	smartRaw := map[string]any{
-		"name":           "双栈智能",
-		"type":           "smart",
-		"prefer-ipv4":    true,
-		"prefer-ipv6":    true,
-		"require-ipv4":   false,
-		"require-ipv6":   true,
-		"auto-ip-family": true,
+		"name":             "双栈智能",
+		"type":             "smart",
+		"prefer-ipv4":      true,
+		"prefer-ipv6":      true,
+		"require-ipv4":     false,
+		"require-ipv6":     true,
+		"auto-ip-family":   true,
+		"country":          "JP",
+		"country-affinity": true,
 	}
 	smartOpt := SmartOption{}
 	if err := decoder.Decode(smartRaw, &smartOpt); err != nil {
 		t.Fatalf("decode smart directives: %v", err)
 	}
-	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily {
+	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily ||
+		smartOpt.Country != "JP" || !smartOpt.CountryAffinity {
 		t.Fatalf("unexpected smart directives: %+v", smartOpt)
 	}
 

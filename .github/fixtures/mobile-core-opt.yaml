@@ -1,0 +1,34 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: true
+
+listeners:
+  - name: ebpf-in
+    type: ebpf
+    local:
+      data-plane: cgroup
+      ipv6: true
+      dns-mode: hijack
+
+proxy-groups:
+  - name: 双栈智能
+    type: smart
+    proxies: [DIRECT]
+    url: https://www.apple.com/library/test/success.html
+    interval: 300
+    auto-ip-family: true
+    country-affinity: true
+    empty-fallback: REJECT
+
+  - name: 日本智能
+    type: smart
+    proxies: [DIRECT]
+    url: https://www.apple.com/library/test/success.html
+    interval: 300
+    country: JP
+    empty-fallback: REJECT
+
+rules:
+  - MATCH,双栈智能

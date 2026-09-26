@@ -292,3 +292,30 @@ func TestIPv4PreferencePenalty(t *testing.T) {
 		t.Fatalf("missing IPv4 penalty = %d, want %d", got, capabilityMissingPenalty)
 	}
 }
+
+func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("country")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = true
+	state.ipv6.country = "US"
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.mu.Unlock()
+
+	if known, country := ExitCountryForProxy(p, false); !known || country != "JP" {
+		t.Fatalf("IPv4 country = (%v, %q), want (true, JP)", known, country)
+	}
+	if known, country := ExitCountryForProxy(p, true); !known || country != "US" {
+		t.Fatalf("IPv6 country = (%v, %q), want (true, US)", known, country)
+	}
+}

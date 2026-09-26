@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -368,6 +370,40 @@ func (p *Proxy) StatusProbe(ctx context.Context, rawURL string) (*smart.ProbeRes
 		return nil, err
 	}
 	return result, nil
+}
+
+// ExitIPProbe returns the public source address observed through this proxy.
+//
+// It reuses the same browser-like request path as StatusTest, but only reads a
+// tiny response body. The method intentionally does not touch normal URL-test
+// health/alive history, so country/family telemetry cannot flap a proxy group.
+func (p *Proxy) ExitIPProbe(ctx context.Context, rawURL string) (netip.Addr, error) {
+	var (
+		status  int
+		body    []byte
+		readErr error
+	)
+	err := p.statusRequest(ctx, rawURL, func(resp *http.Response) {
+		status = resp.StatusCode
+		if status < http.StatusOK || status >= http.StatusMultipleChoices {
+			return
+		}
+		body, readErr = io.ReadAll(io.LimitReader(resp.Body, 128))
+	})
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	if readErr != nil {
+		return netip.Addr{}, readErr
+	}
+	if status < http.StatusOK || status >= http.StatusMultipleChoices {
+		return netip.Addr{}, fmt.Errorf("unexpected exit IP probe status: %d", status)
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(string(body)))
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return ip.Unmap(), nil
 }
 
 var _ smart.StatusProber = (*Proxy)(nil)

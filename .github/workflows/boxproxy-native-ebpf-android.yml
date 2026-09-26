@@ -9,12 +9,17 @@ on:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
       - ".github/fixtures/ip-family-routing.yaml"
+      - ".github/fixtures/mobile-core-opt.yaml"
+      - "adapter/adapter.go"
       - "adapter/capability.go"
       - "adapter/capability_tier_test.go"
       - "listener/**"
       - "common/ebpf/**"
       - "adapter/outboundgroup/**"
       - "component/smart/**"
+      - "component/keepalive/**"
+      - "dns/connection_pool.go"
+      - "hub/executor/concurrent_load_*.go"
 
 permissions:
   contents: read
@@ -57,13 +62,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/inbound ./listener/sing_ebpf -count=1
+          CGO_ENABLED=0 go test -tags "with_ebpf no_tailscale no_zerotier no_easytier" ./listener/inbound ./listener/sing_ebpf -count=1
 
       - name: IP-family capability regressions
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|AddCapability)' -count=1
+          CGO_ENABLED=0 go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|AddCapability|ExitCountry|ProxyIdentity)' -count=1
           CGO_ENABLED=0 go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart)' -count=1
 
       - name: Smart regressions
@@ -72,11 +77,25 @@ jobs:
           set -euo pipefail
           CGO_ENABLED=0 go test ./adapter/outboundgroup ./component/smart/... -count=1
 
+      - name: Keepalive regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/keepalive -count=1
+          GOOS=android GOARCH=arm64 CGO_ENABLED=0 go test -c ./component/keepalive -o /tmp/keepalive-android.test
+
+      - name: DNS/executor regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./dns -count=1
+          go test ./hub/executor -count=1
+
       - name: Build Linux parser self-test core
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=se-test-$HEAD_SHORT' -w -s -buildid="               -o mihomo-boxproxy-ebpf-selftest
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=se-test-$HEAD_SHORT' -w -s -buildid="               -o mihomo-boxproxy-ebpf-selftest
 
       - name: Parse exact BoxProxy listener fixture
         shell: bash
@@ -91,6 +110,13 @@ jobs:
           set -euo pipefail
           ./mihomo-boxproxy-ebpf-selftest -t -f .github/fixtures/ip-family-routing.yaml 2>&1 | tee IP_FAMILY_SELFTEST.txt
           grep -qi "configuration file .* test is successful" IP_FAMILY_SELFTEST.txt
+
+      - name: Parse mobile whole-core directives
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mihomo-boxproxy-ebpf-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee MOBILE_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" MOBILE_SELFTEST.txt
 
       - name: Verify documented BoxProxy keys are accepted
         shell: bash
@@ -114,13 +140,14 @@ jobs:
           set -euo pipefail
           VERSION="smart-ebpf-$HEAD_SHORT"
           OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
-          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
           test -s "$OUT"
           file "$OUT" | tee FILE_INFO.txt
           strings "$OUT" | grep -q "github.com/metacubex/mihomo/component/smart"
           strings "$OUT" | grep -q "listener/sing_ebpf"
           strings "$OUT" | grep -q "api4.ipify.org"
           strings "$OUT" | grep -q "api6.ipify.org"
+          strings "$OUT" | grep -q "country-affinity"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
           {
@@ -129,8 +156,14 @@ jobs:
             echo "base=liuran001/mihomo:Alpha"
             echo "boxproxy_schema=listeners.type=ebpf"
             echo "target=android/arm64"
-            echo "tags=with_gvisor with_ebpf"
+            echo "tags=with_ebpf no_tailscale no_zerotier no_easytier"
             echo "cgo=0"
+            echo "gvisor=excluded"
+            echo "tailscale=excluded"
+            echo "zerotier=excluded"
+            echo "easytier=excluded"
+            echo "android_keepalive_default=idle60s,interval20s"
+            echo "country_routing=MMDB reuse,no new database"
           } > BUILD_INFO.txt
 
       - name: Upload Android core
@@ -144,7 +177,9 @@ jobs:
             FILE_INFO.txt
             BOXPROXY_SCHEMA_SELFTEST.txt
             IP_FAMILY_SELFTEST.txt
+            MOBILE_SELFTEST.txt
             .github/fixtures/boxproxy-ebpf-listener.yaml
             .github/fixtures/ip-family-routing.yaml
+            .github/fixtures/mobile-core-opt.yaml
           if-no-files-found: error
           retention-days: 30
