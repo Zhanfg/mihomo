@@ -341,7 +341,8 @@ jobs=[]
 for i in range(count):
     jobs.append(("udp" if i%5==0 else "http",i))
 res=[]
-with concurrent.futures.ThreadPoolExecutor(max_workers=64) as ex:
+workers=min(128, max(32, count))
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
     futs=[ex.submit(udp_one if k=="udp" else http_one,i) for k,i in jobs]
     for f in concurrent.futures.as_completed(futs): res.append(f.result())
 ok=sum(1 for r in res if r[0]); total=len(res); byt=sum(r[1] for r in res)
@@ -442,6 +443,40 @@ time.sleep(int(sys.argv[1])/1e9)
 PY
   fi
 done
+
+log "Extreme connection-table pressure: 256 simultaneous Smart sessions"
+cat > "$STATE/hold_connections.py" <<'PY'
+import socket,time,pathlib
+socks=[]
+for i in range(256):
+    try:
+        s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)
+        s.settimeout(4)
+        s.connect(("10.92.0.13",18080))
+        s.sendall(f"GET /hold/{i} HTTP/1.1\r\nHost: stream.test\r\n".encode())
+        socks.append(s)
+    except Exception:
+        pass
+pathlib.Path("/tmp/mh-soak-hold-ready").write_text(str(len(socks)))
+time.sleep(2.5)
+for s in socks:
+    try: s.close()
+    except Exception: pass
+PY
+sudo rm -f /tmp/mh-soak-hold-ready
+sudo ip netns exec "$NS_CLIENT" python3 "$STATE/hold_connections.py" >"$ART/hold-connections.log" 2>&1 &
+HOLD_PID=$!
+for _ in $(seq 1 50); do
+  [[ -f /tmp/mh-soak-hold-ready ]] && break
+  sleep 0.05
+done
+HOLD_OPEN="$(sudo cat /tmp/mh-soak-hold-ready 2>/dev/null || echo 0)"
+sample_metrics hold_peak
+HOLD_API="$(tail -n1 "$ART/metrics.csv" | cut -d, -f5)"
+printf 'opened=%s\napi_connections=%s\n' "$HOLD_OPEN" "$HOLD_API" | tee "$ART/hold-summary.txt"
+(( HOLD_OPEN >= 220 )) || die "connection pressure fixture opened fewer than 220/256 sessions"
+(( HOLD_API >= 180 )) || die "Mihomo connection table did not observe enough concurrent sessions"
+wait "$HOLD_PID" || true
 
 log "Post-day quiesce and leak checks"
 sleep 2
