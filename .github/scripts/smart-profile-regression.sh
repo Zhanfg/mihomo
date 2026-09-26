@@ -389,9 +389,9 @@ else
 fi
 
 log "6/6 rule surface + selected-state persistence"
-grep -q 'PROCESS-NAME' "$ART/rules.json" || die "process rules missing"
-grep -q 'RULE-SET' "$ART/rules.json" || die "rule-provider rules missing"
-grep -q 'DST-PORT' "$ART/rules.json" || die "port rules missing"
+jq -e '.rules[] | select(.type == "ProcessName" and .payload == "curl" and .proxy == "即时通讯")' "$ART/rules.json" >/dev/null || die "process rules missing"
+jq -e '.rules[] | select(.type == "RuleSet" and .payload == "TEST-DOMAIN")' "$ART/rules.json" >/dev/null || die "rule-provider rules missing"
+jq -e '.rules[] | select(.type == "DstPort" and .payload == "53" and .proxy == "DNS_Hijack")' "$ART/rules.json" >/dev/null || die "port rules missing"
 
 SELECT_CODE="$(curl -sS -o "$ART/select-manual.txt" -w '%{http_code}' \
   -X PUT -H 'Content-Type: application/json' \
