@@ -502,31 +502,23 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	return true, country
 }
 
-var knownDatacenterASNs = map[string]struct{}{
-	"16509":  {}, // Amazon
-	"14618":  {}, // Amazon
-	"8075":   {}, // Microsoft/Azure
-	"396982": {}, // Google Cloud
-	"14061":  {}, // DigitalOcean
-	"20473":  {}, // Vultr / Choopa
-	"63949":  {}, // Linode / Akamai Connected Cloud
-	"24940":  {}, // Hetzner
-	"16276":  {}, // OVH
-	"9009":   {}, // M247
-	"30058":  {}, // FDCservers
-	"51167":  {}, // Contabo
-	"197540": {}, // netcup
-	"12876":  {}, // Scaleway
-	"36351":  {}, // IBM SoftLayer
-	"31898":  {}, // Oracle
-	"45102":  {}, // Alibaba Cloud
-	"132203": {}, // Tencent Cloud
-	"55990":  {}, // Huawei Cloud
+func isKnownDatacenterASN(asn string) bool {
+	switch strings.TrimSpace(asn) {
+	case "16509", "14618", // Amazon
+		"8075", "396982", // Azure / Google Cloud
+		"14061", "20473", "63949", // DigitalOcean / Vultr / Linode
+		"24940", "16276", "9009", // Hetzner / OVH / M247
+		"30058", "51167", "197540", // FDCservers / Contabo / netcup
+		"12876", "36351", "31898", // Scaleway / SoftLayer / Oracle
+		"45102", "132203", "55990": // Alibaba / Tencent / Huawei Cloud
+		return true
+	default:
+		return false
+	}
 }
 
 var datacenterOrgTokens = [...]string{
 	"hosting",
-	"host",
 	"server",
 	"cloud",
 	"data center",
@@ -556,7 +548,7 @@ var datacenterOrgTokens = [...]string{
 // worker. False positives are harmless because Smart uses this as a soft
 // preference and falls back to IDC nodes when no better exit exists.
 func isDatacenterASN(asn, organization string) bool {
-	if _, known := knownDatacenterASNs[strings.TrimSpace(asn)]; known {
+	if isKnownDatacenterASN(asn) {
 		return true
 	}
 	org := strings.ToLower(strings.TrimSpace(organization))
