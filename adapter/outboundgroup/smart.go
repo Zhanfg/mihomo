@@ -60,6 +60,7 @@ const (
 	parallelDials           = 5
 	connectThreshold        = 5.0
 	statsQueueSize          = 512
+	androidStatsQueueSize   = 256
 	maintenanceActiveWindow = 30 * time.Minute
 
 	floodWindow    = 2 * time.Second
@@ -104,8 +105,10 @@ const (
 const asnInitRetryAfter = 5 * time.Minute
 
 var (
-	smartStatsOnce  sync.Once
-	smartStatsQueue chan func()
+	smartStatsOnce      sync.Once
+	smartStatsQueue     chan func()
+	smartStatsDropped   atomic.Int64
+	smartStatsDropLogAt atomic.Int64
 )
 
 func smartWorkerCount() int {
@@ -122,30 +125,56 @@ func smartParallelism() int {
 	return parallelDials
 }
 
+func smartStatsQueueCapacity() int {
+	if runtime.GOOS == "android" {
+		return androidStatsQueueSize
+	}
+	return statsQueueSize
+}
+
+func runSmartStatsJob(job func()) {
+	if job == nil {
+		return
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Errorln("[Smart] statistics worker recovered panic: %v", recovered)
+		}
+	}()
+	job()
+}
+
 func startSmartStatsWorkers() {
-	smartStatsQueue = make(chan func(), statsQueueSize)
+	smartStatsQueue = make(chan func(), smartStatsQueueCapacity())
 	for i := 0; i < smartWorkerCount(); i++ {
 		go func() {
 			for job := range smartStatsQueue {
-				job()
+				runSmartStatsJob(job)
 			}
 		}()
 	}
 }
 
-// enqueueSmartStats deliberately backpressures the close path when the bounded
-// queue is full instead of spawning an unbounded goroutine per connection.
-// Under normal load it is non-blocking; under a burst it trades a little close
-// latency for bounded RAM and scheduler pressure.
+// enqueueSmartStats is intentionally lossy under saturation. Learning
+// telemetry must never backpressure the proxy data plane: blocking a connection
+// close until a full stats queue drains can make the core look hung under
+// bursts or slow flash I/O. The queue remains bounded for RAM control and the
+// dropped samples are acceptable because Smart learns from a rolling history.
 func enqueueSmartStats(ctx context.Context, job func()) bool {
 	smartStatsOnce.Do(startSmartStatsWorkers)
-	if ctx == nil {
-		ctx = context.Background()
+	if ctx != nil && ctx.Err() != nil {
+		return false
 	}
 	select {
 	case smartStatsQueue <- job:
 		return true
-	case <-ctx.Done():
+	default:
+		dropped := smartStatsDropped.Add(1)
+		now := time.Now().Unix()
+		last := smartStatsDropLogAt.Load()
+		if now-last >= 60 && smartStatsDropLogAt.CompareAndSwap(last, now) {
+			log.Warnln("[Smart] statistics queue saturated; dropped telemetry samples=%d", dropped)
+		}
 		return false
 	}
 }
