@@ -2792,7 +2792,12 @@ func (s *Smart) getASNCode(metadata *C.Metadata) string {
 			ip = metadata.DstIP
 		}
 
-		asn, aso := mmdb.ASNInstance().LookupASN(ip.AsSlice())
+		asn, aso, err := mmdb.LookupASNOptional(C.Path.ASN(), ip.AsSlice())
+		if err != nil {
+			log.Debugln("[Smart] ASN lookup unavailable for %s: %v", ip.String(), err)
+			metadata.DstIPASN = "unknown"
+			return ""
+		}
 		if asn == "" {
 			metadata.DstIPASN = "unknown"
 		} else {
