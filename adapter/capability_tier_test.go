@@ -293,7 +293,6 @@ func TestIPv4PreferencePenalty(t *testing.T) {
 	}
 }
 
-
 func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
 	p := stub("country")
