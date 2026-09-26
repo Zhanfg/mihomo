@@ -32,3 +32,25 @@ func TestModelCalibrationWeightType(t *testing.T) {
 	require.Equal(t, WeightTypeModelCalibrationTCP, ModelCalibrationWeightType(false))
 	require.Equal(t, WeightTypeModelCalibrationUDP, ModelCalibrationWeightType(true))
 }
+
+
+func TestModelCalibrationWeightTypeForInputSeparatesFamilyAndScene(t *testing.T) {
+	v4Web := &ModelInput{IsTCP: true, DestIP: "1.1.1.1", Latency: 80}
+	v6Web := &ModelInput{IsTCP: true, DestIP: "2606:4700:4700::1111", Latency: 80}
+	v6Stream := &ModelInput{
+		IsTCP:              true,
+		DestIP:             "2606:4700:4700::1111",
+		Latency:            80,
+		DownloadTotal:      64,
+		MaxdownloadRate:    8192,
+		ConnectionDuration: 12,
+	}
+
+	k4 := ModelCalibrationWeightTypeForInput(v4Web)
+	k6 := ModelCalibrationWeightTypeForInput(v6Web)
+	ks := ModelCalibrationWeightTypeForInput(v6Stream)
+	require.NotEqual(t, k4, k6)
+	require.NotEqual(t, k6, ks)
+	require.Contains(t, k4, ":v4:")
+	require.Contains(t, k6, ":v6:")
+}
