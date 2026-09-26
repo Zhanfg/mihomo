@@ -79,7 +79,6 @@ func LookupCodeOptional(path string, ip net.IP) ([]string, error) {
 	return r.LookupCode(ip), nil
 }
 
-
 func LookupASNOptional(path string, ip net.IP) (asn string, aso string, err error) {
 	reader, err := maxminddb.Open(path)
 	if err != nil {
@@ -97,7 +96,9 @@ func IPInstance() IPReader {
 		log.Infoln("Load MMDB file: %s", mmdbPath)
 		mmdb, err := maxminddb.Open(mmdbPath)
 		if err != nil {
-			log.Fatalln("Can't load MMDB: %s", err.Error())
+			log.Errorln("Can't load MMDB; GeoIP lookup is temporarily disabled: %s", err.Error())
+			ipReader = IPReader{}
+			return
 		}
 		ipReader = IPReader{Reader: mmdb}
 		switch mmdb.Metadata.DatabaseType {
@@ -119,7 +120,9 @@ func ASNInstance() ASNReader {
 		log.Infoln("Load ASN file: %s", ASNPath)
 		asn, err := maxminddb.Open(ASNPath)
 		if err != nil {
-			log.Fatalln("Can't load ASN: %s", err.Error())
+			log.Errorln("Can't load ASN; ASN lookup is temporarily disabled: %s", err.Error())
+			asnReader = ASNReader{}
+			return
 		}
 		asnReader = ASNReader{Reader: asn}
 	})
