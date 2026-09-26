@@ -416,15 +416,28 @@ func (r *smartGlobalTaskRegistry) release(s *Smart, run *smartGlobalTaskRun) {
 
 var globalSmartTasks smartGlobalTaskRegistry
 
+func (s *Smart) runLearningMaintenance(run func()) {
+	if run == nil || !s.trafficRecentlyActive(time.Now()) {
+		return
+	}
+	run()
+}
+
 func (s *Smart) startGroupTasks() {
 	tasks := []smartScheduledTask{
 		{10 * time.Minute, cleanupInterval, "Group orphaned nodes clean up", s.cleanupOrphanedNodeCache, true},
-		{5 * time.Minute, prefetchInterval, "Group targets prefetch", s.runPrefetch, false},
-		{time.Minute, claimInterval, "Group network claims refresh", s.claimASNEvidence, false},
-		{5 * time.Minute, checkInterval, "Group nodes stable check", s.checkNodesStable, false},
-		{5 * time.Minute, rankingInterval, "Group nodes ranking", s.updateNodeRanking, false},
+		{5 * time.Minute, prefetchInterval, "Group targets prefetch", func() { s.runLearningMaintenance(s.runPrefetch) }, false},
+		{time.Minute, claimInterval, "Group network claims refresh", func() { s.runLearningMaintenance(s.claimASNEvidence) }, false},
+		{5 * time.Minute, checkInterval, "Group nodes stable check", func() { s.runLearningMaintenance(s.checkNodesStable) }, false},
+		{5 * time.Minute, rankingInterval, "Group nodes ranking", func() { s.runLearningMaintenance(s.updateNodeRanking) }, false},
+
+		// Recovery stays active while the tunnel is up. These jobs are the
+		// mechanism that brings a failed node back before user traffic needs
+		// it, so they are intentionally not suppressed by the learning-idle
+		// gate above.
 		{5 * time.Minute, recoveryCheckInterval, "Group nodes recovery check", s.checkBlockedNodes, false},
 		{15 * time.Minute, hostStatusCheckInterval, "Group host status check", s.checkHostStatus, false},
+
 		{time.Minute, prefetchInterval, "Group hostFailLimit refresh", s.applyHostFailLimit, false},
 		{10 * time.Minute, cleanupInterval, "Group old records clean up", func() { s.store.CleanupOldRecords(s.Name(), s.configName) }, false},
 	}

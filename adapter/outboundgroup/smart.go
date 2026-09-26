@@ -1978,22 +1978,20 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error, markCloseFailure bool,
 ) bool {
-	if !s.beginBackgroundWork() {
-		return false
-	}
-
-	go func() {
-		defer s.finishBackgroundWork()
-		// The degraded marker means this group closed the connection itself, so
-		// nothing about the close is the node's doing. checkNodeQuality honours
-		// it; this path did not, and a connection whose first read had already
-		// failed before the sweep reached it was blamed with code 3 anyway.
-		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
-			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
-		}
-		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err)
-	}()
-	return true
+	return s.enqueueConnectionStats(
+		metadata,
+		proxy,
+		connectTime,
+		latency,
+		uploadTotal,
+		downloadTotal,
+		maxUploadRate,
+		maxDownloadRate,
+		connectionDuration,
+		tcpStats,
+		err,
+		markCloseFailure,
+	)
 }
 
 func (s *Smart) beginBackgroundWork() bool {
