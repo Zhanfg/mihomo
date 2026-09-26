@@ -1,6 +1,7 @@
 package mmdb
 
 import (
+	"net"
 	"sync"
 
 	mihomoOnce "github.com/metacubex/mihomo/common/once"
@@ -49,6 +50,33 @@ func Verify(path string) bool {
 		instance.Close()
 	}
 	return err == nil
+}
+
+// LookupCodeOptional performs a one-shot country lookup without touching the
+// process-global MMDB singleton.
+//
+// Optional Smart telemetry must never be able to terminate the data plane.
+// IPInstance intentionally preserves Mihomo's historical fatal-on-missing
+// behaviour for GEOIP rules; country-affinity uses this non-fatal helper
+// instead. Country results are cached by the caller, so this path is not on
+// every packet/connection hot path.
+func LookupCodeOptional(path string, ip net.IP) ([]string, error) {
+	reader, err := maxminddb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	r := IPReader{Reader: reader}
+	switch reader.Metadata.DatabaseType {
+	case "sing-geoip":
+		r.databaseType = typeSing
+	case "Meta-geoip0":
+		r.databaseType = typeMetaV0
+	default:
+		r.databaseType = typeMaxmind
+	}
+	return r.LookupCode(ip), nil
 }
 
 func IPInstance() IPReader {
