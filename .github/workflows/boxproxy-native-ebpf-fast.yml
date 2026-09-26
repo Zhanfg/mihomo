@@ -7,6 +7,13 @@ on:
       - integration/boxproxy-native-ebpf
     paths:
       - ".github/workflows/boxproxy-native-ebpf-fast.yml"
+      - ".github/fixtures/boxproxy-ebpf-listener.yaml"
+      - ".github/fixtures/ip-family-routing.yaml"
+      - "adapter/capability.go"
+      - "adapter/outboundgroup/**"
+      - "common/ebpf/**"
+      - "component/smart/**"
+      - "listener/**"
 
 permissions:
   contents: read
@@ -54,6 +61,13 @@ jobs:
           ./mihomo-selftest -t -f .github/fixtures/boxproxy-ebpf-listener.yaml 2>&1 | tee BOXPROXY_SCHEMA_SELFTEST.txt
           grep -qi "configuration file .* test is successful" BOXPROXY_SCHEMA_SELFTEST.txt
 
+      - name: Parse custom IP-family directives
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mihomo-selftest -t -f .github/fixtures/ip-family-routing.yaml 2>&1 | tee IP_FAMILY_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" IP_FAMILY_SELFTEST.txt
+
       - name: Android arm64 build
         shell: bash
         env:
@@ -69,6 +83,8 @@ jobs:
           file "$OUT" | tee FILE_INFO.txt
           strings "$OUT" | grep -q "component/smart"
           strings "$OUT" | grep -q "listener/sing_ebpf"
+          strings "$OUT" | grep -q "api4.ipify.org"
+          strings "$OUT" | grep -q "api6.ipify.org"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
           {
@@ -90,6 +106,8 @@ jobs:
             BUILD_INFO.txt
             FILE_INFO.txt
             BOXPROXY_SCHEMA_SELFTEST.txt
+            IP_FAMILY_SELFTEST.txt
             .github/fixtures/boxproxy-ebpf-listener.yaml
+            .github/fixtures/ip-family-routing.yaml
           if-no-files-found: error
           retention-days: 30
