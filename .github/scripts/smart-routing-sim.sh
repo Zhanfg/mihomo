@@ -372,6 +372,61 @@ done
 echo "$FAILOVER" | tee "${ART}/failover-v4.txt"
 grep -q "$EXPECT_PEER" <<<"$FAILOVER" || die "Smart did not fail over to surviving node"
 
+log "D2: mixed DIRECT/Smart concurrency burst"
+: > "${ART}/burst-direct.ok"
+: > "${ART}/burst-smart.ok"
+for i in $(seq 1 32); do
+  (
+    sudo ip netns exec "$NS_CLIENT" env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY       curl -fsS --max-time 8 "http://10.20.0.2:18080/burst-direct-$i" >/dev/null &&
+      echo "$i" >> "${ART}/burst-direct.ok"
+  ) &
+  (
+    sudo ip netns exec "$NS_CLIENT" env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY       curl -fsS --max-time 8 "http://10.20.0.3:18080/burst-smart-$i" >/dev/null &&
+      echo "$i" >> "${ART}/burst-smart.ok"
+  ) &
+done
+wait
+DIRECT_OK="$(wc -l < "${ART}/burst-direct.ok")"
+SMART_OK="$(wc -l < "${ART}/burst-smart.ok")"
+printf 'direct=%s/32\nsmart=%s/32\n' "$DIRECT_OK" "$SMART_OK" | tee "${ART}/burst-summary.txt"
+(( DIRECT_OK == 32 )) || die "DIRECT concurrency burst lost requests"
+(( SMART_OK >= 30 )) || die "Smart concurrency burst success rate below 30/32"
+
+log "D3: degraded-link jitter and route resilience"
+if [[ "$SELECTED_V4" == "fast" ]]; then
+  SURVIVOR_DEV="$V_SLOW_HOST"
+  RESTORE_DELAY="90ms 5ms"
+else
+  SURVIVOR_DEV="$V_FAST_HOST"
+  RESTORE_DELAY="8ms 1ms"
+fi
+sudo tc qdisc change dev "$SURVIVOR_DEV" root netem delay 160ms 35ms reorder 8% 50%
+: > "${ART}/degraded-smart.ok"
+for i in $(seq 1 20); do
+  (
+    sudo ip netns exec "$NS_CLIENT" env -u ALL_PROXY -u HTTPS_PROXY -u HTTP_PROXY -u NO_PROXY       curl --retry 2 --retry-delay 0 -fsS --max-time 10 "http://10.20.0.3:18080/degraded-$i" >/dev/null &&
+      echo "$i" >> "${ART}/degraded-smart.ok"
+  ) &
+done
+wait
+DEGRADED_OK="$(wc -l < "${ART}/degraded-smart.ok")"
+echo "degraded=$DEGRADED_OK/20" | tee "${ART}/degraded-summary.txt"
+(( DEGRADED_OK >= 19 )) || die "Smart degraded-link resilience below 19/20"
+sudo tc qdisc change dev "$SURVIVOR_DEV" root netem delay $RESTORE_DELAY
+
+log "D4: DNS burst while Smart is under churn"
+: > "${ART}/dns-burst.ok"
+for i in $(seq 1 32); do
+  (
+    ans="$(sudo ip netns exec "$NS_CLIENT" dig @10.10.0.1 -p 1053 foreign.test A +short | tail -n1)"
+    [[ "$ans" == "10.20.0.3" ]] && echo "$i" >> "${ART}/dns-burst.ok"
+  ) &
+done
+wait
+DNS_OK="$(wc -l < "${ART}/dns-burst.ok")"
+echo "dns=$DNS_OK/32" | tee "${ART}/dns-burst-summary.txt"
+(( DNS_OK == 32 )) || die "DNS burst was unstable"
+
 log "E: transparent IPv6 DIRECT and Smart"
 sudo ip -6 addr show | tee "${ART}/host-ip6-addr.txt"
 sudo ip -6 route show table all | tee "${ART}/host-ip6-route-all.txt"
