@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"sync"
 
+	"github.com/metacubex/mihomo/component/smart"
 	"github.com/metacubex/mihomo/component/smart/tcpstats"
 	C "github.com/metacubex/mihomo/constant"
 )
@@ -50,7 +51,7 @@ func startSmartStatsWorkers() {
 						continue
 					}
 					if job.markCloseFailure && job.err != nil && job.metadata.SmartBlock != "degraded" {
-						s.markNodeFailure(job.metadata, job.proxy.Name(), true, true, 3, 0)
+						s.markNodeFailure(job.metadata, job.proxy.Name(), true, true, smart.BlockDialFailure, 0)
 					}
 					s.recordConnectionStats(
 						job.metadata,
@@ -110,7 +111,7 @@ func (s *Smart) enqueueConnectionStats(
 		// the safety signal for a failed connection, but drop redundant success
 		// telemetry when the bounded queue is saturated.
 		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
-			s.markNodeFailure(metadata, proxy.Name(), true, true, 3, 0)
+			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
 		}
 		s.finishBackgroundWork()
 		return false
