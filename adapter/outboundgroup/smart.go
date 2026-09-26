@@ -598,8 +598,10 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 	}
 
 	if s.selected != "" {
+		desiredCountry, strictCountry := s.desiredCountry()
 		for _, p := range proxies {
-			if p.Name() == s.selected {
+			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) &&
+				s.countryEligible(metadata, p, desiredCountry, strictCountry) {
 				return p
 			}
 		}
