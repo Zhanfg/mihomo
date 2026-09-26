@@ -319,3 +319,43 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 		t.Fatalf("IPv6 country = (%v, %q), want (true, US)", known, country)
 	}
 }
+
+
+func TestDatacenterASNClassification(t *testing.T) {
+	cases := []struct {
+		asn  string
+		org  string
+		want bool
+	}{
+		{"30058", "FDCservers.net", true},
+		{"20473", "The Constant Company, LLC", true},
+		{"", "Example Cloud Hosting LLC", true},
+		{"", "Residential Broadband Communications", false},
+		{"", "China Mobile Communications Group", false},
+	}
+	for _, tc := range cases {
+		if got := isDatacenterASN(tc.asn, tc.org); got != tc.want {
+			t.Fatalf("isDatacenterASN(%q, %q)=%v, want %v", tc.asn, tc.org, got, tc.want)
+		}
+	}
+}
+
+func TestExitDatacenterUsesCachedTelemetry(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("idc")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.datacenterKnown = true
+	state.ipv4.datacenter = true
+	state.ipv4.asn = "30058"
+	state.ipv4.asnOrg = "FDCservers.net"
+	state.ipv4.mu.Unlock()
+
+	known, dc, asn, org := ExitDatacenterForProxy(p, false)
+	if !known || !dc || asn != "30058" || org != "FDCservers.net" {
+		t.Fatalf("cached IDC telemetry=(%v,%v,%q,%q)", known, dc, asn, org)
+	}
+}
