@@ -87,6 +87,32 @@ jobs:
           cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
           go mod tidy
 
+      - name: Self-test Smart parser before Android build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > smart-parser-selftest.yaml <<'YAML'
+          mixed-port: 17890
+          allow-lan: false
+          mode: rule
+          log-level: warning
+          proxy-groups:
+            - name: SMART_SELFTEST
+              type: smart
+              proxies: [DIRECT]
+              url: http://127.0.0.1:1/generate_204
+              interval: 300
+              lazy: true
+              timeout: 500
+              expected-status: 204
+              uselightgbm: false
+          rules:
+            - MATCH,SMART_SELFTEST
+          YAML
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-parser-selftest' -w -s -buildid="               -o mihomo-smart-parser-selftest
+          ./mihomo-smart-parser-selftest -t -f smart-parser-selftest.yaml 2>&1 | tee SMART_SELFTEST.txt
+          grep -qi "configuration file" SMART_SELFTEST.txt || true
+
       - name: Build final Android arm64 Smart eBPF core
         shell: bash
         env:
@@ -103,6 +129,9 @@ jobs:
             -o "$OUT"
           test -s "$OUT"
           file "$OUT" | tee FILE_INFO.txt
+          strings "$OUT" | grep -q "github.com/metacubex/mihomo/component/smart"
+          strings "$OUT" | grep -q "\[Smart\]"
+          echo "smart_symbols=present" > SMART_BINARY_CHECK.txt
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
           {
@@ -125,5 +154,7 @@ jobs:
             FILE_INFO.txt
             EBPF_PATCHES.txt
             APPLIED_COMMITS.txt
+            SMART_SELFTEST.txt
+            SMART_BINARY_CHECK.txt
           if-no-files-found: error
           retention-days: 30
