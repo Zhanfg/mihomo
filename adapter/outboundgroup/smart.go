@@ -136,6 +136,10 @@ type SmartOption struct {
 	SampleRate     float64 `group:"sample-rate,omitempty"`
 	PreferASN      bool    `group:"prefer-asn,omitempty"`
 	Tolerance      uint16  `group:"tolerance,omitempty"`
+	PreferIPv4     bool    `group:"prefer-ipv4,omitempty"`
+	RequireIPv4    bool    `group:"require-ipv4,omitempty"`
+	RequireIPv6    bool    `group:"require-ipv6,omitempty"`
+	AutoIPFamily   bool    `group:"auto-ip-family,omitempty"`
 }
 
 type Smart struct {
@@ -161,6 +165,10 @@ type Smart struct {
 	useLightGBM    bool
 	collectData    bool
 	preferASN      bool
+	preferIPv4     bool
+	requireIPv4    bool
+	requireIPv6    bool
+	autoIPFamily   bool
 	hostFailLimit  atomic.Int32
 	tolerance      uint16
 
@@ -263,6 +271,10 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 		useLightGBM:    smartOption.UseLightGBM,
 		collectData:    smartOption.CollectData,
 		preferASN:      smartOption.PreferASN,
+		preferIPv4:     smartOption.PreferIPv4,
+		requireIPv4:    smartOption.RequireIPv4,
+		requireIPv6:    smartOption.RequireIPv6,
+		autoIPFamily:   smartOption.AutoIPFamily,
 		tolerance:      smartOption.Tolerance,
 	}
 
@@ -699,6 +711,11 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"sampleRate":      s.sampleRate,
 		"preferASN":       s.preferASN,
 		"tolerance":       s.tolerance,
+		"preferIPv4":      s.preferIPv4,
+		"preferIPv6":      s.preferIPv6,
+		"requireIPv4":     s.requireIPv4,
+		"requireIPv6":     s.requireIPv6,
+		"autoIPFamily":    s.autoIPFamily,
 	})
 }
 
@@ -757,6 +774,26 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
+	// Explicit require-* directives are strict: unknown capability is not
+	// enough. auto-ip-family is adaptive: confirmed mismatches are excluded,
+	// while unknown nodes may be used briefly as probes warm up.
+	autoIPv4, autoIPv6 := false, false
+	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
+		ip := metadata.DstIP.Unmap()
+		autoIPv4, autoIPv6 = ip.Is4(), ip.Is6()
+	}
+	preferIPv4 := s.preferIPv4 || autoIPv4
+	preferIPv6 := s.preferIPv6 || autoIPv6
+	familyEligible := func(p C.Proxy) bool {
+		if !adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false) {
+			return false
+		}
+		if autoIPv4 || autoIPv6 {
+			return adapter.IPFamilyRequirementsMet(p, autoIPv4, autoIPv6, true)
+		}
+		return true
+	}
+
 	var proxyByName map[string]C.Proxy
 	if len(names) > 0 {
 		proxyByName = s.proxyIndexFor(all)
@@ -768,7 +805,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	for i, name := range names {
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) {
+		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) {
 			continue
 		}
 		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
@@ -812,8 +849,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		// from the pool, so a failed UDP / IPv6 probe costs a node its rank
 		// but never its availability.
 		k := sortKey{
-			delay: adapter.AddCapabilityPenalty(
-				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv6),
+			delay: adapter.AddCapabilityPenaltyExtended(
+				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, preferIPv4, preferIPv6),
 			index: i,
 		}
 		if hasPriority {
@@ -862,7 +899,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if blockedNodes[name] {
 			continue
 		}
-		if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) {
+		if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) || !familyEligible(p) {
 			continue
 		}
 		filteredAll = append(filteredAll, p)
@@ -880,7 +917,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	if len(selected) == 0 {
 		fallbackAll := defaultSort(slices.Clone(all))
 		for _, p := range fallbackAll {
-			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) {
+			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p) {
 				selected = append(selected, p)
 			}
 			if len(selected) >= minCount {
@@ -890,7 +927,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if p.AliveForTestUrl(s.testUrl) {
+				if p.AliveForTestUrl(s.testUrl) && familyEligible(p) {
 					selected = append(selected, p)
 				}
 				if len(selected) >= minCount {
@@ -901,7 +938,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 		if len(selected) == 0 {
 			for _, p := range fallbackAll {
-				if wtFailNodes[p.Name()] == smart.BlockManual {
+				if wtFailNodes[p.Name()] == smart.BlockManual || !familyEligible(p) {
 					continue
 				}
 				selected = append(selected, p)
@@ -912,6 +949,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 			if len(selected) == 0 {
 				for _, p := range fallbackAll {
+					if !familyEligible(p) {
+						continue
+					}
 					selected = append(selected, p)
 					if len(selected) >= minCount {
 						break
@@ -919,6 +959,12 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 				}
 			}
 		}
+	}
+
+	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || autoIPv4 || autoIPv6) {
+		// Caller-controlled empty-fallback defines the fail-closed behavior.
+		// For strict routing configurations this should be REJECT/REJECT-DROP.
+		selected = append(selected, s.EmptyFallback())
 	}
 
 	return selected
