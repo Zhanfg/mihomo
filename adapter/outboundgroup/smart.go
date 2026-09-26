@@ -2022,13 +2022,20 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// background worker is created. Successful and failed profiles are kept
 	// separately so Smart can move toward proven shapes and away from repeated
 	// bad ones without memorising one exact node name.
-	vectorProfile := adapter.BuildNodeVector(proxy, s.testUrl, newWeight)
 	vectorSuccess := err == nil && !isDegraded && !failedBlock && blockCode == smart.BlockNone
-	vectorStrength := float32(0.75)
-	if newWeight > 0 {
-		vectorStrength = float32(math.Min(1.5, math.Max(0.5, newWeight)))
+	// Failures are rare and information-dense, so learn every one. Successful
+	// closes are sampled from stats we already have: learn the first few
+	// quickly, then one in eight. This avoids vector projection/MMDB/cache work
+	// on every short mobile connection without adding another timer/map.
+	vectorSample := !vectorSuccess || statsSnapshot.Success <= 4 || statsSnapshot.Success%8 == 0
+	if vectorSample {
+		vectorProfile := adapter.BuildNodeVector(proxy, s.testUrl, newWeight)
+		vectorStrength := float32(0.75)
+		if newWeight > 0 {
+			vectorStrength = float32(math.Min(1.5, math.Max(0.5, newWeight)))
+		}
+		s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorSuccess, vectorStrength)
 	}
-	s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorSuccess, vectorStrength)
 
 	// Closing stalled connections can block on I/O, so it runs without the
 	// lock; the stats goroutines those closes spawn take it.
