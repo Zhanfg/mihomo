@@ -141,7 +141,8 @@ jobs:
           strings "$OUT" | grep -q "api6.ipify.org"
           strings "$OUT" | grep -q "country-affinity"
           strings "$OUT" | grep -q "avoid-datacenter"
-          strings "$OUT" | grep -q "FDCservers"
+          strings "$OUT" | grep -q "fdcserver"
+          strings "$OUT" | grep -q "model-cal:tcp6"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
 
