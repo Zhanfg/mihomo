@@ -8,7 +8,7 @@ ART="${ROOT_DIR}/.soak-artifacts"
 MAIN_DIR="${STATE}/main"
 PF_DIR="${STATE}/proxy-fast"
 PS_DIR="${STATE}/proxy-slow"
-PROVIDER="${STATE}/daily-provider.yaml"
+PROVIDER="${MAIN_DIR}/daily-provider.yaml"
 MAIN_CFG="${STATE}/main.yaml"
 PF_CFG="${STATE}/proxy-fast.yaml"
 PS_CFG="${STATE}/proxy-slow.yaml"
@@ -419,13 +419,15 @@ YAML
       log "virtual 09:00 DNS burst"
       rm -f "$ART/dns-burst.ok"
       : > "$ART/dns-burst.ok"
+      dns_pids=()
       for i in $(seq 1 64); do
         (
           ans="$(sudo ip netns exec "$NS_CLIENT" dig @10.91.0.1 -p 1053 invalid.test A +short +time=1 +tries=1 | tail -n1)"
           [[ "$ans" == "10.92.0.14" ]] && echo "$i" >> "$ART/dns-burst.ok"
         ) &
+        dns_pids+=("$!")
       done
-      wait
+      for pid in "${dns_pids[@]}"; do wait "$pid" || true; done
       DNS_BURST_OK="$(wc -l < "$ART/dns-burst.ok")"
       echo "dns_burst=$DNS_BURST_OK/64" | tee "$ART/dns-burst-summary.txt"
       (( DNS_BURST_OK >= 63 )) || die "DNS burst success below 63/64"
