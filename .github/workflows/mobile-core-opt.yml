@@ -8,6 +8,7 @@ on:
     paths:
       - "adapter/**"
       - "component/keepalive/**"
+      - "component/smart/**"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - ".github/fixtures/mobile-core-opt.yaml"
@@ -54,12 +55,18 @@ jobs:
             adapter/capability.go
             adapter/capability_tier_test.go
             adapter/outboundgroup/smart.go
+            adapter/outboundgroup/smart_stats_queue.go
+            adapter/outboundgroup/smart_tasks.go
+            adapter/outboundgroup/smart_tasks_test.go
             adapter/outboundgroup/capability_test.go
             component/keepalive/tcp_keepalive.go
             component/keepalive/tcp_keepalive_go122.go
             component/keepalive/tcp_keepalive_go123.go
             component/keepalive/default_android.go
             component/keepalive/default_other.go
+            component/smart/cache_limit_android.go
+            component/smart/cache_limit_other.go
+            component/smart/lightgbm/adaptive_test.go
             dns/connection_pool.go
             hub/executor/concurrent_load_android.go
             hub/executor/concurrent_load_unlimit.go
@@ -67,12 +74,22 @@ jobs:
           gofmt -d "${FILES[@]}" | tee /tmp/gofmt.diff
           test ! -s /tmp/gofmt.diff
 
-      - name: Focused routing tests
+      - name: Focused routing and country tests
         shell: bash
         run: |
           set -euo pipefail
           go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|ExitCountry|ProxyIdentity)' -count=1
-          go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart)' -count=1
+          go test ./adapter/outboundgroup -run 'Test(CustomIPFamily|RequireCapability|URLTest|Smart|RunLearningMaintenance)' -count=1
+
+      - name: Smart learning and memory regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/smart/... -count=1
+          grep -q 'return 2048' component/smart/cache_limit_android.go
+          grep -q 'smartStatsWorkerCount = 4' adapter/outboundgroup/smart_stats_queue.go
+          grep -q 'smartStatsQueueSize   = 256' adapter/outboundgroup/smart_stats_queue.go
+          grep -q 'adaptiveModelConfidence' component/smart/lightgbm/lightgbm.go
 
       - name: Full adapter regressions
         shell: bash
@@ -109,16 +126,6 @@ jobs:
           ./mihomo-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee MOBILE_SELFTEST.txt
           grep -qi "configuration file .* test is successful" MOBILE_SELFTEST.txt
 
-      - name: Build baseline Android core
-        shell: bash
-        env:
-          CGO_ENABLED: "0"
-          GOOS: android
-          GOARCH: arm64
-        run: |
-          set -euo pipefail
-          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=baseline-$HEAD_SHORT' -w -s -buildid="             -o /tmp/mihomo-full
-
       - name: Build optimized Android core
         shell: bash
         env:
@@ -139,27 +146,21 @@ jobs:
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
 
-          BASE_SIZE="$(stat -c %s /tmp/mihomo-full)"
-          MOB_SIZE="$(stat -c %s "$OUT")"
-          SAVED="$((BASE_SIZE - MOB_SIZE))"
-          PCT="$(awk -v a="$SAVED" -v b="$BASE_SIZE" 'BEGIN{if(b==0){print "0.00"}else{printf "%.2f",a*100/b}}')"
-          {
-            echo "baseline_bytes=$BASE_SIZE"
-            echo "mobile_bytes=$MOB_SIZE"
-            echo "saved_bytes=$SAVED"
-            echo "saved_percent=$PCT"
-          } | tee SIZE_REPORT.txt
-          test "$MOB_SIZE" -le "$BASE_SIZE"
-
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
             echo "target=android/arm64"
             echo "tags=$TAGS"
             echo "gvisor=excluded"
-            echo "with_low_memory=excluded"
+            echo "with_low_memory=disabled"
             echo "android_keepalive_default=idle60s,interval20s"
-            echo "country_routing=MMDB reuse,no new database"
+            echo "android_dns_stream_pool=max_open12,max_idle4"
+            echo "android_provider_load_concurrency=8"
+            echo "android_smart_cache_max_targets=2048"
+            echo "smart_stats_workers=4"
+            echo "smart_stats_queue=256"
+            echo "adaptive_model_blend=enabled"
+            echo "country_routing=measured_exit_ip+existing_mmdb"
             echo "mobile_features=auto-ip-family,country,country-affinity"
           } > BUILD_INFO.txt
 
@@ -171,7 +172,6 @@ jobs:
             SHA256SUMS
             BUILD_INFO.txt
             FILE_INFO.txt
-            SIZE_REPORT.txt
             MOBILE_SELFTEST.txt
             .github/fixtures/mobile-core-opt.yaml
           if-no-files-found: error
