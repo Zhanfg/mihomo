@@ -340,3 +340,20 @@ func TestSmartTaskScheduleRunsWhatCameDueWhilePaused(t *testing.T) {
 		t.Fatal("scheduler did not stop")
 	}
 }
+
+
+func TestRunLearningMaintenanceHonorsTrafficActivity(t *testing.T) {
+	s := &Smart{}
+	calls := 0
+
+	s.runLearningMaintenance(func() { calls++ })
+	if calls != 0 {
+		t.Fatalf("idle Smart group ran learning maintenance: calls=%d", calls)
+	}
+
+	s.markTrafficActivity()
+	s.runLearningMaintenance(func() { calls++ })
+	if calls != 1 {
+		t.Fatalf("active Smart group did not run learning maintenance: calls=%d", calls)
+	}
+}
