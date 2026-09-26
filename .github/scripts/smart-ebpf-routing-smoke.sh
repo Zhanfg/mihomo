@@ -42,10 +42,10 @@ sudo ip -n "$NS_WAN" link set lo up
 sudo ip link add "$IN_HOST" type veth peer name "$IN_NS"
 sudo ip link set "$IN_NS" netns "$NS_CLIENT"
 sudo ip addr add 10.77.0.1/24 dev "$IN_HOST"
-sudo ip -6 addr add fd77::1/64 dev "$IN_HOST"
+sudo ip -6 addr add fd77::1/64 dev "$IN_HOST" nodad
 sudo ip link set "$IN_HOST" up
 sudo ip -n "$NS_CLIENT" addr add 10.77.0.2/24 dev "$IN_NS"
-sudo ip -n "$NS_CLIENT" -6 addr add fd77::2/64 dev "$IN_NS"
+sudo ip -n "$NS_CLIENT" -6 addr add fd77::2/64 dev "$IN_NS" nodad
 sudo ip -n "$NS_CLIENT" link set "$IN_NS" up
 sudo ip -n "$NS_CLIENT" route add default via 10.77.0.1
 sudo ip -n "$NS_CLIENT" -6 route add default via fd77::1
@@ -53,10 +53,10 @@ sudo ip -n "$NS_CLIENT" -6 route add default via fd77::1
 sudo ip link add "$WAN_HOST" type veth peer name "$WAN_NS"
 sudo ip link set "$WAN_NS" netns "$NS_WAN"
 sudo ip addr add 10.78.0.1/24 dev "$WAN_HOST"
-sudo ip -6 addr add fd78::1/64 dev "$WAN_HOST"
+sudo ip -6 addr add fd78::1/64 dev "$WAN_HOST" nodad
 sudo ip link set "$WAN_HOST" up
 sudo ip -n "$NS_WAN" addr add 10.78.0.2/24 dev "$WAN_NS"
-sudo ip -n "$NS_WAN" -6 addr add fd78::2/64 dev "$WAN_NS"
+sudo ip -n "$NS_WAN" -6 addr add fd78::2/64 dev "$WAN_NS" nodad
 sudo ip -n "$NS_WAN" link set "$WAN_NS" up
 sudo ip -n "$NS_WAN" route add default via 10.78.0.1
 sudo ip -n "$NS_WAN" -6 route add default via fd78::1
