@@ -8,7 +8,7 @@ ART="${ROOT_DIR}/.week-soak-artifacts"
 MAIN_DIR="${STATE}/main"
 FAST_DIR="${STATE}/fast"
 SLOW_DIR="${STATE}/slow"
-PROVIDER="${STATE}/week-provider.yaml"
+PROVIDER="${MAIN_DIR}/week-provider.yaml"
 CFG="${STATE}/week.yaml"
 FAST_CFG="${STATE}/fast.yaml"
 SLOW_CFG="${STATE}/slow.yaml"
@@ -59,8 +59,8 @@ cleanup(){
   for ns in "$NS_CLIENT" "$NS_WAN" "$NS_FAST" "$NS_SLOW"; do kill_ns_pids "$ns"; done
   sudo iptables -t mangle -D PREROUTING -i "$VC_H" -p tcp -d 10.102.0.0/24 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
   sudo iptables -t mangle -D PREROUTING -i "$VC_H" -p udp -d 10.102.0.0/24 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
-  sudo ip6tables -t mangle -D PREROUTING -i "$VC_H" -p tcp -d fd102::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
-  sudo ip6tables -t mangle -D PREROUTING -i "$VC_H" -p udp -d fd102::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
+  sudo ip6tables -t mangle -D PREROUTING -i "$VC_H" -p tcp -d fd10:2::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
+  sudo ip6tables -t mangle -D PREROUTING -i "$VC_H" -p udp -d fd10:2::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK" 2>/dev/null || true
   sudo ip rule del fwmark "$TPROXY_MARK/$TPROXY_MARK" table 100 priority 100 2>/dev/null || true
   sudo ip -6 rule del fwmark "$TPROXY_MARK/$TPROXY_MARK" table 100 priority 100 2>/dev/null || true
   sudo ip route flush table 100 2>/dev/null || true
@@ -88,77 +88,77 @@ done
 sudo ip link add "$VC_H" type veth peer name "$VC_N"
 sudo ip link set "$VC_N" netns "$NS_CLIENT"
 sudo ip addr add 10.101.0.1/24 dev "$VC_H"
-sudo ip -6 addr add fd101::1/64 dev "$VC_H" nodad
+sudo ip -6 addr add fd10:1::1/64 dev "$VC_H" nodad
 sudo ip link set "$VC_H" up
 sudo ip -n "$NS_CLIENT" addr add 10.101.0.2/24 dev "$VC_N"
-sudo ip -n "$NS_CLIENT" -6 addr add fd101::2/64 dev "$VC_N" nodad
+sudo ip -n "$NS_CLIENT" -6 addr add fd10:1::2/64 dev "$VC_N" nodad
 sudo ip -n "$NS_CLIENT" link set "$VC_N" up
 sudo ip -n "$NS_CLIENT" route add default via 10.101.0.1
-sudo ip -n "$NS_CLIENT" -6 route add default via fd101::1
+sudo ip -n "$NS_CLIENT" -6 route add default via fd10:1::1
 
 sudo ip link add "$VW_H" type veth peer name "$VW_N"
 sudo ip link set "$VW_N" netns "$NS_WAN"
 sudo ip addr add 10.102.0.1/24 dev "$VW_H"
-sudo ip -6 addr add fd102::1/64 dev "$VW_H" nodad
+sudo ip -6 addr add fd10:2::1/64 dev "$VW_H" nodad
 sudo ip link set "$VW_H" up
 sudo ip -n "$NS_WAN" addr add 10.102.0.2/24 dev "$VW_N"
-sudo ip -n "$NS_WAN" -6 addr add fd102::2/64 dev "$VW_N" nodad
+sudo ip -n "$NS_WAN" -6 addr add fd10:2::2/64 dev "$VW_N" nodad
 for last in 10 11 12 13 14 15; do sudo ip -n "$NS_WAN" addr add "10.102.0.$last/24" dev "$VW_N"; done
-for last in 10 11 12 13 14 15; do sudo ip -n "$NS_WAN" -6 addr add "fd102::$last/64" dev "$VW_N" nodad; done
+for last in 10 11 12 13 14 15; do sudo ip -n "$NS_WAN" -6 addr add "fd10:2::$last/64" dev "$VW_N" nodad; done
 sudo ip -n "$NS_WAN" link set "$VW_N" up
 sudo ip -n "$NS_WAN" route add default via 10.102.0.1
-sudo ip -n "$NS_WAN" -6 route add default via fd102::1
+sudo ip -n "$NS_WAN" -6 route add default via fd10:2::1
 
 sudo ip link add "$VF_H" type veth peer name "$VF_N"
 sudo ip link set "$VF_N" netns "$NS_FAST"
 sudo ip addr add 10.103.0.1/24 dev "$VF_H"
-sudo ip -6 addr add fd103::1/64 dev "$VF_H" nodad
+sudo ip -6 addr add fd10:3::1/64 dev "$VF_H" nodad
 sudo ip link set "$VF_H" up
 sudo ip -n "$NS_FAST" addr add 10.103.0.2/24 dev "$VF_N"
-sudo ip -n "$NS_FAST" -6 addr add fd103::2/64 dev "$VF_N" nodad
+sudo ip -n "$NS_FAST" -6 addr add fd10:3::2/64 dev "$VF_N" nodad
 sudo ip -n "$NS_FAST" link set "$VF_N" up
 sudo ip -n "$NS_FAST" route add default via 10.103.0.1
-sudo ip -n "$NS_FAST" -6 route add default via fd103::1
+sudo ip -n "$NS_FAST" -6 route add default via fd10:3::1
 
 sudo ip link add "$VS_H" type veth peer name "$VS_N"
 sudo ip link set "$VS_N" netns "$NS_SLOW"
 sudo ip addr add 10.104.0.1/24 dev "$VS_H"
-sudo ip -6 addr add fd104::1/64 dev "$VS_H" nodad
+sudo ip -6 addr add fd10:4::1/64 dev "$VS_H" nodad
 sudo ip link set "$VS_H" up
 sudo ip -n "$NS_SLOW" addr add 10.104.0.2/24 dev "$VS_N"
-sudo ip -n "$NS_SLOW" -6 addr add fd104::2/64 dev "$VS_N" nodad
+sudo ip -n "$NS_SLOW" -6 addr add fd10:4::2/64 dev "$VS_N" nodad
 sudo ip -n "$NS_SLOW" link set "$VS_N" up
 sudo ip -n "$NS_SLOW" route add default via 10.104.0.1
-sudo ip -n "$NS_SLOW" -6 route add default via fd104::1
+sudo ip -n "$NS_SLOW" -6 route add default via fd10:4::1
 
 # Dedicated proxy->WAN transit links keep aging results independent of hosted-runner FORWARD policy.
 sudo ip link add "$VF_W" type veth peer name "$VW_F"
 sudo ip link set "$VF_W" netns "$NS_FAST"
 sudo ip link set "$VW_F" netns "$NS_WAN"
 sudo ip -n "$NS_FAST" addr add 10.105.0.1/30 dev "$VF_W"
-sudo ip -n "$NS_FAST" -6 addr add fd105::1/64 dev "$VF_W" nodad
+sudo ip -n "$NS_FAST" -6 addr add fd10:5::1/64 dev "$VF_W" nodad
 sudo ip -n "$NS_WAN" addr add 10.105.0.2/30 dev "$VW_F"
-sudo ip -n "$NS_WAN" -6 addr add fd105::2/64 dev "$VW_F" nodad
+sudo ip -n "$NS_WAN" -6 addr add fd10:5::2/64 dev "$VW_F" nodad
 sudo ip -n "$NS_FAST" link set "$VF_W" up
 sudo ip -n "$NS_WAN" link set "$VW_F" up
 sudo ip -n "$NS_FAST" route replace 10.102.0.0/24 via 10.105.0.2 dev "$VF_W" src 10.103.0.2
-sudo ip -n "$NS_FAST" -6 route replace fd102::/64 via fd105::2 dev "$VF_W" src fd103::2
+sudo ip -n "$NS_FAST" -6 route replace fd10:2::/64 via fd10:5::2 dev "$VF_W" src fd10:3::2
 sudo ip -n "$NS_WAN" route replace 10.103.0.0/24 via 10.105.0.1 dev "$VW_F"
-sudo ip -n "$NS_WAN" -6 route replace fd103::/64 via fd105::1 dev "$VW_F"
+sudo ip -n "$NS_WAN" -6 route replace fd10:3::/64 via fd10:5::1 dev "$VW_F"
 
 sudo ip link add "$VS_W" type veth peer name "$VW_S"
 sudo ip link set "$VS_W" netns "$NS_SLOW"
 sudo ip link set "$VW_S" netns "$NS_WAN"
 sudo ip -n "$NS_SLOW" addr add 10.106.0.1/30 dev "$VS_W"
-sudo ip -n "$NS_SLOW" -6 addr add fd106::1/64 dev "$VS_W" nodad
+sudo ip -n "$NS_SLOW" -6 addr add fd10:6::1/64 dev "$VS_W" nodad
 sudo ip -n "$NS_WAN" addr add 10.106.0.2/30 dev "$VW_S"
-sudo ip -n "$NS_WAN" -6 addr add fd106::2/64 dev "$VW_S" nodad
+sudo ip -n "$NS_WAN" -6 addr add fd10:6::2/64 dev "$VW_S" nodad
 sudo ip -n "$NS_SLOW" link set "$VS_W" up
 sudo ip -n "$NS_WAN" link set "$VW_S" up
 sudo ip -n "$NS_SLOW" route replace 10.102.0.0/24 via 10.106.0.2 dev "$VS_W" src 10.104.0.2
-sudo ip -n "$NS_SLOW" -6 route replace fd102::/64 via fd106::2 dev "$VS_W" src fd104::2
+sudo ip -n "$NS_SLOW" -6 route replace fd10:2::/64 via fd10:6::2 dev "$VS_W" src fd10:4::2
 sudo ip -n "$NS_WAN" route replace 10.104.0.0/24 via 10.106.0.1 dev "$VW_S"
-sudo ip -n "$NS_WAN" -6 route replace fd104::/64 via fd106::1 dev "$VW_S"
+sudo ip -n "$NS_WAN" -6 route replace fd10:4::/64 via fd10:6::1 dev "$VW_S"
 
 sudo iptables -I FORWARD 1 -j ACCEPT
 sudo ip6tables -I FORWARD 1 -j ACCEPT
@@ -254,8 +254,8 @@ sudo ip -6 rule add fwmark "$TPROXY_MARK/$TPROXY_MARK" table 100 priority 100
 sudo ip -6 route add local ::/0 dev lo table 100
 sudo iptables -t mangle -A PREROUTING -i "$VC_H" -p tcp -d 10.102.0.0/24 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
 sudo iptables -t mangle -A PREROUTING -i "$VC_H" -p udp -d 10.102.0.0/24 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
-sudo ip6tables -t mangle -A PREROUTING -i "$VC_H" -p tcp -d fd102::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
-sudo ip6tables -t mangle -A PREROUTING -i "$VC_H" -p udp -d fd102::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
+sudo ip6tables -t mangle -A PREROUTING -i "$VC_H" -p tcp -d fd10:2::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
+sudo ip6tables -t mangle -A PREROUTING -i "$VC_H" -p udp -d fd10:2::/64 -j TPROXY --on-port "$TPROXY_PORT" --tproxy-mark "$TPROXY_MARK/$TPROXY_MARK"
 
 cat > "$CFG" <<YAML
 mixed-port: 27890
@@ -345,13 +345,13 @@ rules:
   - IP-CIDR,10.102.0.13/32,STREAM,no-resolve
   - IP-CIDR,10.102.0.14/32,MAIN,no-resolve
   - IP-CIDR,10.102.0.15/32,MAIN,no-resolve
-  - IP-CIDR6,fd102::2/128,DIRECT,no-resolve
-  - IP-CIDR6,fd102::10/128,AI,no-resolve
-  - IP-CIDR6,fd102::11/128,MAIN,no-resolve
-  - IP-CIDR6,fd102::12/128,SOCIAL,no-resolve
-  - IP-CIDR6,fd102::13/128,STREAM,no-resolve
-  - IP-CIDR6,fd102::14/128,MAIN,no-resolve
-  - IP-CIDR6,fd102::15/128,MAIN,no-resolve
+  - IP-CIDR6,fd10:2::2/128,DIRECT,no-resolve
+  - IP-CIDR6,fd10:2::10/128,AI,no-resolve
+  - IP-CIDR6,fd10:2::11/128,MAIN,no-resolve
+  - IP-CIDR6,fd10:2::12/128,SOCIAL,no-resolve
+  - IP-CIDR6,fd10:2::13/128,STREAM,no-resolve
+  - IP-CIDR6,fd10:2::14/128,MAIN,no-resolve
+  - IP-CIDR6,fd10:2::15/128,MAIN,no-resolve
   - MATCH,MAIN
 YAML
 
@@ -391,13 +391,13 @@ import concurrent.futures, socket, sys, random, json, time
 day=int(sys.argv[1]); hour=int(sys.argv[2]); n=int(sys.argv[3])
 rnd=random.Random(2026092600 + day*24 + hour)
 services=[
- ("direct","10.102.0.2","fd102::2",4096,12),
- ("ai","10.102.0.10","fd102::10",8192,20),
- ("main","10.102.0.11","fd102::11",16384,18),
- ("social","10.102.0.12","fd102::12",4096,18),
- ("stream","10.102.0.13","fd102::13",262144,17),
- ("static","10.102.0.14","fd102::14",65536,12),
- ("download","10.102.0.15","fd102::15",1048576,3),
+ ("direct","10.102.0.2","fd10:2::2",4096,12),
+ ("ai","10.102.0.10","fd10:2::10",8192,20),
+ ("main","10.102.0.11","fd10:2::11",16384,18),
+ ("social","10.102.0.12","fd10:2::12",4096,18),
+ ("stream","10.102.0.13","fd10:2::13",262144,17),
+ ("static","10.102.0.14","fd10:2::14",65536,12),
+ ("download","10.102.0.15","fd10:2::15",1048576,3),
 ]
 weighted=[]
 for x in services: weighted += [x]*x[4]
@@ -424,7 +424,7 @@ def http_one(i):
         return False,0,time.monotonic()-start
 
 def udp_one(i):
-    ipv6=(i%5==0); addr="fd102::12" if ipv6 else "10.102.0.12"
+    ipv6=(i%5==0); addr="fd10:2::12" if ipv6 else "10.102.0.12"
     fam=socket.AF_INET6 if ipv6 else socket.AF_INET
     start=time.monotonic()
     try:
@@ -516,13 +516,15 @@ for vh in $(seq 0 167); do
   # DNS/fake-IP cache churn every morning: 96 unique names + stable-name check.
   if [[ "$hour" == "7" ]]; then
     : > "$ART/dns-d$day.ok"
+    dns_pids=()
     for i in $(seq 1 96); do
       (
         a="$(fakeip_query "d$day-h$hour-n$i.week.test" A)"
         [[ "$a" =~ ^198\.18\. ]] && echo "$i" >> "$ART/dns-d$day.ok"
       ) &
+      dns_pids+=("$!")
     done
-    wait
+    for pid in "${dns_pids[@]}"; do wait "$pid" || true; done
     dns_ok="$(wc -l < "$ART/dns-d$day.ok")"
     (( dns_ok >= 94 )) || die "day $day fake-IP burst below 94/96: $dns_ok"
     before="$(fakeip_query stable-d$day.week.test A)"
