@@ -324,6 +324,39 @@ jq -e '[.proxies["主力智能"].all[] | select(test("官网|剩余流量"; "i")
 jq -e '[.proxies["社交低延迟"].all[] | select(test("^CN-"; "i"))] | length == 0' "$ART/proxies.json" >/dev/null || die "social filter admitted CN nodes"
 jq -e '[.proxies["社交低延迟"].all[] | select(test("^(US|JP|HK)-"; "i"))] | length >= 10' "$ART/proxies.json" >/dev/null || die "social filter removed valid nodes"
 
+log "4b/6 provider hot-update, invalid-update containment and recovery"
+cat > "$STATE/providers/main-a.yaml" <<'YAML'
+proxies:
+  - {name: "US-A-new", type: socks5, server: 127.0.0.1, port: 21101, udp: true}
+  - {name: "JP-A-mid", type: socks5, server: 127.0.0.1, port: 21002, udp: true}
+  - {name: "HK-A-edge", type: socks5, server: 127.0.0.1, port: 21003, udp: true}
+YAML
+HTTP_CODE="$(curl -sS -o "$ART/provider-main-a-update.txt" -w '%{http_code}' -X PUT "http://127.0.0.1:${PORT}/providers/proxies/main-a")"
+[[ "$HTTP_CODE" == "204" ]] || die "main-a hot update returned $HTTP_CODE"
+for _ in $(seq 1 30); do
+  curl -fsS "http://127.0.0.1:${PORT}/proxies" >"$ART/proxies-after-provider-update.json"
+  if jq -e '.proxies["主力智能"].all | index("US-A-new") != null' "$ART/proxies-after-provider-update.json" >/dev/null; then break; fi
+  sleep 0.1
+done
+jq -e '.proxies["主力智能"].all | index("US-A-new") != null' "$ART/proxies-after-provider-update.json" >/dev/null || die "new provider node did not propagate to Smart"
+jq -e '.proxies["主力智能"].all | index("US-A-fast") == null' "$ART/proxies-after-provider-update.json" >/dev/null || die "removed provider node remained in Smart"
+
+cp "$STATE/providers/main-b.yaml" "$STATE/providers/main-b.good.yaml"
+printf 'proxies: [this is: invalid: yaml\n' > "$STATE/providers/main-b.yaml"
+BAD_CODE="$(curl -sS -o "$ART/provider-main-b-invalid.txt" -w '%{http_code}' -X PUT "http://127.0.0.1:${PORT}/providers/proxies/main-b")"
+[[ "$BAD_CODE" == "503" ]] || die "invalid provider update should return 503, got $BAD_CODE"
+curl -fsS "http://127.0.0.1:${PORT}/proxies" >"$ART/proxies-after-invalid-provider.json"
+jq -e '.proxies["主力智能"].all | index("US-B-fast") != null' "$ART/proxies-after-invalid-provider.json" >/dev/null || die "invalid update destroyed last known-good provider state"
+mv "$STATE/providers/main-b.good.yaml" "$STATE/providers/main-b.yaml"
+RECOVER_CODE="$(curl -sS -o "$ART/provider-main-b-recover.txt" -w '%{http_code}' -X PUT "http://127.0.0.1:${PORT}/providers/proxies/main-b")"
+[[ "$RECOVER_CODE" == "204" ]] || die "provider recovery returned $RECOVER_CODE"
+
+cat >> "$STATE/rules/domain.yaml" <<'YAML'
+  - '+.provider-refresh.test'
+YAML
+RULE_CODE="$(curl -sS -o "$ART/rule-provider-update.txt" -w '%{http_code}' -X PUT "http://127.0.0.1:${PORT}/providers/rules/TEST-DOMAIN")"
+[[ "$RULE_CODE" == "204" ]] || die "rule-provider update returned $RULE_CODE"
+
 log "5/6 fake-IP dual stack + real-IP exclusions"
 A="$(dig @127.0.0.1 -p 11053 example-ai.test A +short | tail -n1)"
 AAAA="$(dig @127.0.0.1 -p 11053 example-ai.test AAAA +short | tail -n1)"
@@ -337,9 +370,25 @@ assert aaaa in ipaddress.ip_network("fc00::/18"), aaaa
 assert str(bank) == "127.0.0.2", bank
 PY
 
-log "6/6 rule surface"
+log "6/6 rule surface + selected-state persistence"
 grep -q 'PROCESS-NAME' "$ART/rules.json" || die "process rules missing"
 grep -q 'RULE-SET' "$ART/rules.json" || die "rule-provider rules missing"
 grep -q 'DST-PORT' "$ART/rules.json" || die "port rules missing"
+
+SELECT_CODE="$(curl -sS -o "$ART/select-manual.txt" -w '%{http_code}' \
+  -X PUT -H 'Content-Type: application/json' \
+  -d '{"name":"JP-A-mid"}' "http://127.0.0.1:${PORT}/proxies/%E6%89%8B%E5%8A%A8%E9%80%89%E6%8B%A9")"
+[[ "$SELECT_CODE" == "204" ]] || die "manual selection update returned $SELECT_CODE"
+sleep 0.2
+kill "$PID"
+wait "$PID" 2>/dev/null || true
+"$BIN" -d "$STATE" -f "$CFG" >"$ART/mihomo-restart.log" 2>&1 &
+PID=$!
+echo "$PID" > "$STATE/pid"
+for _ in $(seq 1 80); do
+  curl -fsS "http://127.0.0.1:${PORT}/proxies/%E6%89%8B%E5%8A%A8%E9%80%89%E6%8B%A9" >"$ART/manual-after-restart.json" 2>/dev/null && break
+  sleep 0.1
+done
+jq -e '.now == "JP-A-mid"' "$ART/manual-after-restart.json" >/dev/null || die "store-selected did not survive restart"
 
 echo PROFILE_REGRESSION_PASS | tee "$ART/result.txt"
