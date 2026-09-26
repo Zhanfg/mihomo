@@ -64,10 +64,8 @@ jobs:
             component/keepalive/tcp_keepalive_go123.go
             component/keepalive/default_android.go
             component/keepalive/default_other.go
-            component/smart/memory.go
             component/smart/cache_limit_android.go
             component/smart/cache_limit_other.go
-            component/smart/lightgbm/lightgbm.go
             component/smart/lightgbm/adaptive_test.go
             dns/connection_pool.go
             hub/executor/concurrent_load_android.go
