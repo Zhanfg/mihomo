@@ -8,6 +8,9 @@ on:
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
+      - ".github/fixtures/ip-family-routing.yaml"
+      - "adapter/capability.go"
+      - "adapter/capability_tier_test.go"
       - "listener/**"
       - "common/ebpf/**"
       - "adapter/outboundgroup/**"
@@ -56,6 +59,12 @@ jobs:
           set -euo pipefail
           CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/inbound ./listener/sing_ebpf -count=1
 
+      - name: Capability regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|AddCapability)' -count=1
+
       - name: Smart regressions
         shell: bash
         run: |
@@ -74,6 +83,13 @@ jobs:
           set -euo pipefail
           ./mihomo-boxproxy-ebpf-selftest             -t -f .github/fixtures/boxproxy-ebpf-listener.yaml             2>&1 | tee BOXPROXY_SCHEMA_SELFTEST.txt
           grep -qi "configuration file .* test is successful" BOXPROXY_SCHEMA_SELFTEST.txt
+
+      - name: Parse custom IP-family directives
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mihomo-boxproxy-ebpf-selftest -t -f .github/fixtures/ip-family-routing.yaml 2>&1 | tee IP_FAMILY_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" IP_FAMILY_SELFTEST.txt
 
       - name: Verify documented BoxProxy keys are accepted
         shell: bash
@@ -102,6 +118,8 @@ jobs:
           file "$OUT" | tee FILE_INFO.txt
           strings "$OUT" | grep -q "github.com/metacubex/mihomo/component/smart"
           strings "$OUT" | grep -q "listener/sing_ebpf"
+          strings "$OUT" | grep -q "api4.ipify.org"
+          strings "$OUT" | grep -q "api6.ipify.org"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
           {
@@ -124,6 +142,8 @@ jobs:
             BUILD_INFO.txt
             FILE_INFO.txt
             BOXPROXY_SCHEMA_SELFTEST.txt
+            IP_FAMILY_SELFTEST.txt
             .github/fixtures/boxproxy-ebpf-listener.yaml
+            .github/fixtures/ip-family-routing.yaml
           if-no-files-found: error
           retention-days: 30
