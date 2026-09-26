@@ -160,23 +160,30 @@ func startSmartStatsWorkers() {
 // close until a full stats queue drains can make the core look hung under
 // bursts or slow flash I/O. The queue remains bounded for RAM control and the
 // dropped samples are acceptable because Smart learns from a rolling history.
+func tryEnqueueSmartStats(queue chan func(), job func()) bool {
+	select {
+	case queue <- job:
+		return true
+	default:
+		return false
+	}
+}
+
 func enqueueSmartStats(ctx context.Context, job func()) bool {
 	smartStatsOnce.Do(startSmartStatsWorkers)
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
-	select {
-	case smartStatsQueue <- job:
+	if tryEnqueueSmartStats(smartStatsQueue, job) {
 		return true
-	default:
-		dropped := smartStatsDropped.Add(1)
-		now := time.Now().Unix()
-		last := smartStatsDropLogAt.Load()
-		if now-last >= 60 && smartStatsDropLogAt.CompareAndSwap(last, now) {
-			log.Warnln("[Smart] statistics queue saturated; dropped telemetry samples=%d", dropped)
-		}
-		return false
 	}
+	dropped := smartStatsDropped.Add(1)
+	now := time.Now().Unix()
+	last := smartStatsDropLogAt.Load()
+	if now-last >= 60 && smartStatsDropLogAt.CompareAndSwap(last, now) {
+		log.Warnln("[Smart] statistics queue saturated; dropped telemetry samples=%d", dropped)
+	}
+	return false
 }
 
 var (
