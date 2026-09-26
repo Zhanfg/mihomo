@@ -28,7 +28,6 @@ func TestRequireCapabilityDecode(t *testing.T) {
 	t.Logf("decoded: PreferUDP=%v PreferIPv6=%v", opt.PreferUDP, opt.PreferIPv6)
 }
 
-
 func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
 
