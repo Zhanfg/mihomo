@@ -136,6 +136,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 class V6(ThreadingHTTPServer):
     address_family = socket.AF_INET6
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        super().server_bind()
 
 class H(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -157,6 +160,8 @@ class H(BaseHTTPRequestHandler):
 def udp(bind, label):
     fam=socket.AF_INET6 if ":" in bind else socket.AF_INET
     s=socket.socket(fam,socket.SOCK_DGRAM)
+    if fam == socket.AF_INET6:
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     s.bind((bind,18081))
     while True:
         data,peer=s.recvfrom(65535)
@@ -224,6 +229,16 @@ log-level: warning
 ipv6: true
 tcp-concurrent: true
 routing-mark: $ROUTING_MARK_DEC
+hosts:
+  invalid.test: 10.92.0.14
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  ipv6: true
+  use-hosts: true
+  enhanced-mode: redir-host
+  nameserver:
+    - system
 proxy-providers:
   daily:
     type: file
@@ -367,8 +382,18 @@ YAML
       ;;
     9)
       log "virtual 09:00 DNS burst"
-      for i in $(seq 1 64); do sudo ip netns exec "$NS_CLIENT" dig @10.91.0.1 -p 1053 invalid.test A +time=1 +tries=1 >/dev/null 2>&1 & done
-      wait || true
+      rm -f "$ART/dns-burst.ok"
+      : > "$ART/dns-burst.ok"
+      for i in $(seq 1 64); do
+        (
+          ans="$(sudo ip netns exec "$NS_CLIENT" dig @10.91.0.1 -p 1053 invalid.test A +short +time=1 +tries=1 | tail -n1)"
+          [[ "$ans" == "10.92.0.14" ]] && echo "$i" >> "$ART/dns-burst.ok"
+        ) &
+      done
+      wait
+      DNS_BURST_OK="$(wc -l < "$ART/dns-burst.ok")"
+      echo "dns_burst=$DNS_BURST_OK/64" | tee "$ART/dns-burst-summary.txt"
+      (( DNS_BURST_OK >= 63 )) || die "DNS burst success below 63/64"
       ;;
     12)
       log "virtual 12:00 remove dead candidate"
