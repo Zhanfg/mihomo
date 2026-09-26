@@ -103,8 +103,8 @@ const (
 // this every smart group in the config would pay that timeout again on every
 // reload.
 const (
-	asnInitRetryAfter     = 5 * time.Minute
-	countryDBRetryAfter   = 5 * time.Minute
+	asnInitRetryAfter   = 5 * time.Minute
+	countryDBRetryAfter = 5 * time.Minute
 )
 
 var (
