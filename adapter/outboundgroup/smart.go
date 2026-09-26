@@ -950,12 +950,12 @@ func (s *Smart) datacenterExit(metadata *C.Metadata, p C.Proxy) bool {
 		return false
 	}
 	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
-		known, datacenter, _, _ := adapter.ExitDatacenterForProxy(p, ipv6)
+		known, datacenter := adapter.ExitDatacenterForProxy(p, ipv6)
 		return known && datacenter
 	}
 
-	known4, dc4, _, _ := adapter.ExitDatacenterForProxy(p, false)
-	known6, dc6, _, _ := adapter.ExitDatacenterForProxy(p, true)
+	known4, dc4 := adapter.ExitDatacenterForProxy(p, false)
+	known6, dc6 := adapter.ExitDatacenterForProxy(p, true)
 	if known4 && !dc4 || known6 && !dc6 {
 		return false
 	}
