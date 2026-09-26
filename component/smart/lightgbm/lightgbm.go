@@ -590,38 +590,99 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	// 准备原始特征
 	features := prepareFeatures(input)
 	if len(features) == 0 {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-
-	// 检测模型特征与当前版本是否兼容
 	if transforms != nil && !transforms.IsCompatibleWith(getDefaultFeatureOrder()) {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-
-	// 应用特征变换
 	if transforms != nil && transforms.TransformsEnabled {
 		features = transforms.ApplyTransforms(features)
 	}
 
-	var prediction float64
-
-	defer func() {
-		if r := recover(); r != nil {
-			log.Errorln("[Smart] Model prediction panic: %v", r)
-			prediction, _ = smart.CalculateWeight(input, priorityFactor)
-		}
-	}()
-
-	prediction = model.PredictSingle(features, 0)
-
-	if math.IsNaN(prediction) || prediction <= 0 {
+	modelWeight, ok := predictSingleSafe(model, features)
+	if !ok {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	return prediction * priorityFactor, true
+	// The downloaded tree model is global while the statistics in ModelInput
+	// describe this device, network and target. Blend the global model with the
+	// existing lightweight heuristic according to local evidence instead of
+	// trusting a static model fully as soon as two samples exist.
+	//
+	// This is intentionally state-free: all personalization comes from the
+	// already-persisted Smart stats, so there is no second model, trainer or
+	// RAM-resident learning table.
+	baselineWeight, _ := smart.CalculateWeight(input, 1)
+	if baselineWeight > 0 {
+		confidence := adaptiveModelConfidence(input)
+		modelWeight = modelWeight*confidence + baselineWeight*(1-confidence)
+	}
+
+	if math.IsNaN(modelWeight) || math.IsInf(modelWeight, 0) || modelWeight <= 0 {
+		return smart.CalculateWeight(input, priorityFactor)
+	}
+	return modelWeight * priorityFactor, true
+}
+
+func predictSingleSafe(model *leaves.Ensemble, features []float64) (prediction float64, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorln("[Smart] Model prediction panic: %v", r)
+			prediction, ok = 0, false
+		}
+	}()
+	prediction = model.PredictSingle(features, 0)
+	return prediction, !math.IsNaN(prediction) && !math.IsInf(prediction, 0) && prediction > 0
+}
+
+// adaptiveModelConfidence decides how much of the global LightGBM prediction
+// to trust for this local history. Sparse, stale or currently unstable samples
+// lean toward the deterministic heuristic; repeated healthy observations let
+// the model carry most of the decision.
+//
+// The calculation is O(1), allocates nothing, and stores no additional state.
+func adaptiveModelConfidence(input *smart.ModelInput) float64 {
+	if input == nil {
+		return 0
+	}
+	total := input.Success + input.Failure
+	if total <= 0 {
+		return 0
+	}
+
+	// About 64 observations are enough for the local feature history to be
+	// representative. Keep a heuristic floor even with very large histories so
+	// the global model cannot completely override fresh device-local evidence.
+	evidence := math.Log1p(float64(total)) / math.Log1p(64)
+	if evidence > 1 {
+		evidence = 1
+	}
+	confidence := 0.35 + 0.55*evidence // 0.35 .. 0.90
+
+	if input.ConnectionFailed {
+		confidence *= 0.80
+	}
+	recentLoss := math.Max(input.LossRate, input.EmaLossRate)
+	if recentLoss > 0 {
+		confidence *= 1 - math.Min(0.35, recentLoss*2)
+	}
+	if input.LastUsed > 0 {
+		age := time.Since(time.Unix(input.LastUsed, 0))
+		if age > 24*time.Hour {
+			staleDays := age.Hours()/24 - 1
+			confidence *= math.Max(0.65, 1-math.Min(0.35, staleDays*0.03))
+		}
+	}
+
+	if confidence < 0.20 {
+		return 0.20
+	}
+	if confidence > 0.90 {
+		return 0.90
+	}
+	return confidence
 }
 
 func hashStringToFloat(s string, buckets int) float64 {
