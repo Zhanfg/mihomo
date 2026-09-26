@@ -2706,7 +2706,7 @@ func (s *Smart) getPriorityFactor(proxyName string) float64 {
 }
 
 func (s *Smart) applyHostFailLimit() {
-	if !s.maintenanceRecentlyActive(time.Now()) {
+	if s.lastTrafficActivity.Load() != 0 && !s.maintenanceRecentlyActive(time.Now()) {
 		return
 	}
 	if proxyCount := len(s.GetProxies(true)); proxyCount > 0 {
@@ -2909,7 +2909,10 @@ func (s *Smart) claimedRule(asn string, needsASNKey bool) (string, bool) {
 func (s *Smart) claimASNEvidence() {
 	// claimedRule consults the claims only under prefer-asn, and building them
 	// decodes every stats record of the group.
-	if !s.preferASN || !s.maintenanceRecentlyActive(time.Now()) {
+	if !s.preferASN {
+		return
+	}
+	if s.lastTrafficActivity.Load() != 0 && !s.maintenanceRecentlyActive(time.Now()) {
 		return
 	}
 	// An empty result still has to go through: it is what clears the claims
