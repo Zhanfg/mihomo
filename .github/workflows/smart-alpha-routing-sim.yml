@@ -1,0 +1,197 @@
+name: Smart Alpha Routing Simulation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - test/smart-alpha-routing-sim
+    paths:
+      - ".github/workflows/smart-alpha-routing-sim.yml"
+      - ".github/scripts/smart-routing-sim.sh"
+      - "adapter/**"
+      - "component/**"
+      - "config/**"
+      - "dns/**"
+      - "listener/**"
+      - "rules/**"
+      - "tunnel/**"
+      - "go.mod"
+      - "go.sum"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-alpha-routing-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SKIP_CONCURRENT_TEST: "1"
+  SKIP_INTEROP_TEST: "1"
+
+jobs:
+  smart-unit:
+    name: Smart unit / race / upstream baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify branch contains current Vernesong Alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/vernesong/mihomo.git \
+            Alpha:refs/remotes/smart-upstream/Alpha
+          echo "test_head=$(git rev-parse HEAD)"
+          echo "smart_alpha=$(git rev-parse refs/remotes/smart-upstream/Alpha)"
+          git merge-base --is-ancestor refs/remotes/smart-upstream/Alpha HEAD
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Prepare CA bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Smart-focused unit tests
+        run: |
+          go test -count=1 \
+            ./adapter/outboundgroup \
+            ./component/smart/... \
+            ./component/dialer \
+            ./dns/...
+
+      - name: Race detector on Smart state/concurrency paths
+        run: |
+          go test -race -count=1 \
+            ./adapter/outboundgroup \
+            ./component/smart/...
+
+      - name: Linux build smoke test
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-ci-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-linux-amd64
+
+      - name: Binary/config parser smoke
+        run: |
+          ./mihomo-linux-amd64 -v
+          ./mihomo-linux-amd64 -h >/dev/null
+
+  routing-simulation:
+    name: TProxy route simulation / failover / v4+v6 / TCP+UDP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: smart-unit
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install routing test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates \
+            curl \
+            dnsutils \
+            iproute2 \
+            iptables \
+            jq \
+            kmod \
+            nftables \
+            python3
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Build Linux Smart Alpha test core
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-routing-${GITHUB_SHA::7}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-routing-test
+
+      - name: Run routed network-namespace simulation
+        run: |
+          chmod +x .github/scripts/smart-routing-sim.sh
+          .github/scripts/smart-routing-sim.sh
+
+      - name: Upload route diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-alpha-routing-diagnostics-${{ github.run_id }}
+          path: |
+            .route-artifacts/**
+          if-no-files-found: warn
+          retention-days: 14
+
+  android-arm64:
+    name: Android arm64-v8 build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: smart-unit
+
+    steps:
+      - name: Checkout test branch
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Prepare CA bundle
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Set up Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r29-beta1
+
+      - name: Build Android Smart Alpha core
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "1"
+        run: |
+          export CC="${{ steps.setup-ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang"
+          VERSION="smart-alpha-${GITHUB_SHA::7}"
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-android-arm64-v8
+          gzip -9 -c mihomo-android-arm64-v8 > "mihomo-android-arm64-v8-${VERSION}.gz"
+          sha256sum "mihomo-android-arm64-v8-${VERSION}.gz" > SHA256SUMS
+
+      - name: Upload Android core
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-alpha-android-arm64-${{ github.run_id }}
+          path: |
+            mihomo-android-arm64-v8-smart-alpha-*.gz
+            SHA256SUMS
+          retention-days: 14
