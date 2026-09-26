@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -20,10 +21,12 @@ import (
 var (
 	initGeoSite bool
 	initGeoIP   int
+	initMMDB    bool
 	initASN     bool
 
 	initGeoSiteMutex sync.Mutex
 	initGeoIPMutex   sync.Mutex
+	initMMDBMutex    sync.Mutex
 	initASNMutex     sync.Mutex
 
 	geoIpEnable   atomic.Bool
@@ -69,22 +72,52 @@ func SetASNUrl(url string) {
 }
 
 func downloadToPath(url string, path string) (err error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
+	if url == "" {
+		return fmt.Errorf("empty download URL")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	resp, err := mihomoHttp.HttpRequest(ctx, url, http.MethodGet, nil, nil)
 	if err != nil {
-		return
+		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("unexpected HTTP status %d", resp.StatusCode)
+	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	dir := filepath.Dir(path)
+	if err = os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = tmp.Close()
+		if err != nil {
+			_ = os.Remove(tmpPath)
+		}
+	}()
 
-	return err
+	if err = tmp.Chmod(0o644); err != nil {
+		return err
+	}
+	if _, err = io.Copy(tmp, resp.Body); err != nil {
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 func InitGeoSite() error {
@@ -116,6 +149,10 @@ func InitGeoSite() error {
 
 func InitGeoIP() error {
 	geoIpEnable.Store(true)
+	if !GeodataMode() {
+		return InitMMDB()
+	}
+
 	initGeoIPMutex.Lock()
 	defer initGeoIPMutex.Unlock()
 	if GeodataMode() {
@@ -143,24 +180,52 @@ func InitGeoIP() error {
 		return nil
 	}
 
-	if _, err := os.Stat(C.Path.MMDB()); os.IsNotExist(err) {
-		log.Infoln("Can't find MMDB, start download")
-		if err := downloadToPath(MmdbUrl(), C.Path.MMDB()); err != nil {
-			return fmt.Errorf("can't download MMDB: %s", err.Error())
+	return nil
+}
+
+// InitMMDB prepares the shared country database used by legacy GEOIP mode and
+// by optional Smart country routing. It is intentionally separate from
+// InitGeoIP because geodata-mode=true uses geoip.dat and would otherwise never
+// create geoip.metadb.
+//
+// Downloads are atomic: readers either see the previous complete database or
+// the new complete database, never a partially-written file.
+func InitMMDB() error {
+	initMMDBMutex.Lock()
+	defer initMMDBMutex.Unlock()
+
+	path := C.Path.MMDB()
+	changed := false
+	if _, err := os.Stat(path); err != nil {
+		if !os.IsNotExist(err) {
+			return fmt.Errorf("can't stat MMDB: %w", err)
 		}
+		log.Infoln("Can't find MMDB, start download")
+		if err = downloadToPath(MmdbUrl(), path); err != nil {
+			return fmt.Errorf("can't download MMDB: %w", err)
+		}
+		changed = true
 	}
 
-	if initGeoIP != 2 {
-		if !mmdb.Verify(C.Path.MMDB()) {
-			log.Warnln("MMDB invalid, remove and download")
-			if err := os.Remove(C.Path.MMDB()); err != nil {
-				return fmt.Errorf("can't remove invalid MMDB: %s", err.Error())
+	if !initMMDB || !mmdb.Verify(path) {
+		if !mmdb.Verify(path) {
+			log.Warnln("MMDB invalid, replace atomically")
+			if err := downloadToPath(MmdbUrl(), path); err != nil {
+				return fmt.Errorf("can't refresh MMDB: %w", err)
 			}
-			if err := downloadToPath(MmdbUrl(), C.Path.MMDB()); err != nil {
-				return fmt.Errorf("can't download MMDB: %s", err.Error())
+			if !mmdb.Verify(path) {
+				_ = os.Remove(path)
+				return fmt.Errorf("downloaded MMDB is invalid")
 			}
+			changed = true
 		}
-		initGeoIP = 2
+		initMMDB = true
+	}
+
+	if changed {
+		// IPInstance is allowed to have failed soft before the database became
+		// available. Reset its once gate so the next lookup opens the new file.
+		mmdb.ReloadIP()
 	}
 	return nil
 }
