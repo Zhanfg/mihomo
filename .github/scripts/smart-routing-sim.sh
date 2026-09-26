@@ -25,6 +25,10 @@ V_FAST_HOST="mhpfh"
 V_FAST_NS="mhpfn"
 V_SLOW_HOST="mhpsh"
 V_SLOW_NS="mhpsn"
+V_FAST_WAN="mhpfw"
+V_WAN_FAST="mhwpf"
+V_SLOW_WAN="mhpsw"
+V_WAN_SLOW="mhwps"
 
 TPROXY_MARK="0x1"
 ROUTING_MARK_HEX="0x4000"
@@ -150,6 +154,37 @@ sudo ip -n "$NS_SLOW" -6 addr add 2001:db8:31::2/64 dev "$V_SLOW_NS" nodad
 sudo ip -n "$NS_SLOW" link set "$V_SLOW_NS" up
 sudo ip -n "$NS_SLOW" route add default via 10.31.0.1
 sudo ip -n "$NS_SLOW" -6 route add default via 2001:db8:31::1
+
+# Give each SOCKS namespace a dedicated path to the WAN namespace. This avoids
+# GitHub-hosted runner FORWARD/nftables rules contaminating the legacy backend
+# matrix while preserving 10.30/10.31 as the proxy-visible source addresses.
+sudo ip link add "$V_FAST_WAN" type veth peer name "$V_WAN_FAST"
+sudo ip link set "$V_FAST_WAN" netns "$NS_FAST"
+sudo ip link set "$V_WAN_FAST" netns "$NS_WAN"
+sudo ip -n "$NS_FAST" addr add 10.32.0.1/30 dev "$V_FAST_WAN"
+sudo ip -n "$NS_FAST" -6 addr add 2001:db8:32::1/64 dev "$V_FAST_WAN" nodad
+sudo ip -n "$NS_WAN" addr add 10.32.0.2/30 dev "$V_WAN_FAST"
+sudo ip -n "$NS_WAN" -6 addr add 2001:db8:32::2/64 dev "$V_WAN_FAST" nodad
+sudo ip -n "$NS_FAST" link set "$V_FAST_WAN" up
+sudo ip -n "$NS_WAN" link set "$V_WAN_FAST" up
+sudo ip -n "$NS_FAST" route replace 10.20.0.0/24 via 10.32.0.2 dev "$V_FAST_WAN" src 10.30.0.2
+sudo ip -n "$NS_FAST" -6 route replace 2001:db8:20::/64 via 2001:db8:32::2 dev "$V_FAST_WAN" src 2001:db8:30::2
+sudo ip -n "$NS_WAN" route replace 10.30.0.0/24 via 10.32.0.1 dev "$V_WAN_FAST"
+sudo ip -n "$NS_WAN" -6 route replace 2001:db8:30::/64 via 2001:db8:32::1 dev "$V_WAN_FAST"
+
+sudo ip link add "$V_SLOW_WAN" type veth peer name "$V_WAN_SLOW"
+sudo ip link set "$V_SLOW_WAN" netns "$NS_SLOW"
+sudo ip link set "$V_WAN_SLOW" netns "$NS_WAN"
+sudo ip -n "$NS_SLOW" addr add 10.33.0.1/30 dev "$V_SLOW_WAN"
+sudo ip -n "$NS_SLOW" -6 addr add 2001:db8:33::1/64 dev "$V_SLOW_WAN" nodad
+sudo ip -n "$NS_WAN" addr add 10.33.0.2/30 dev "$V_WAN_SLOW"
+sudo ip -n "$NS_WAN" -6 addr add 2001:db8:33::2/64 dev "$V_WAN_SLOW" nodad
+sudo ip -n "$NS_SLOW" link set "$V_SLOW_WAN" up
+sudo ip -n "$NS_WAN" link set "$V_WAN_SLOW" up
+sudo ip -n "$NS_SLOW" route replace 10.20.0.0/24 via 10.33.0.2 dev "$V_SLOW_WAN" src 10.31.0.2
+sudo ip -n "$NS_SLOW" -6 route replace 2001:db8:20::/64 via 2001:db8:33::2 dev "$V_SLOW_WAN" src 2001:db8:31::2
+sudo ip -n "$NS_WAN" route replace 10.31.0.0/24 via 10.33.0.1 dev "$V_WAN_SLOW"
+sudo ip -n "$NS_WAN" -6 route replace 2001:db8:31::/64 via 2001:db8:33::1 dev "$V_WAN_SLOW"
 
 for dev in "$V_CLIENT_HOST" "$V_WAN_HOST" "$V_FAST_HOST" "$V_SLOW_HOST"; do
   sudo sysctl -w "net.ipv4.conf.${dev}.rp_filter=0" >/dev/null || true
