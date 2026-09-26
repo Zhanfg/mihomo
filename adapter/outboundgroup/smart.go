@@ -139,7 +139,9 @@ type SmartOption struct {
 	PreferIPv4     bool    `group:"prefer-ipv4,omitempty"`
 	RequireIPv4    bool    `group:"require-ipv4,omitempty"`
 	RequireIPv6    bool    `group:"require-ipv6,omitempty"`
-	AutoIPFamily   bool    `group:"auto-ip-family,omitempty"`
+	AutoIPFamily    bool    `group:"auto-ip-family,omitempty"`
+	Country         string  `group:"country,omitempty"`
+	CountryAffinity bool    `group:"country-affinity,omitempty"`
 }
 
 type Smart struct {
@@ -169,6 +171,10 @@ type Smart struct {
 	requireIPv4    bool
 	requireIPv6    bool
 	autoIPFamily   bool
+	country        string
+	countryAffinity bool
+	affinityMu      sync.Mutex
+	affinityCountry string
 	hostFailLimit  atomic.Int32
 	tolerance      uint16
 
@@ -244,6 +250,12 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 	}
 
 	configName := getConfigFilename()
+	country := strings.ToUpper(strings.TrimSpace(smartOption.Country))
+	if country != "" {
+		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {
+			return nil, fmt.Errorf("invalid Smart country %q: use ISO 3166-1 alpha-2 code", smartOption.Country)
+		}
+	}
 
 	s := &Smart{
 		GroupBase: NewGroupBase(GroupBaseOption{
@@ -275,6 +287,8 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 		requireIPv4:    smartOption.RequireIPv4,
 		requireIPv6:    smartOption.RequireIPv6,
 		autoIPFamily:   smartOption.AutoIPFamily,
+		country:        country,
+		countryAffinity: smartOption.CountryAffinity,
 		tolerance:      smartOption.Tolerance,
 	}
 
@@ -421,6 +435,7 @@ func smartDialBatchBounds(total, iteration int, pinned bool) (begin, end int) {
 }
 
 func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
+	s.rememberAffinityCountry(metadata, p)
 	target := metadata.SmartTarget
 	existing, _ := s.store.GetUnwrapResult(s.Name(), s.configName, target)
 
@@ -716,6 +731,9 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"requireIPv4":     s.requireIPv4,
 		"requireIPv6":     s.requireIPv6,
 		"autoIPFamily":    s.autoIPFamily,
+		"country":         s.country,
+		"countryAffinity": s.countryAffinity,
+		"affinityCountry": s.currentAffinityCountry(),
 	})
 }
 
@@ -770,6 +788,113 @@ func (s *Smart) proxyIndexFor(all []C.Proxy) map[string]C.Proxy {
 	return byName
 }
 
+func metadataIPFamily(metadata *C.Metadata) (known, ipv6 bool) {
+	if metadata == nil || !metadata.DstIP.IsValid() {
+		return false, false
+	}
+	ip := metadata.DstIP.Unmap()
+	if ip.Is4() {
+		return true, false
+	}
+	if ip.Is6() {
+		return true, true
+	}
+	return false, false
+}
+
+func (s *Smart) currentAffinityCountry() string {
+	s.affinityMu.Lock()
+	defer s.affinityMu.Unlock()
+	return s.affinityCountry
+}
+
+func (s *Smart) setAffinityCountry(country string) {
+	country = strings.ToUpper(strings.TrimSpace(country))
+	s.affinityMu.Lock()
+	s.affinityCountry = country
+	s.affinityMu.Unlock()
+}
+
+// desiredCountry returns the country constraint for this selection.
+//
+// Explicit country is strict. country-affinity is sticky but self-healing: it
+// keeps the last successful exit country across IPv4/IPv6, and drops the pin
+// only after every currently-known candidate for the target family proves it
+// cannot satisfy that country. Unknown capability is kept eligible while the
+// tiny exit probe warms up so startup does not go dark.
+func (s *Smart) desiredCountry(metadata *C.Metadata, all []C.Proxy) (country string, strict bool) {
+	if s.country != "" {
+		return s.country, true
+	}
+	if !s.countryAffinity {
+		return "", false
+	}
+	country = s.currentAffinityCountry()
+	if country == "" {
+		return "", false
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return country, false
+	}
+
+	anyUnknown := false
+	for _, p := range all {
+		known, candidateCountry := adapter.ExitCountryForProxy(p, ipv6)
+		if !known {
+			anyUnknown = true
+			continue
+		}
+		if strings.EqualFold(candidateCountry, country) {
+			return country, false
+		}
+	}
+	if anyUnknown {
+		return country, false
+	}
+
+	// The pinned country has no usable member for this address family anymore.
+	// Release it and let the next successful dial establish a new common exit.
+	s.setAffinityCountry("")
+	return "", false
+}
+
+func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
+	if desired == "" {
+		return true
+	}
+	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
+		known, country := adapter.ExitCountryForProxy(p, ipv6)
+		if !known {
+			return !strict
+		}
+		return strings.EqualFold(country, desired)
+	}
+
+	known4, country4 := adapter.ExitCountryForProxy(p, false)
+	known6, country6 := adapter.ExitCountryForProxy(p, true)
+	if (known4 && strings.EqualFold(country4, desired)) || (known6 && strings.EqualFold(country6, desired)) {
+		return true
+	}
+	if strict {
+		return false
+	}
+	return !known4 || !known6
+}
+
+func (s *Smart) rememberAffinityCountry(metadata *C.Metadata, p C.Proxy) {
+	if p == nil || !s.countryAffinity || s.country != "" || s.currentAffinityCountry() != "" {
+		return
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return
+	}
+	if known, country := adapter.ExitCountryForProxy(p, ipv6); known && country != "" {
+		s.setAffinityCountry(country)
+	}
+}
+
 func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, autoIPv4, autoIPv6 bool) {
 	preferIPv4, preferIPv6 = s.preferIPv4, s.preferIPv6
 	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
@@ -800,8 +925,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// enough. auto-ip-family is adaptive: confirmed mismatches are excluded,
 	// while unknown nodes may be used briefly as probes warm up.
 	preferIPv4, preferIPv6, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
+	desiredCountry, strictCountry := s.desiredCountry(metadata, all)
 	familyEligible := func(p C.Proxy) bool {
-		return s.ipFamilyEligible(metadata, p)
+		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
 	}
 
 	var proxyByName map[string]C.Proxy
