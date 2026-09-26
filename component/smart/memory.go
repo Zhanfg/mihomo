@@ -68,37 +68,37 @@ func InitCache() {
 	globalCacheParams.MaxTargets = MinTargetsLimit
 
 	targetCache = lru.New[string, string](
-		lru.WithSize[string, string](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, string](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, string](300),
 		lru.WithStale[string, string](true),
 	)
 
 	unwrapCache = lru.New[string, UnwrapMap](
-		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, UnwrapMap](600),
 		lru.WithStale[string, UnwrapMap](true),
 	)
 
 	recordCache = lru.New[string, *AtomicStatsRecord](
-		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, *AtomicStatsRecord](300),
 		lru.WithStale[string, *AtomicStatsRecord](true),
 	)
 
 	dbResultCache = lru.New[string, map[string][]byte](
-		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, map[string][]byte](300),
 		lru.WithStale[string, map[string][]byte](true),
 	)
 
 	blockedNodesCache = lru.New[string, map[string]bool](
-		lru.WithSize[string, map[string]bool](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, map[string]bool](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, map[string]bool](300),
 		lru.WithStale[string, map[string]bool](true),
 	)
 
 	hostStatusCache = lru.New[string, *HostStatus](
-		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets / 3),
+		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets/3),
 		lru.WithAge[string, *HostStatus](300),
 		lru.WithStale[string, *HostStatus](true),
 	)
@@ -241,9 +241,9 @@ func (s *Store) UpdateBlockedNodesCache(group, config string, updates map[string
 }
 
 const (
-	androidCacheSoftHeap = 96 << 20
-	androidCacheHighHeap = 160 << 20
-	androidCacheMaxHeap  = 224 << 20
+	androidCacheSoftHeap   = 96 << 20
+	androidCacheHighHeap   = 160 << 20
+	androidCacheMaxHeap    = 224 << 20
 	androidCacheMaxTargets = 2000
 )
 
