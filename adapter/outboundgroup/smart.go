@@ -924,7 +924,7 @@ func (s *Smart) vectorRerank(metadata *C.Metadata, proxies []C.Proxy, learned ma
 
 		profile := adapter.BuildNodeVector(p, s.testUrl, learnedWeight)
 		vectorScore := adapter.NodeVectorScore(profile, metadata)
-		if affinity, ok := s.store.VectorAffinity(s.Name(), s.configName, metadata.SmartTarget, profile.Vector[:]); ok {
+		if affinity, ok := s.store.VectorAffinity(s.Name(), s.configName, metadata.SmartTarget, profile.Vector[:], profile.Tags[:]); ok {
 			// Context vector memory is learned per Smart target and complements
 			// the generic node profile. Keep it strong enough to matter, but
 			// never let a young centroid erase the base health/capability view.
@@ -2034,7 +2034,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		if newWeight > 0 {
 			vectorStrength = float32(math.Min(1.5, math.Max(0.5, newWeight)))
 		}
-		s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorSuccess, vectorStrength)
+		s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorProfile.Tags[:], vectorSuccess, vectorStrength)
 	}
 
 	// Closing stalled connections can block on I/O, so it runs without the
