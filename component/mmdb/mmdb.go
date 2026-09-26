@@ -79,6 +79,18 @@ func LookupCodeOptional(path string, ip net.IP) ([]string, error) {
 	return r.LookupCode(ip), nil
 }
 
+
+func LookupASNOptional(path string, ip net.IP) (asn string, aso string, err error) {
+	reader, err := maxminddb.Open(path)
+	if err != nil {
+		return "", "", err
+	}
+	defer reader.Close()
+	r := ASNReader{Reader: reader}
+	asn, aso = r.LookupASN(ip)
+	return asn, aso, nil
+}
+
 func IPInstance() IPReader {
 	ipOnce.Do(func() {
 		mmdbPath := C.Path.MMDB()
