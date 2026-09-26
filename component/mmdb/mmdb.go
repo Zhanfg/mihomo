@@ -79,7 +79,6 @@ func LookupCodeOptional(path string, ip net.IP) ([]string, error) {
 	return r.LookupCode(ip), nil
 }
 
-
 func LookupASNOptional(path string, ip net.IP) (asn string, aso string, err error) {
 	reader, err := maxminddb.Open(path)
 	if err != nil {
