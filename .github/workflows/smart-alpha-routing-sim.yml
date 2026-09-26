@@ -9,6 +9,7 @@ on:
       - ".github/workflows/smart-alpha-routing-sim.yml"
       - ".github/scripts/smart-routing-sim.sh"
       - ".github/scripts/smart-profile-regression.sh"
+      - ".github/scripts/smart-ebpf-routing-smoke.sh"
       - "adapter/**"
       - "component/**"
       - "config/**"
@@ -140,10 +141,14 @@ jobs:
           retention-days: 14
 
   routing-simulation:
-    name: TProxy matrix / failover / v4+v6 / TCP+UDP / stress
+    name: TProxy matrix (${{ matrix.netfilter }}) / failover / v4+v6 / TCP+UDP / stress
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: smart-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        netfilter: [nft, legacy]
 
     steps:
       - name: Checkout test branch
@@ -171,6 +176,13 @@ jobs:
           sudo update-ca-certificates
           cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
 
+      - name: Select netfilter backend
+        run: |
+          sudo update-alternatives --set iptables /usr/sbin/iptables-${{ matrix.netfilter }}
+          sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-${{ matrix.netfilter }}
+          iptables --version
+          ip6tables --version
+
       - name: Build Linux Smart Alpha test core
         env:
           CGO_ENABLED: "1"
@@ -188,7 +200,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: smart-alpha-routing-diagnostics-${{ github.run_id }}
+          name: smart-alpha-routing-${{ matrix.netfilter }}-diagnostics-${{ github.run_id }}
           path: |
             .route-artifacts/**
           if-no-files-found: warn
@@ -255,7 +267,7 @@ jobs:
       - name: Prepare CA bundle and modules
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates
+          sudo apt-get install -y ca-certificates curl iproute2 iptables jq python3
           sudo update-ca-certificates
           cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
           go mod tidy
@@ -268,6 +280,17 @@ jobs:
               ./component/dialer \
               ./config \
               ./adapter/outboundgroup
+
+      - name: Build Linux eBPF runtime core
+        run: |
+          CGO_ENABLED=0 go build -v -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-ebpf-linux-${GITHUB_SHA::7}' -w -s -buildid=" \
+            -o mihomo-linux-ebpf
+
+      - name: Run real TC eBPF IPv4/IPv6 smoke
+        run: |
+          chmod +x .github/scripts/smart-ebpf-routing-smoke.sh
+          .github/scripts/smart-ebpf-routing-smoke.sh "$PWD/mihomo-linux-ebpf"
 
       - name: Build Android arm64 Smart eBPF
         env:
@@ -291,6 +314,8 @@ jobs:
             mihomo-android-arm64-smart-ebpf.gz
             EBPF_SHA256SUMS
             ebpf-applied-commits.txt
+            .ebpf-artifacts/**
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 
