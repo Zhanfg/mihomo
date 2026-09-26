@@ -2,6 +2,7 @@ package smart
 
 import (
 	"math"
+	"net/netip"
 	"time"
 )
 
@@ -22,8 +23,12 @@ var presetSceneParams = [4]SceneParams{
 }
 
 const (
-	WeightTypeModelCalibrationTCP = "model-cal:tcp"
-	WeightTypeModelCalibrationUDP = "model-cal:udp"
+	WeightTypeModelCalibrationTCP  = "model-cal:tcp"
+	WeightTypeModelCalibrationUDP  = "model-cal:udp"
+	WeightTypeModelCalibrationTCP4 = "model-cal:tcp4"
+	WeightTypeModelCalibrationTCP6 = "model-cal:tcp6"
+	WeightTypeModelCalibrationUDP4 = "model-cal:udp4"
+	WeightTypeModelCalibrationUDP6 = "model-cal:udp6"
 )
 
 // ModelCalibrationWeightType returns the persistent online-calibration slot for
@@ -35,6 +40,27 @@ func ModelCalibrationWeightType(isUDP bool) string {
 		return WeightTypeModelCalibrationUDP
 	}
 	return WeightTypeModelCalibrationTCP
+}
+
+// ModelCalibrationWeightTypeForIP separates online calibration by transport
+// and destination family. A node can have very different IPv4 and IPv6 paths;
+// letting one family train the other's residual makes auto-ip-family selection
+// learn the wrong lesson. Unknown destinations retain the legacy generic slot.
+func ModelCalibrationWeightTypeForIP(isUDP bool, ip netip.Addr) string {
+	if !ip.IsValid() {
+		return ModelCalibrationWeightType(isUDP)
+	}
+	ip = ip.Unmap()
+	if isUDP {
+		if ip.Is6() {
+			return WeightTypeModelCalibrationUDP6
+		}
+		return WeightTypeModelCalibrationUDP4
+	}
+	if ip.Is6() {
+		return WeightTypeModelCalibrationTCP6
+	}
+	return WeightTypeModelCalibrationTCP4
 }
 
 // AdaptModelPrediction turns the static LightGBM score into a small online
