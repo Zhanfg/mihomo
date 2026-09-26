@@ -139,6 +139,9 @@ func startSmartStatsWorkers() {
 // latency for bounded RAM and scheduler pressure.
 func enqueueSmartStats(ctx context.Context, job func()) bool {
 	smartStatsOnce.Do(startSmartStatsWorkers)
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	select {
 	case smartStatsQueue <- job:
 		return true
@@ -2842,9 +2845,6 @@ func (s *Smart) claimedRule(asn string, needsASNKey bool) (string, bool) {
 // claimASNEvidence rebuilds the network to service rule claims from the evidence
 // collected per target (see TargetASNEvidence), it runs on its own timer.
 func (s *Smart) claimASNEvidence() {
-	if !s.maintenanceRecentlyActive(time.Now()) {
-		return
-	}
 	// claimedRule consults the claims only under prefer-asn, and building them
 	// decodes every stats record of the group.
 	if !s.preferASN {
