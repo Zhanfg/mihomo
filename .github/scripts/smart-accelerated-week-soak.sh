@@ -433,6 +433,7 @@ TOTAL_OK=0
 TOTAL_REQ=0
 TOTAL_BYTES=0
 DAY_FAILS=0
+FAKE6_FAILS=0
 START_NS="$(date +%s%N)"
 : > "$ART/hourly.jsonl"
 : > "$ART/events.log"
@@ -486,18 +487,33 @@ for vh in $(seq 0 167); do
     dns_ok="$(wc -l < "$ART/dns-d$day.ok")"
     (( dns_ok >= 94 )) || die "day $day fake-IP burst below 94/96: $dns_ok"
     before="$(fakeip_query stable-d$day.week.test A)"
+    v6_before="$(fakeip_query stable-d$day.week.test AAAA)"
+    if [[ ! "$v6_before" =~ ^fc ]]; then
+      FAKE6_FAILS=$((FAKE6_FAILS+1))
+      echo "day=$day event=fakeip6-missing value=$v6_before" >> "$ART/events.log"
+    fi
     cache_status /cache/dns/flush "$ART/dns-flush-d$day.txt"
     after="$(fakeip_query stable-d$day.week.test A)"
+    v6_after="$(fakeip_query stable-d$day.week.test AAAA)"
     [[ "$before" == "$after" ]] || die "DNS-cache flush changed fake-IP mapping on day $day"
-    echo "day=$day event=dns-flush fakeip=$before" >> "$ART/events.log"
+    if [[ "$v6_before" != "$v6_after" ]]; then
+      echo "day=$day event=fakeip6-changed before=$v6_before after=$v6_after" >> "$ART/events.log"
+      FAKE6_FAILS=$((FAKE6_FAILS+1))
+    fi
+    echo "day=$day event=dns-flush fakeip4=$before fakeip6=$v6_before" >> "$ART/events.log"
   fi
 
   # Flush fake-IP pool twice during the week and require recovery.
   if { [[ "$day" == "2" ]] || [[ "$day" == "5" ]]; } && [[ "$hour" == "11" ]]; then
     cache_status /cache/fakeip/flush "$ART/fakeip-flush-d$day.txt"
     fresh="$(fakeip_query "post-flush-d$day.week.test" A)"
+    fresh6="$(fakeip_query "post-flush-d$day.week.test" AAAA)"
     [[ "$fresh" =~ ^198\.18\. ]] || die "fake-IP did not recover after flush on day $day"
-    echo "day=$day hour=11 event=fakeip-flush fresh=$fresh" >> "$ART/events.log"
+    if [[ ! "$fresh6" =~ ^fc ]]; then
+      FAKE6_FAILS=$((FAKE6_FAILS+1))
+      echo "day=$day hour=11 event=fakeip6-postflush-missing value=$fresh6" >> "$ART/events.log"
+    fi
+    echo "day=$day hour=11 event=fakeip-flush fresh4=$fresh fresh6=$fresh6" >> "$ART/events.log"
   fi
 
   # Smart cache/history flush on alternating days, then traffic must relearn immediately.
@@ -623,6 +639,7 @@ success=$TOTAL_OK
 success_basis_points=$SUCCESS_BP
 bytes=$TOTAL_BYTES
 low_success_hours=$DAY_FAILS
+fakeip6_failures=$FAKE6_FAILS
 base_rss_kb=$BASE_RSS
 end_rss_kb=$END_RSS
 rss_delta_kb=$RSS_DELTA
@@ -644,6 +661,7 @@ cat "$ART/summary.txt"
 kill -0 "$MAIN_PID" 2>/dev/null || die "Mihomo died during accelerated week"
 (( SUCCESS_BP >= 9600 )) || die "weekly success rate below 96%"
 (( DAY_FAILS <= 8 )) || die "too many virtual hours below 90% success"
+(( FAKE6_FAILS == 0 )) || die "IPv6 fake-IP failed $FAKE6_FAILS checks during the virtual week"
 (( RSS_DELTA <= 196608 )) || die "RSS retained >192MiB after weekly cleanup"
 (( FD_DELTA <= 80 )) || die "FD retained >80 after weekly cleanup"
 (( TH_DELTA <= 40 )) || die "threads retained >40 after weekly cleanup"
