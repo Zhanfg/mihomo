@@ -1,0 +1,44 @@
+name: Smart failure quarantine fast check
+
+on:
+  push:
+    branches:
+      - fix/smart-failure-quarantine
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smart-quarantine:
+    name: Smart quarantine / unit + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: true
+
+      - name: Format gate
+        run: |
+          test -z "$(gofmt -l adapter/outboundgroup/smart.go adapter/outboundgroup/groupbase.go adapter/outboundgroup/smart_quarantine_test.go)"
+
+      - name: Smart quarantine unit tests
+        run: go test ./adapter/outboundgroup -run 'TestSmartDialQuarantine' -count=1
+
+      - name: Smart package regression
+        run: go test ./component/smart/... -count=1
+
+      - name: Build core
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -buildvcs=false -tags "with_gvisor" -trimpath -o mihomo-smart-quarantine .
+          ./mihomo-smart-quarantine -v
