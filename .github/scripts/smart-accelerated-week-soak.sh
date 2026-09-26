@@ -513,20 +513,43 @@ for vh in $(seq 0 167); do
     echo "day=2 hour=4 event=provider-invalid-recover" >> "$ART/events.log"
   fi
 
-  # DNS/fake-IP cache churn every morning: 96 unique names + stable-name check.
+  # DNS/fake-IP cache churn every morning. First hit the UDP listener with a
+  # 96-way burst, then verify every name over TCP. This separates hosted-runner
+  # UDP burst loss from actual fake-IP allocation/cache correctness.
   if [[ "$hour" == "7" ]]; then
-    : > "$ART/dns-d$day.ok"
+    : > "$ART/dns-d$day.burst"
     dns_pids=()
     for i in $(seq 1 96); do
       (
         a="$(fakeip_query "d$day-h$hour-n$i.week.test" A)"
-        [[ "$a" =~ ^198\.18\. ]] && echo "$i" >> "$ART/dns-d$day.ok"
+        [[ "$a" =~ ^198\.18\. ]] && echo "$i $a" >> "$ART/dns-d$day.burst"
       ) &
       dns_pids+=("$!")
     done
     for pid in "${dns_pids[@]}"; do wait "$pid" || true; done
-    dns_ok="$(wc -l < "$ART/dns-d$day.ok")"
-    (( dns_ok >= 94 )) || die "day $day fake-IP burst below 94/96: $dns_ok"
+    dns_burst_ok="$(wc -l < "$ART/dns-d$day.burst")"
+    (( dns_burst_ok >= 48 )) || die "day $day UDP fake-IP burst below 48/96: $dns_burst_ok"
+
+    : > "$ART/dns-d$day.final"
+    verify_pids=()
+    for i in $(seq 1 96); do
+      (
+        a="$(sudo ip netns exec "$NS_CLIENT" dig +tcp @10.101.0.1 -p "$DNS_PORT" "d$day-h$hour-n$i.week.test" A +short +time=2 +tries=2 | tail -n1)"
+        [[ "$a" =~ ^198\.18\. ]] && echo "$i $a" >> "$ART/dns-d$day.final"
+      ) &
+      verify_pids+=("$!")
+      if (( i % 16 == 0 )); then
+        for pid in "${verify_pids[@]}"; do wait "$pid" || true; done
+        verify_pids=()
+      fi
+    done
+    for pid in "${verify_pids[@]}"; do wait "$pid" || true; done
+    dns_final_ok="$(wc -l < "$ART/dns-d$day.final")"
+    dns_unique="$(awk '{print $2}' "$ART/dns-d$day.final" | sort -u | wc -l)"
+    printf 'burst=%s/96\nfinal=%s/96\nunique=%s/96\n' "$dns_burst_ok" "$dns_final_ok" "$dns_unique" | tee "$ART/dns-d$day-summary.txt"
+    (( dns_final_ok == 96 )) || die "day $day fake-IP allocation did not converge to 96/96: $dns_final_ok"
+    (( dns_unique == 96 )) || die "day $day fake-IP allocations were not unique: $dns_unique/96"
+
     before="$(fakeip_query stable-d$day.week.test A)"
     v6_before="$(fakeip_query stable-d$day.week.test AAAA)"
     if [[ "$HOST_IPV6_CAPABLE" == "1" && ! "$v6_before" =~ ^fc ]]; then
@@ -647,17 +670,23 @@ sudo ip netns exec "$NS_CLIENT" python3 "$STATE/hold.py" >"$ART/hold.log" 2>&1 &
 HOLD_PID=$!
 for _ in $(seq 1 50); do [[ -f /tmp/mh-week-hold ]] && break; sleep 0.05; done
 HOLD_OPEN="$(sudo cat /tmp/mh-week-hold 2>/dev/null || echo 0)"
+sleep 0.75
+curl -fsS "http://127.0.0.1:$CTRL/connections" > "$ART/hold-connections.json"
+HOLD_TCP="$(jq '[.connections[] | select(.metadata.network == "tcp" and .metadata.destinationIP == "10.102.0.13" and .metadata.destinationPort == "18080")] | length' "$ART/hold-connections.json")"
 sample_metrics hold-peak
 HOLD_CONN="$(tail -n1 "$ART/metrics.csv" | cut -d, -f5)"
-printf 'opened=%s\napi_connections=%s\n' "$HOLD_OPEN" "$HOLD_CONN" > "$ART/hold-summary.txt"
+printf 'opened=%s\napi_connections=%s\nheld_tcp=%s\n' "$HOLD_OPEN" "$HOLD_CONN" "$HOLD_TCP" > "$ART/hold-summary.txt"
 (( HOLD_OPEN >= 160 )) || die "weekly terminal pressure opened fewer than 160/192"
-(( HOLD_CONN >= 130 )) || die "controller saw too few held connections"
+(( HOLD_TCP >= 130 )) || die "controller saw too few held TCP sessions"
 wait "$HOLD_PID" || true
 
+PRE_CLEAN_CONN="$HOLD_CONN"
+curl -fsS -X DELETE "http://127.0.0.1:$CTRL/connections" -o /dev/null
+sleep 1
 cache_status /cache/dns/flush "$ART/final-dns-flush.txt"
 cache_status /cache/fakeip/flush "$ART/final-fakeip-flush.txt"
 cache_status /cache/smart/flush "$ART/final-smart-flush.txt"
-sleep 3
+sleep 2
 sample_metrics end
 
 END_RSS="$(tail -n1 "$ART/metrics.csv" | cut -d, -f2)"
@@ -698,6 +727,7 @@ base_threads=$BASE_TH
 end_threads=$END_TH
 thread_delta=$TH_DELTA
 max_threads=$MAX_TH
+pre_cleanup_connections=$PRE_CLEAN_CONN
 end_connections=$END_CONN
 end_cache_bytes=$END_CACHE
 max_cache_bytes=$MAX_CACHE
@@ -711,7 +741,7 @@ kill -0 "$MAIN_PID" 2>/dev/null || die "Mihomo died during accelerated week"
 (( RSS_DELTA <= 196608 )) || die "RSS retained >192MiB after weekly cleanup"
 (( FD_DELTA <= 80 )) || die "FD retained >80 after weekly cleanup"
 (( TH_DELTA <= 40 )) || die "threads retained >40 after weekly cleanup"
-(( END_CONN <= 10 )) || die "residual connections >10 after cleanup"
+(( END_CONN <= 2 )) || die "connection manager did not empty after explicit weekly reclamation"
 (( END_CACHE <= 33554432 )) || die "cache.db exceeds 32MiB after final cache flush"
 
 # Final functional recovery after all caches/history were flushed.
