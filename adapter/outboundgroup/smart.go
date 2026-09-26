@@ -52,8 +52,9 @@ const (
 	flushQueueInterval       = 5 * time.Minute
 	rankingInterval          = 5 * time.Minute
 
-	maxRetries  = 5
-	maxSelected = 10
+	maxRetries        = 5
+	maxSelected       = 10
+	vectorRerankWindow = 24
 
 	deterministicDialPrefix = 3
 	parallelDials           = 5
@@ -891,6 +892,62 @@ func (s *Smart) ipFamilyEligible(metadata *C.Metadata, p C.Proxy) bool {
 	return true
 }
 
+// vectorRerank applies the compact node-vector model only to the front of an
+// already filtered/sorted candidate list. This keeps CPU and capability-probe
+// fan-out bounded even when a provider contains thousands of nodes.
+//
+// Existing Smart target weights remain the strongest signal; the vector layer
+// is a second-stage reranker that adds reliability, jitter, measured IP-family,
+// dual-stack consistency, UDP capability and learned exit metadata.
+func (s *Smart) vectorRerank(metadata *C.Metadata, proxies []C.Proxy, learned map[string]float64) {
+	if len(proxies) < 2 {
+		return
+	}
+	limit := len(proxies)
+	if limit > vectorRerankWindow {
+		limit = vectorRerankWindow
+	}
+
+	type vectorRank struct {
+		proxy C.Proxy
+		score float64
+		order int
+	}
+	ranked := make([]vectorRank, limit)
+	for i := 0; i < limit; i++ {
+		p := proxies[i]
+		identity := adapter.ProxyIdentity(p)
+		learnedWeight := 0.0
+		if learned != nil {
+			learnedWeight = learned[identity]
+		}
+
+		vectorScore := adapter.NodeVectorMatch(p, s.testUrl, metadata, learnedWeight)
+		delay := p.LastDelayForTestUrl(s.testUrl)
+		delayScore := 0.0
+		if delay > 0 && delay < 0xffff {
+			delayScore = math.Exp(-float64(delay) / 800.0)
+		}
+
+		score := 0.70*vectorScore + 0.30*delayScore
+		if learnedWeight > 0 {
+			learnedScore := math.Min(1, learnedWeight/1.25)
+			score = 0.55*learnedScore + 0.30*vectorScore + 0.15*delayScore
+		}
+		ranked[i] = vectorRank{proxy: p, score: score, order: i}
+	}
+
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if math.Abs(ranked[i].score-ranked[j].score) < 0.01 {
+			return ranked[i].order < ranked[j].order
+		}
+		return ranked[i].score > ranked[j].score
+	})
+	for i := range ranked {
+		proxies[i] = ranked[i].proxy
+	}
+}
+
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
@@ -910,6 +967,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	}
 
 	checkNodeUsed := make(map[string]bool, len(names))
+	learnedWeightByIdentity := make(map[string]float64, len(names))
 
 	selected := make([]C.Proxy, 0, minCount+1)
 
@@ -923,6 +981,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if weights != nil && i < len(weights) {
 			w = weights[i]
 		}
+		learnedWeightByIdentity[adapter.ProxyIdentity(proxy)] = w
 		if weights != nil && w < smart.AllowedWeight {
 			continue
 		}
@@ -935,6 +994,12 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// Unwrap result should not filled
 	if weights == nil && len(selected) > 0 {
 		return selected
+	}
+
+	// Learned target order is primary, but the vector layer may refine the
+	// short front list using orthogonal node facts not present in Model.bin.
+	if len(selected) > 1 {
+		s.vectorRerank(metadata, selected, learnedWeightByIdentity)
 	}
 
 	if len(selected) >= len(all) {
@@ -1016,6 +1081,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	}
 
 	filteredAll = defaultSort(filteredAll)
+	s.vectorRerank(metadata, filteredAll, learnedWeightByIdentity)
 
 	for _, p := range filteredAll {
 		selected = append(selected, p)
@@ -1026,6 +1092,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	if len(selected) == 0 {
 		fallbackAll := defaultSort(slices.Clone(all))
+		s.vectorRerank(metadata, fallbackAll, learnedWeightByIdentity)
 		for _, p := range fallbackAll {
 			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p) {
 				selected = append(selected, p)
