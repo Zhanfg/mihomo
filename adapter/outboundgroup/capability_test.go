@@ -69,7 +69,6 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 	}
 }
 
-
 func TestCountryAffinityFirstWriterWins(t *testing.T) {
 	s := &Smart{countryAffinity: true}
 	var wg sync.WaitGroup
