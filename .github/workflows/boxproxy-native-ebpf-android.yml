@@ -66,7 +66,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=boxproxy-ebpf-selftest-$HEAD_SHORT' -w -s -buildid="               -o mihomo-boxproxy-ebpf-selftest
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=se-test-$HEAD_SHORT' -w -s -buildid="               -o mihomo-boxproxy-ebpf-selftest
 
       - name: Parse exact BoxProxy listener fixture
         shell: bash
@@ -95,8 +95,8 @@ jobs:
           GOARCH: arm64
         run: |
           set -euo pipefail
-          VERSION="smart-boxproxy-native-ebpf-$HEAD_SHORT"
-          OUT="mihomo-android-arm64-smart-boxproxy-ebpf-$HEAD_SHORT"
+          VERSION="smart-ebpf-$HEAD_SHORT"
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
           go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
           test -s "$OUT"
           file "$OUT" | tee FILE_INFO.txt
@@ -117,9 +117,9 @@ jobs:
       - name: Upload Android core
         uses: actions/upload-artifact@v7
         with:
-          name: mihomo-smart-boxproxy-native-ebpf-android-arm64-${{ env.HEAD_SHORT }}
+          name: smart-ebpf-a64-${{ env.HEAD_SHORT }}
           path: |
-            mihomo-android-arm64-smart-boxproxy-ebpf-*
+            mihomo-a64-smart-ebpf-*
             SHA256SUMS
             BUILD_INFO.txt
             FILE_INFO.txt
