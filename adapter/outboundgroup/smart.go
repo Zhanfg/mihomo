@@ -192,6 +192,7 @@ type SmartOption struct {
 	AutoIPFamily    bool    `group:"auto-ip-family,omitempty"`
 	Country         string  `group:"country,omitempty"`
 	CountryAffinity bool    `group:"country-affinity,omitempty"`
+	AvoidDatacenter bool    `group:"avoid-datacenter,omitempty"`
 }
 
 type Smart struct {
@@ -223,6 +224,7 @@ type Smart struct {
 	autoIPFamily    bool
 	country         string
 	countryAffinity bool
+	avoidDatacenter bool
 	affinityMu      sync.Mutex
 	affinityCountry string
 	hostFailLimit   atomic.Int32
@@ -339,6 +341,7 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 		autoIPFamily:    smartOption.AutoIPFamily,
 		country:         country,
 		countryAffinity: smartOption.CountryAffinity,
+		avoidDatacenter: smartOption.AvoidDatacenter,
 		tolerance:       smartOption.Tolerance,
 	}
 
@@ -787,6 +790,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"country":         s.country,
 		"countryAffinity": s.countryAffinity,
 		"affinityCountry": s.currentAffinityCountry(),
+		"avoidDatacenter": s.avoidDatacenter,
 	})
 }
 
@@ -920,6 +924,27 @@ func (s *Smart) rememberAffinityCountry(metadata *C.Metadata, p C.Proxy) {
 	}
 }
 
+// datacenterExit reports a confirmed IDC/hosting exit for the family this
+// connection uses. Unknown classification is deliberately treated as non-IDC
+// until the existing capability probe finishes, so reputation warm-up can
+// never make a Smart group go dark.
+func (s *Smart) datacenterExit(metadata *C.Metadata, p C.Proxy) bool {
+	if !s.avoidDatacenter || p == nil {
+		return false
+	}
+	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
+		known, datacenter, _, _ := adapter.ExitDatacenterForProxy(p, ipv6)
+		return known && datacenter
+	}
+
+	known4, dc4, _, _ := adapter.ExitDatacenterForProxy(p, false)
+	known6, dc6, _, _ := adapter.ExitDatacenterForProxy(p, true)
+	if known4 && !dc4 || known6 && !dc6 {
+		return false
+	}
+	return known4 && known6 && dc4 && dc6
+}
+
 func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, autoIPv4, autoIPv6 bool) {
 	preferIPv4, preferIPv6 = s.preferIPv4, s.preferIPv6
 	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
@@ -954,6 +979,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
 	}
+	preferredEligible := func(p C.Proxy) bool {
+		return familyEligible(p) && !s.datacenterExit(metadata, p)
+	}
 
 	var proxyByName map[string]C.Proxy
 	if len(names) > 0 {
@@ -966,7 +994,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	for i, name := range names {
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) {
+		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !preferredEligible(proxy) {
 			continue
 		}
 		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
@@ -999,9 +1027,10 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	hasPriority := len(s.policyPriority) > 0
 
 	type sortKey struct {
-		delay  uint16
-		factor float64
-		index  int
+		delay      uint16
+		factor     float64
+		datacenter bool
+		index      int
 	}
 	allKeys := make(map[string]sortKey, len(all))
 	for i, p := range all {
@@ -1012,7 +1041,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		k := sortKey{
 			delay: adapter.AddCapabilityPenaltyExtended(
 				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, preferIPv4, preferIPv6),
-			index: i,
+			datacenter: s.datacenterExit(metadata, p),
+			index:      i,
 		}
 		if hasPriority {
 			k.factor = s.getPriorityFactor(name)
@@ -1026,6 +1056,11 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 			ki, kj := allKeys[ni], allKeys[nj]
 			if hasPriority && ki.factor != kj.factor {
 				return ki.factor > kj.factor
+			}
+			// Known IDC exits remain available as a last resort, but every
+			// non-IDC/unknown candidate ranks ahead of them.
+			if ki.datacenter != kj.datacenter {
+				return !ki.datacenter
 			}
 			// Tolerance: delays within tolerance are treated as equal, preventing jitter
 			if s.tolerance > 0 {
@@ -1258,7 +1293,7 @@ func (s *Smart) InitSmart() {
 	s.lastTrafficActivity.Store(time.Now().UnixNano())
 	s.recoveryBackoff = make(map[string]hostRecoveryState)
 
-	if s.preferASN {
+	if s.preferASN || s.avoidDatacenter {
 		initASNDatabase()
 	}
 
