@@ -10,6 +10,11 @@ on:
       - "adapter/vector_profile.go"
       - "adapter/vector_profile_test.go"
       - "adapter/outboundgroup/smart.go"
+      - "component/smart/vector.go"
+      - "component/smart/vector_test.go"
+      - "component/smart/common.go"
+      - "component/smart/memory.go"
+      - "component/smart/cachefile.go"
       - ".github/workflows/smart-vector.yml"
 
 permissions:
@@ -47,7 +52,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          gofmt -d             adapter/capability.go             adapter/vector_profile.go             adapter/vector_profile_test.go             adapter/outboundgroup/smart.go | tee /tmp/gofmt.diff
+          gofmt -d             adapter/capability.go             adapter/vector_profile.go             adapter/vector_profile_test.go             adapter/outboundgroup/smart.go             component/smart/vector.go             component/smart/vector_test.go             component/smart/common.go             component/smart/memory.go             component/smart/cachefile.go | tee /tmp/gofmt.diff
           test ! -s /tmp/gofmt.diff
 
       - name: Vector/capability tests
