@@ -1014,23 +1014,39 @@ func (s *Smart) ipFamilyEligible(metadata *C.Metadata, p C.Proxy) bool {
 	// Only explicit require-* directives are hard admission rules.
 	//
 	// auto-ip-family is availability-first: it contributes ranking penalties
-	// through ipFamilyPolicy/AddCapabilityPenaltyExtended, but never removes a
-	// node solely because an external capability probe failed. A transient
-	// api4/api6 failure must not turn every Smart group into REJECT.
+	// and invalidates a stale cached pin after a confirmed mismatch, but never
+	// makes the whole group unavailable solely because public probe endpoints
+	// are temporarily bad.
 	return adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false)
+}
+
+func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
+	if p == nil || !s.autoIPFamily {
+		return false
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return false
+	}
+	known, ok := adapter.IPFamilyCapabilityKnown(p, ipv6)
+	return known && !ok
 }
 
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
-	// Explicit require-* directives are strict. auto-ip-family is a soft,
-	// availability-first ranking signal: telemetry may reorder candidates but
-	// cannot blackhole the group when a probe endpoint is temporarily bad.
-	preferIPv4, preferIPv6, _, _ := s.ipFamilyPolicy(metadata)
+	// Explicit require-* directives are strict. auto-ip-family remains
+	// availability-first, but a cached/pinned node that is already PROVEN to
+	// lack the destination family must not keep winning merely because it was
+	// selected for the same target before an A/AAAA family change.
+	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry()
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
+	}
+	autoFamilyMismatch := func(p C.Proxy) bool {
+		return s.autoIPFamilyMismatch(metadata, p)
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -1044,7 +1060,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	for i, name := range names {
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) {
+		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) || autoFamilyMismatch(proxy) {
 			continue
 		}
 		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
@@ -1087,9 +1103,15 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		// Capability preferences demote a node here rather than removing it
 		// from the pool, so a failed UDP / IPv6 probe costs a node its rank
 		// but never its availability.
+		delay := adapter.AddCapabilityPenaltyExtended(
+			p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
+		if autoIPv4 {
+			delay = adapter.AddAutoIPFamilyPenalty(delay, p, false)
+		} else if autoIPv6 {
+			delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
+		}
 		k := sortKey{
-			delay: adapter.AddCapabilityPenaltyExtended(
-				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, preferIPv4, preferIPv6),
+			delay: delay,
 			index: i,
 		}
 		if hasPriority {

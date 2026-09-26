@@ -9,9 +9,12 @@ be patched.
 The core probes each concrete proxy identity independently and caches the
 result:
 
-- IPv4 egress: `https://api4.ipify.org`
-- IPv6 egress: `https://api6.ipify.org`
+- IPv4 egress: `api4.ipify.org`, with `api-ipv4.ip.sb/ip` as failure fallback
+- IPv6 egress: `api6.ipify.org`, with `api-ipv6.ip.sb/ip` as failure fallback
 - UDP egress: STUN (existing capability probe)
+
+Only the fallback endpoint is contacted when the primary family probe fails, so
+normal steady-state probe traffic does not double.
 
 The IPv4/IPv6 probes use non-mutating `StatusTest`, so they do not rewrite the
 normal proxy health/alive history.
@@ -21,7 +24,7 @@ Current cache policy:
 - probe timeout: 5 seconds
 - successful verdict TTL: 30 minutes
 - failed verdict TTL: 10 minutes
-- maximum concurrent capability probes: 8
+- maximum concurrent capability probes: 4 on Android, 8 elsewhere
 
 ## Directives
 
@@ -61,9 +64,11 @@ address family of each connection:
 - IPv6 destination -> prefer/require IPv6-capable egress
 - unresolved/unknown family -> keep normal Smart behavior
 
-During initial probe warm-up an unknown node may remain eligible, but a
-confirmed family mismatch is excluded. If no eligible node remains, the
-group's `empty-fallback` is used.
+During initial probe warm-up an unknown node remains eligible with a small
+ranking cost. A confirmed family mismatch receives a very large ranking cost
+and a stale cached/pinned winner is invalidated. It is deliberately not a hard
+group-wide filter: if every probe endpoint is unavailable, normal Smart
+fallback remains usable instead of blackholing the group.
 
 ## Examples
 

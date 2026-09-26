@@ -27,19 +27,30 @@ import (
 // are still running.
 
 const (
-	capabilityProbeTimeout = 5 * time.Second
-	capabilityOKTTL        = 30 * time.Minute
-	capabilityFailTTL      = 10 * time.Minute
-	capabilityRetryTTL     = 30 * time.Second
-	capabilityFailConfirm  = 2
+	capabilityProbeTimeout    = 5 * time.Second
+	capabilityEndpointTimeout = 3 * time.Second
+	capabilityOKTTL           = 30 * time.Minute
+	capabilityFailTTL         = 10 * time.Minute
+	capabilityRetryTTL        = 30 * time.Second
+	capabilityFailConfirm     = 2
 
 	// STUN binding request target for the UDP probe.
 	capabilityStunServer = "stun.l.google.com:19302"
-	// Family-specific egress probes. api4/api6 are deliberately single-stack:
-	// a successful probe therefore proves that the proxy can actually reach
-	// that address family instead of merely resolving a dual-stack hostname.
-	capabilityIPv4URL = "https://api4.ipify.org"
-	capabilityIPv6URL = "https://api6.ipify.org"
+)
+
+var (
+	// Family-specific egress probes. Every endpoint is single-stack for the
+	// requested family and returns the observed source address as plain text.
+	// The second endpoint is only used when the primary fails, avoiding a
+	// single public service turning IPv6 telemetry into a false negative.
+	capabilityIPv4URLs = [...]string{
+		"https://api4.ipify.org",
+		"https://api-ipv4.ip.sb/ip",
+	}
+	capabilityIPv6URLs = [...]string{
+		"https://api6.ipify.org",
+		"https://api-ipv6.ip.sb/ip",
+	}
 )
 
 type capabilityKind uint8
@@ -240,25 +251,10 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	switch kind {
 	case capabilityUDP:
 		ok = probeUDP(ctx, p)
-	case capabilityIPv4, capabilityIPv6:
-		rawURL := capabilityIPv4URL
-		wantIPv6 := false
-		if kind == capabilityIPv6 {
-			rawURL = capabilityIPv6URL
-			wantIPv6 = true
-		}
-		// Concrete adapter.Proxy exposes the observed public source address.
-		// Fall back to StatusTest for custom Proxy implementations so the
-		// capability API remains compatible.
-		if prober, supported := p.(interface {
-			ExitIPProbe(context.Context, string) (netip.Addr, error)
-		}); supported {
-			var err error
-			exitIP, err = prober.ExitIPProbe(ctx, rawURL)
-			ok = err == nil && exitIP.IsValid() && (exitIP.Is6() == wantIPv6)
-		} else {
-			_, ok, _ = p.StatusTest(ctx, rawURL)
-		}
+	case capabilityIPv4:
+		exitIP, ok = probeIPFamily(ctx, p, capabilityIPv4URLs[:], false)
+	case capabilityIPv6:
+		exitIP, ok = probeIPFamily(ctx, p, capabilityIPv6URLs[:], true)
 	}
 
 	now := time.Now()
@@ -314,6 +310,34 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		kindName = "ipv6"
 	}
 	log.Debugln("[Capability] %s %s=%v", p.Name(), kindName, ok)
+}
+
+func probeIPFamily(ctx context.Context, p C.Proxy, urls []string, wantIPv6 bool) (netip.Addr, bool) {
+	if p == nil || len(urls) == 0 {
+		return netip.Addr{}, false
+	}
+	for _, rawURL := range urls {
+		if ctx.Err() != nil {
+			break
+		}
+		attemptCtx, cancel := context.WithTimeout(ctx, capabilityEndpointTimeout)
+		if prober, supported := p.(interface {
+			ExitIPProbe(context.Context, string) (netip.Addr, error)
+		}); supported {
+			ip, err := prober.ExitIPProbe(attemptCtx, rawURL)
+			cancel()
+			if err == nil && ip.IsValid() && ip.Is6() == wantIPv6 {
+				return ip.Unmap(), true
+			}
+			continue
+		}
+		_, ok, _ := p.StatusTest(attemptCtx, rawURL)
+		cancel()
+		if ok {
+			return netip.Addr{}, true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 // probeUDP sends a STUN binding request through the proxy and waits for any
@@ -555,14 +579,19 @@ func ExitIPForProxy(p C.Proxy, ipv6 bool) (known bool, ip netip.Addr) {
 // that hard-filtered on a failed probe would go dark for reasons that have
 // nothing to do with whether its nodes can carry traffic.
 const (
-	// capabilityMissingPenalty applies when a probe confirmed the capability
-	// is absent. Large enough to lose against any healthy node that has it,
-	// small enough that a fast node without it still beats a slow node with.
+	// capabilityMissingPenalty is the ordinary soft preference penalty used by
+	// prefer-ipv4/prefer-ipv6. It does not remove a node from availability.
 	capabilityMissingPenalty = 600
-	// capabilityUnknownPenalty applies while a probe is still pending, so an
-	// unprobed node ranks just behind a confirmed one instead of being
-	// buried alongside confirmed failures.
+	// capabilityUnknownPenalty applies while a probe is still pending.
 	capabilityUnknownPenalty = 50
+
+	// autoFamilyMissingPenalty is intentionally much stronger: once the core
+	// has PROVEN that a node cannot carry the destination family, it should
+	// almost never beat a compatible node. It is still finite so that if every
+	// probe endpoint is broken or every node is single-stack, Smart retains an
+	// availability fallback instead of turning the group into REJECT.
+	autoFamilyMissingPenalty = 30000
+	autoFamilyUnknownPenalty = 120
 )
 
 // CapabilityPenalty returns extra latency in milliseconds to add when ranking
@@ -640,4 +669,31 @@ func AddCapabilityPenaltyExtended(delay uint16, p C.Proxy, preferUDP, preferIPv4
 // AddCapabilityPenalty preserves the historical API for existing callers.
 func AddCapabilityPenalty(delay uint16, p C.Proxy, preferUDP, preferIPv6 bool) uint16 {
 	return AddCapabilityPenaltyExtended(delay, p, preferUDP, false, preferIPv6)
+}
+
+// AddAutoIPFamilyPenalty is the availability-first family selector used by
+// Smart auto-ip-family. A confirmed mismatch is pushed far behind compatible
+// nodes; unknown capability gets only a small warm-up cost; no node is removed.
+func AddAutoIPFamilyPenalty(delay uint16, p C.Proxy, ipv6 bool) uint16 {
+	if p == nil {
+		return delay
+	}
+	state := capabilityStateForProxy(p)
+	kind := capabilityIPv4
+	if ipv6 {
+		kind = capabilityIPv6
+	}
+	var penalty uint16
+	switch state.stateOrProbe(p, kind) {
+	case capNo:
+		penalty = autoFamilyMissingPenalty
+	case capUnknown:
+		penalty = autoFamilyUnknownPenalty
+	default:
+		return delay
+	}
+	if uint32(delay)+uint32(penalty) > 0xFFFF {
+		return 0xFFFF
+	}
+	return delay + penalty
 }

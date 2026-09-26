@@ -14,14 +14,17 @@ import (
 type capabilityProbeProxy struct {
 	C.Proxy
 	statusCalled bool
+	statusCalls  int
 	urlCalled    bool
 	fail         bool
+	failFirst    bool
 }
 
 func (p *capabilityProbeProxy) Name() string { return "probe" }
 func (p *capabilityProbeProxy) StatusTest(context.Context, string) (uint16, bool, error) {
 	p.statusCalled = true
-	if p.fail {
+	p.statusCalls++
+	if p.fail || (p.failFirst && p.statusCalls == 1) {
 		return 599, false, nil
 	}
 	return 204, true, nil
@@ -389,5 +392,50 @@ func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
 	state.ipv4.mu.Unlock()
 	if !stillHealthy {
 		t.Fatal("missing country database must not demote the proxy's IPv4 capability")
+	}
+}
+
+func TestIPFamilyProbeFallsBackToSecondEndpoint(t *testing.T) {
+	p := &capabilityProbeProxy{failFirst: true}
+	entry := &capabilityEntry{}
+	probeCapability(p, capabilityIPv6, entry)
+
+	entry.mu.Lock()
+	known, ok := entry.known, entry.ok
+	entry.mu.Unlock()
+
+	if !known || !ok {
+		t.Fatalf("fallback endpoint did not recover capability: known=%v ok=%v", known, ok)
+	}
+	if p.statusCalls != 2 {
+		t.Fatalf("status calls=%d, want 2 (primary failure + fallback success)", p.statusCalls)
+	}
+}
+
+func TestAutoIPFamilyPenaltyStronglyDemotesConfirmedMismatch(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("auto-family-mismatch")
+	state := capabilityStateForProxy(p)
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = false
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.mu.Unlock()
+
+	got := AddAutoIPFamilyPenalty(80, p, true)
+	if got != 80+autoFamilyMissingPenalty {
+		t.Fatalf("confirmed IPv6 mismatch delay=%d, want %d", got, 80+autoFamilyMissingPenalty)
+	}
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = false
+	state.ipv6.probing = true
+	state.ipv6.expire = time.Time{}
+	state.ipv6.mu.Unlock()
+
+	got = AddAutoIPFamilyPenalty(80, p, true)
+	if got != 80+autoFamilyUnknownPenalty {
+		t.Fatalf("unknown IPv6 delay=%d, want %d", got, 80+autoFamilyUnknownPenalty)
 	}
 }
