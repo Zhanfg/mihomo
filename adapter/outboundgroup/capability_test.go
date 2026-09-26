@@ -67,7 +67,6 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 	}
 }
 
-
 func TestCountryAffinityBecomesStrictAfterLearning(t *testing.T) {
 	s := &Smart{countryAffinity: true}
 	if country, strict := s.desiredCountry(); country != "" || strict {
