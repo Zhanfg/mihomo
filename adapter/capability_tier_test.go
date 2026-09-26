@@ -215,3 +215,81 @@ func TestProxyIdentitySeparatesDelimiterCollisions(t *testing.T) {
 		t.Fatal("proxy identity must not collide when delimiters move between provider and address")
 	}
 }
+
+
+func TestIPv4CapabilityProbeDoesNotMutateHealth(t *testing.T) {
+	p := &capabilityProbeProxy{}
+	entry := &capabilityEntry{}
+	probeCapability(p, capabilityIPv4, entry)
+	if !p.statusCalled {
+		t.Fatal("IPv4 capability probe must use StatusTest")
+	}
+	if p.urlCalled {
+		t.Fatal("IPv4 capability probe must not call URLTest")
+	}
+	entry.mu.Lock()
+	ok := entry.known && entry.ok
+	entry.mu.Unlock()
+	if !ok {
+		t.Fatal("successful IPv4 status probe should cache a positive capability")
+	}
+}
+
+func TestIPFamilyRequirementsFailClosedAndWarmUp(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("family")
+	state := capabilityStateForProxy(p)
+
+	set := func(entry *capabilityEntry, known, ok, probing bool) {
+		entry.mu.Lock()
+		entry.known = known
+		entry.ok = ok
+		entry.probing = probing
+		entry.expire = time.Now().Add(time.Hour)
+		entry.mu.Unlock()
+	}
+
+	// Unknown capability is rejected by an explicit require-* directive.
+	set(&state.ipv6, false, false, true)
+	if IPFamilyRequirementsMet(p, false, true, false) {
+		t.Fatal("strict require-ipv6 must reject an unknown capability")
+	}
+	// auto-ip-family warm-up may temporarily retain unknown nodes.
+	if !IPFamilyRequirementsMet(p, false, true, true) {
+		t.Fatal("warm-up policy should retain an unknown IPv6 capability")
+	}
+
+	set(&state.ipv6, true, false, false)
+	if IPFamilyRequirementsMet(p, false, true, true) {
+		t.Fatal("confirmed missing IPv6 must be rejected even during warm-up")
+	}
+
+	set(&state.ipv6, true, true, false)
+	if !IPFamilyRequirementsMet(p, false, true, false) {
+		t.Fatal("confirmed IPv6 capability must satisfy require-ipv6")
+	}
+
+	set(&state.ipv4, true, false, false)
+	if IPFamilyRequirementsMet(p, true, true, false) {
+		t.Fatal("dual-stack requirement must reject a proxy missing IPv4")
+	}
+	set(&state.ipv4, true, true, false)
+	if !IPFamilyRequirementsMet(p, true, true, false) {
+		t.Fatal("dual-stack requirement must accept a proxy with both families")
+	}
+}
+
+func TestIPv4PreferencePenalty(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("v4-preference")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = false
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	if got := CapabilityPenaltyExtended(p, false, true, false); got != capabilityMissingPenalty {
+		t.Fatalf("missing IPv4 penalty = %d, want %d", got, capabilityMissingPenalty)
+	}
+}
