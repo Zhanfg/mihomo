@@ -1,0 +1,164 @@
+name: Mobile Runtime Dropout Fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - fix/mobile-runtime-dropout
+    paths:
+      - "adapter/**"
+      - "component/smart/**"
+      - "component/keepalive/**"
+      - "dns/**"
+      - ".github/workflows/mobile-runtime-dropout.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-runtime-dropout
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Source
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          HEAD_SHORT="$(git rev-parse --short=7 HEAD)"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          echo "HEAD_SHORT=$HEAD_SHORT" >> "$GITHUB_ENV"
+          git log -5 --oneline
+
+      - name: gofmt gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILES=(
+            adapter/capability.go
+            adapter/capability_tier_test.go
+            adapter/outboundgroup/smart.go
+            adapter/outboundgroup/smart_availability_test.go
+          )
+          gofmt -d "${FILES[@]}" | tee /tmp/gofmt.diff
+          test ! -s /tmp/gofmt.diff
+
+      - name: Dropout regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter -run 'Test(IPFamilyProbe|FirstFamilyProbe|IPv4|IPv6|Capability)' -count=1
+          go test ./adapter/outboundgroup -run 'Test(AutoIPFamily|ExplicitRequireIPFamily|CustomIPFamily|Smart|URLTest)' -count=1
+          go test ./component/smart ./component/keepalive ./dns -count=1
+
+      - name: Race hot paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race ./adapter/outboundgroup ./component/smart -run 'Test(AutoIPFamily|ExplicitRequireIPFamily|Smart|ModelCalibration)' -count=1 -timeout=12m
+
+      - name: Build Linux soak core
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-$HEAD_SHORT' -w -s -buildid="             -o mihomo-soak
+
+      - name: 8000 connection availability churn
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dropout/www /tmp/dropout/home
+          printf 'ok\n' >/tmp/dropout/www/index.html
+          cat >/tmp/dropout/config.yaml <<'YAML'
+          mixed-port: 17890
+          allow-lan: false
+          mode: rule
+          log-level: error
+          ipv6: true
+          find-process-mode: off
+          profile:
+            store-selected: false
+            store-fake-ip: false
+          proxy-groups:
+            - name: STRESS
+              type: smart
+              proxies: [DIRECT]
+              url: http://127.0.0.1:18080/
+              interval: 60
+              lazy: false
+              uselightgbm: false
+              auto-ip-family: true
+              country-affinity: true
+              empty-fallback: REJECT
+          rules:
+            - MATCH,STRESS
+          YAML
+
+          (cd /tmp/dropout/www && python3 -m http.server 18080 --bind 127.0.0.1 >/tmp/http.log 2>&1) &
+          HPID=$!
+          HOME=/tmp/dropout/home ./mihomo-soak -d /tmp/dropout -f /tmp/dropout/config.yaml >/tmp/mihomo.log 2>&1 &
+          MPID=$!
+          trap 'kill "$MPID" "$HPID" 2>/dev/null || true' EXIT
+
+          for _ in $(seq 1 100); do
+            curl -fsS --max-time 2 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null && break
+            sleep 0.1
+          done
+
+          seq 1 8000 | xargs -P 48 -n 1 sh -c '
+            curl -fsS --connect-timeout 2 --max-time 5               -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null
+          ' sh
+
+          kill -0 "$MPID"
+          for _ in $(seq 1 20); do
+            curl -fsS --max-time 2 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null
+          done
+          echo "availability_churn=PASS" | tee SOAK.txt
+          echo "requests=8000" | tee -a SOAK.txt
+          echo "parallelism=48" | tee -a SOAK.txt
+          echo "core_alive_after_load=YES" | tee -a SOAK.txt
+
+      - name: Build Android arm64
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          VERSION="smart-ebpf-$HEAD_SHORT"
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
+          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          test -s "$OUT"
+          file "$OUT" | tee FILE_INFO.txt
+          gzip -9 -c "$OUT" > "$OUT.gz"
+          sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
+          {
+            echo "source=$HEAD_SHA"
+            echo "version=$VERSION"
+            echo "fixes=auto-family-soft,capability-failure-hysteresis,nonblocking-smart-stats"
+            echo "android_keepalive=enabled"
+            echo "target=android/arm64"
+          } > BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-ebpf-a64-stable-${{ env.HEAD_SHORT }}
+          path: |
+            mihomo-a64-smart-ebpf-*
+            SHA256SUMS
+            BUILD_INFO.txt
+            FILE_INFO.txt
+            SOAK.txt
+          if-no-files-found: error
+          retention-days: 30
