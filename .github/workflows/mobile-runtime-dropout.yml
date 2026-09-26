@@ -79,6 +79,21 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/dropout/www /tmp/dropout/home
           printf 'ok\n' >/tmp/dropout/www/index.html
+          cat >/tmp/dropout/server.py <<'PY'
+          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+          import os
+
+          class StressServer(ThreadingHTTPServer):
+              request_queue_size = 512
+              daemon_threads = True
+
+          class QuietHandler(SimpleHTTPRequestHandler):
+              def log_message(self, fmt, *args):
+                  pass
+
+          os.chdir("/tmp/dropout/www")
+          StressServer(("127.0.0.1", 18080), QuietHandler).serve_forever()
+          PY
           cat >/tmp/dropout/config.yaml <<'YAML'
           mixed-port: 17890
           allow-lan: false
@@ -104,7 +119,7 @@ jobs:
             - MATCH,STRESS
           YAML
 
-          (cd /tmp/dropout/www && python3 -m http.server 18080 --bind 127.0.0.1 >/tmp/http.log 2>&1) &
+          python3 /tmp/dropout/server.py >/tmp/http.log 2>&1 &
           HPID=$!
           HOME=/tmp/dropout/home ./mihomo-soak -d /tmp/dropout -f /tmp/dropout/config.yaml >/tmp/mihomo.log 2>&1 &
           MPID=$!
