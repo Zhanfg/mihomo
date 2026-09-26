@@ -323,13 +323,13 @@ def runtime_checks(bin_path,cfg,work,art):
             providers=get_json("http://127.0.0.1:29091/providers/proxies")
             rproviders=get_json("http://127.0.0.1:29091/providers/rules")
             rules=get_json("http://127.0.0.1:29091/rules")
-            proxy_names=set(proxies.get("proxies",{}))
-            provider_names=set(providers.get("providers",{}))
-            rule_provider_names=set(rproviders.get("providers",{}))
+            proxy_names=set((proxies or {}).get("proxies") or {})
+            provider_names=set((providers or {}).get("providers") or {})
+            rule_provider_names=set((rproviders or {}).get("providers") or {})
             missing_groups=expected_groups-proxy_names
             missing_providers=expected_providers-provider_names
             missing_rule_providers=expected_rule_providers-rule_provider_names
-            rule_count=len(rules.get("rules",[]))
+            rule_count=len(((rules or {}).get("rules") or []))
             last_missing={
                 "groups":sorted(missing_groups),
                 "providers":sorted(missing_providers),
