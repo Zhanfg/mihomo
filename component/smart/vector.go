@@ -135,13 +135,9 @@ func loadVectorMemory(s *Store, key string) (VectorMemory, bool) {
 		return VectorMemory{}, false
 	}
 	if v.Updated > 0 && time.Since(time.Unix(v.Updated, 0)) > RecordExpiredTime {
-		// Do not keep stale target behavior forever. Delete through the same
-		// deduplicating queue; the caller can relearn from live traffic.
-		s.AppendToGlobalQueue(StoreOperation{
-			Type:    OpDeleteData,
-			KeyType: KeyTypeVector,
-			Config:  "",
-		})
+		// Ignore stale behavior immediately. Physical cleanup follows the
+		// existing config/group lifecycle instead of creating a write just
+		// because a cold target was read once.
 		return VectorMemory{}, false
 	}
 	if vectorMemoryCache != nil {
