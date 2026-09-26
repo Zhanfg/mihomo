@@ -1024,13 +1024,26 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
-	// Explicit require-* directives are strict. auto-ip-family is a soft,
-	// availability-first ranking signal: telemetry may reorder candidates but
-	// cannot blackhole the group when a probe endpoint is temporarily bad.
-	preferIPv4, preferIPv6, _, _ := s.ipFamilyPolicy(metadata)
+	// Explicit require-* directives are strict. auto-ip-family remains
+	// availability-first, but a cached/pinned node that is already PROVEN to
+	// lack the destination family must not keep winning merely because it was
+	// selected for the same target before an A/AAAA family change.
+	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry()
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
+	}
+	autoFamilyMismatch := func(p C.Proxy) bool {
+		switch {
+		case autoIPv4:
+			known, ok := adapter.IPFamilyCapabilityKnown(p, false)
+			return known && !ok
+		case autoIPv6:
+			known, ok := adapter.IPFamilyCapabilityKnown(p, true)
+			return known && !ok
+		default:
+			return false
+		}
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -1044,7 +1057,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	for i, name := range names {
 		proxy := proxyByName[name]
-		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) {
+		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) || autoFamilyMismatch(proxy) {
 			continue
 		}
 		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
@@ -1087,9 +1100,15 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		// Capability preferences demote a node here rather than removing it
 		// from the pool, so a failed UDP / IPv6 probe costs a node its rank
 		// but never its availability.
+		delay := adapter.AddCapabilityPenaltyExtended(
+			p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
+		if autoIPv4 {
+			delay = adapter.AddAutoIPFamilyPenalty(delay, p, false)
+		} else if autoIPv6 {
+			delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
+		}
 		k := sortKey{
-			delay: adapter.AddCapabilityPenaltyExtended(
-				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, preferIPv4, preferIPv6),
+			delay: delay,
 			index: i,
 		}
 		if hasPriority {
