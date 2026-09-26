@@ -27,3 +27,39 @@ func TestRequireCapabilityDecode(t *testing.T) {
 	}
 	t.Logf("decoded: PreferUDP=%v PreferIPv6=%v", opt.PreferUDP, opt.PreferIPv6)
 }
+
+func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
+	decoder := structure.NewDecoder(structure.Option{TagName: "group", WeaklyTypedInput: true})
+
+	smartRaw := map[string]any{
+		"name":           "双栈智能",
+		"type":           "smart",
+		"prefer-ipv4":    true,
+		"prefer-ipv6":    true,
+		"require-ipv4":   false,
+		"require-ipv6":   true,
+		"auto-ip-family": true,
+	}
+	smartOpt := SmartOption{}
+	if err := decoder.Decode(smartRaw, &smartOpt); err != nil {
+		t.Fatalf("decode smart directives: %v", err)
+	}
+	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily {
+		t.Fatalf("unexpected smart directives: %+v", smartOpt)
+	}
+
+	urlRaw := map[string]any{
+		"name":         "IPv6节点",
+		"type":         "url-test",
+		"prefer-ipv4":  false,
+		"require-ipv4": false,
+		"require-ipv6": true,
+	}
+	urlOpt := URLTestOption{}
+	if err := decoder.Decode(urlRaw, &urlOpt); err != nil {
+		t.Fatalf("decode url-test directives: %v", err)
+	}
+	if !urlOpt.RequireIPv6 || urlOpt.RequireIPv4 || urlOpt.PreferIPv4 {
+		t.Fatalf("unexpected url-test directives: %+v", urlOpt)
+	}
+}

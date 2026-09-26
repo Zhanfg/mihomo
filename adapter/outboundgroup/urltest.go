@@ -18,7 +18,10 @@ import (
 )
 
 type URLTestOption struct {
-	Tolerance uint16 `group:"tolerance,omitempty"`
+	Tolerance   uint16 `group:"tolerance,omitempty"`
+	PreferIPv4  bool   `group:"prefer-ipv4,omitempty"`
+	RequireIPv4 bool   `group:"require-ipv4,omitempty"`
+	RequireIPv6 bool   `group:"require-ipv6,omitempty"`
 }
 
 type URLTest struct {
@@ -28,6 +31,9 @@ type URLTest struct {
 	expectedStatus string
 	tolerance      uint16
 	disableUDP     bool
+	preferIPv4     bool
+	requireIPv4    bool
+	requireIPv6    bool
 	fastNode       C.Proxy
 	fastSingle     *singledo.Single[C.Proxy]
 }
@@ -111,8 +117,8 @@ func (u *URLTest) healthCheck() {
 // missing a preferred capability sinks in the ordering while staying
 // selectable as a last resort.
 func (u *URLTest) rankDelay(proxy C.Proxy) uint16 {
-	delay := adapter.AddCapabilityPenalty(
-		proxy.LastDelayForTestUrl(u.testUrl), proxy, u.preferUDP, u.preferIPv6)
+	delay := adapter.AddCapabilityPenaltyExtended(
+		proxy.LastDelayForTestUrl(u.testUrl), proxy, u.preferUDP, u.preferIPv4, u.preferIPv6)
 	if !u.penalizeUnstable {
 		return delay
 	}
@@ -129,44 +135,48 @@ func (u *URLTest) rankDelay(proxy C.Proxy) uint16 {
 func (u *URLTest) fast(touch bool) C.Proxy {
 	elm, _, shared := u.fastSingle.Do(func() (C.Proxy, error) {
 		proxies := u.GetProxies(touch)
+		eligible := func(proxy C.Proxy) bool {
+			return proxy != nil &&
+				proxy.AliveForTestUrl(u.testUrl) &&
+				adapter.IPFamilyRequirementsMet(proxy, u.requireIPv4, u.requireIPv6, false)
+		}
+
 		if u.selected != "" {
 			for _, proxy := range proxies {
-				if !proxy.AliveForTestUrl(u.testUrl) {
-					continue
-				}
-				if proxy.Name() == u.selected {
+				if proxy.Name() == u.selected && eligible(proxy) {
 					u.fastNode = proxy
 					return proxy, nil
 				}
 			}
 		}
 
-		fast := proxies[0]
-		minDelay := u.rankDelay(fast)
+		var fast C.Proxy
+		var minDelay uint16
 		fastNotExist := true
 
-		// Scan from proxies[0], not proxies[1]: the existence check must see
-		// the first candidate too, or a current node sitting first is taken
-		// for gone and replaced by any faster node, ignoring tolerance.
-		// Revisiting proxies[0] cannot change fast, its delay equals minDelay.
 		for _, proxy := range proxies {
 			if u.fastNode != nil && proxy.Name() == u.fastNode.Name() {
 				fastNotExist = false
 			}
-
-			if !proxy.AliveForTestUrl(u.testUrl) {
+			if !eligible(proxy) {
 				continue
 			}
-
 			delay := u.rankDelay(proxy)
-			if delay < minDelay {
+			if fast == nil || delay < minDelay {
 				fast = proxy
 				minDelay = delay
 			}
-
 		}
-		// tolerance
-		if u.fastNode == nil || fastNotExist || !u.fastNode.AliveForTestUrl(u.testUrl) ||
+
+		// Hard requirements are intentionally fail-closed. A group that says
+		// require-ipv4/require-ipv6 must never silently fall back to a proxy
+		// whose family support is unknown or known-bad.
+		if fast == nil {
+			u.fastNode = u.EmptyFallback()
+			return u.fastNode, nil
+		}
+
+		if u.fastNode == nil || fastNotExist || !eligible(u.fastNode) ||
 			delayExceedsTolerance(u.rankDelay(u.fastNode), u.rankDelay(fast), u.tolerance) {
 			u.fastNode = fast
 		}
@@ -212,6 +222,10 @@ func (u *URLTest) MarshalJSON() ([]byte, error) {
 		"hidden":         u.Hidden(),
 		"icon":           u.Icon(),
 		"emptyFallback":  u.EmptyFallback().Name(),
+		"preferIPv4":     u.preferIPv4,
+		"preferIPv6":     u.preferIPv6,
+		"requireIPv4":    u.requireIPv4,
+		"requireIPv6":    u.requireIPv6,
 	})
 }
 
@@ -253,6 +267,9 @@ func NewURLTest(option GroupCommonOption, urlTestOption URLTestOption, emptyFall
 		testUrl:        option.URL,
 		expectedStatus: option.ExpectedStatus,
 		tolerance:      urlTestOption.Tolerance,
+		preferIPv4:     urlTestOption.PreferIPv4,
+		requireIPv4:    urlTestOption.RequireIPv4,
+		requireIPv6:    urlTestOption.RequireIPv6,
 	}
 
 	return urlTest, nil
