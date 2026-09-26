@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -52,6 +53,8 @@ type capabilityEntry struct {
 	ok      bool
 	expire  time.Time
 	probing bool
+	exitIP  netip.Addr
+	country string
 }
 
 type capabilityState struct {
@@ -217,18 +220,32 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), capabilityProbeTimeout)
 	defer cancel()
 
-	var ok bool
+	var (
+		ok     bool
+		exitIP netip.Addr
+	)
 	switch kind {
 	case capabilityUDP:
 		ok = probeUDP(ctx, p)
-	case capabilityIPv4:
-		// StatusTest is deliberately non-mutating: capability telemetry must
-		// not rewrite the proxy's normal health/alive history.
-		_, ok, _ = p.StatusTest(ctx, capabilityIPv4URL)
-	case capabilityIPv6:
-		// StatusTest is deliberately non-mutating: capability telemetry must
-		// not rewrite the proxy's normal health/alive history.
-		_, ok, _ = p.StatusTest(ctx, capabilityIPv6URL)
+	case capabilityIPv4, capabilityIPv6:
+		rawURL := capabilityIPv4URL
+		wantIPv6 := false
+		if kind == capabilityIPv6 {
+			rawURL = capabilityIPv6URL
+			wantIPv6 = true
+		}
+		// Concrete adapter.Proxy exposes the observed public source address.
+		// Fall back to StatusTest for custom Proxy implementations so the
+		// capability API remains compatible.
+		if prober, supported := p.(interface {
+			ExitIPProbe(context.Context, string) (netip.Addr, error)
+		}); supported {
+			var err error
+			exitIP, err = prober.ExitIPProbe(ctx, rawURL)
+			ok = err == nil && exitIP.IsValid() && (exitIP.Is6() == wantIPv6)
+		} else {
+			_, ok, _ = p.StatusTest(ctx, rawURL)
+		}
 	}
 
 	ttl := capabilityOKTTL
@@ -240,6 +257,15 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	entry.ok = ok
 	entry.expire = time.Now().Add(ttl)
 	entry.probing = false
+	if ok && exitIP.IsValid() {
+		if entry.exitIP != exitIP {
+			entry.country = ""
+		}
+		entry.exitIP = exitIP
+	} else if kind == capabilityIPv4 || kind == capabilityIPv6 {
+		entry.exitIP = netip.Addr{}
+		entry.country = ""
+	}
 	entry.mu.Unlock()
 
 	kindName := "udp"
@@ -405,6 +431,75 @@ func IPFamilyCapabilityKnown(p C.Proxy, ipv6 bool) (known, ok bool) {
 	default:
 		return false, false
 	}
+}
+
+// ExitCountryForProxy returns the measured exit country for one address family.
+//
+// The public exit IP is collected by the same tiny single-stack probe already
+// used for IPv4/IPv6 capability detection. Country lookup is lazy and uses the
+// existing Mihomo MMDB, so enabling country routing adds no new database,
+// dependency or background worker.
+func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
+	if p == nil {
+		return false, ""
+	}
+	state := capabilityStateForProxy(p)
+	entry := &state.ipv4
+	kind := capabilityIPv4
+	if ipv6 {
+		entry = &state.ipv6
+		kind = capabilityIPv6
+	}
+	if state.stateOrProbe(p, kind) != capYes {
+		return false, ""
+	}
+
+	entry.mu.Lock()
+	if entry.country != "" {
+		country = entry.country
+		entry.mu.Unlock()
+		return true, country
+	}
+	exitIP := entry.exitIP
+	entry.mu.Unlock()
+	if !exitIP.IsValid() {
+		return false, ""
+	}
+
+	codes := mmdb.IPInstance().LookupCode(exitIP.AsSlice())
+	if len(codes) == 0 || codes[0] == "" {
+		return false, ""
+	}
+	country = strings.ToUpper(codes[0])
+
+	entry.mu.Lock()
+	if entry.exitIP == exitIP {
+		entry.country = country
+	}
+	entry.mu.Unlock()
+	return true, country
+}
+
+// ExitIPForProxy exposes the cached observed public source address for
+// diagnostics. It schedules the same asynchronous probe when data is absent.
+func ExitIPForProxy(p C.Proxy, ipv6 bool) (known bool, ip netip.Addr) {
+	if p == nil {
+		return false, netip.Addr{}
+	}
+	state := capabilityStateForProxy(p)
+	entry := &state.ipv4
+	kind := capabilityIPv4
+	if ipv6 {
+		entry = &state.ipv6
+		kind = capabilityIPv6
+	}
+	if state.stateOrProbe(p, kind) != capYes {
+		return false, netip.Addr{}
+	}
+	entry.mu.Lock()
+	ip = entry.exitIP
+	entry.mu.Unlock()
+	return ip.IsValid(), ip
 }
 
 // Capability preferences only ever reorder a group, never shrink it. A node
