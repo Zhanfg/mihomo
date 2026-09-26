@@ -502,6 +502,28 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	return true, country
 }
 
+var knownDatacenterASNs = map[string]struct{}{
+	"16509": {},  // Amazon
+	"14618": {},  // Amazon
+	"8075":  {},  // Microsoft/Azure
+	"396982": {}, // Google Cloud
+	"14061": {},  // DigitalOcean
+	"20473": {},  // Vultr / Choopa
+	"63949": {},  // Linode / Akamai Connected Cloud
+	"24940": {},  // Hetzner
+	"16276": {},  // OVH
+	"9009":  {},  // M247
+	"30058": {},  // FDCservers
+	"51167": {},  // Contabo
+	"197540": {}, // netcup
+	"12876": {},  // Scaleway
+	"36351": {},  // IBM SoftLayer
+	"31898": {},  // Oracle
+	"45102": {},  // Alibaba Cloud
+	"132203": {}, // Tencent Cloud
+	"55990": {},  // Huawei Cloud
+}
+
 var datacenterOrgTokens = [...]string{
 	"hosting",
 	"host",
@@ -533,7 +555,10 @@ var datacenterOrgTokens = [...]string{
 // a residential-IP database, remote reputation API or another background
 // worker. False positives are harmless because Smart uses this as a soft
 // preference and falls back to IDC nodes when no better exit exists.
-func isDatacenterASNOrganization(organization string) bool {
+func isDatacenterASN(asn, organization string) bool {
+	if _, known := knownDatacenterASNs[strings.TrimSpace(asn)]; known {
+		return true
+	}
 	org := strings.ToLower(strings.TrimSpace(organization))
 	if org == "" {
 		return false
@@ -582,7 +607,7 @@ func ExitDatacenterForProxy(p C.Proxy, ipv6 bool) (known, datacenter bool, asn, 
 	if asn == "" && organization == "" {
 		return false, false, "", ""
 	}
-	datacenter = isDatacenterASNOrganization(organization)
+	datacenter = isDatacenterASN(asn, organization)
 
 	entry.mu.Lock()
 	if entry.exitIP == exitIP {
