@@ -115,15 +115,61 @@ jobs:
             sleep 0.1
           done
 
+          {
+            echo "pid=$MPID"
+            echo "baseline_status:"
+            ps -o pid,ppid,stat,nlwp,rss,vsz,pcpu,pmem,etime,cmd -p "$MPID" || true
+          } | tee SOAK.txt
+
+          # Do not let xargs abort the step before we can capture the core's
+          # actual failure mode. Count client failures, then inspect the server.
+          set +e
           seq 1 8000 | xargs -P 48 -n 1 sh -c '
             curl -fsS --connect-timeout 2 --max-time 5               -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null
           ' sh
+          CHURN_RC=$?
+          set -e
 
-          kill -0 "$MPID"
+          echo "churn_rc=$CHURN_RC" | tee -a SOAK.txt
+          echo "post_churn_status:" | tee -a SOAK.txt
+          ps -o pid,ppid,stat,nlwp,rss,vsz,pcpu,pmem,etime,cmd -p "$MPID" 2>&1 | tee -a SOAK.txt || true
+
+          ALIVE=NO
+          EXIT_CODE=unknown
+          if kill -0 "$MPID" 2>/dev/null; then
+            ALIVE=YES
+          else
+            set +e
+            wait "$MPID"
+            EXIT_CODE=$?
+            set -e
+          fi
+          echo "core_alive_after_churn=$ALIVE" | tee -a SOAK.txt
+          echo "core_exit_code=$EXIT_CODE" | tee -a SOAK.txt
+
+          echo "--- mihomo.log tail ---" | tee -a SOAK.txt
+          tail -n 240 /tmp/mihomo.log 2>&1 | tee -a SOAK.txt || true
+          echo "--- http.log tail ---" | tee -a SOAK.txt
+          tail -n 80 /tmp/http.log 2>&1 | tee -a SOAK.txt || true
+          echo "--- kernel oom/panic hints ---" | tee -a SOAK.txt
+          dmesg 2>/dev/null | grep -Ei 'oom|killed process|segfault|panic|mihomo' | tail -n 80 | tee -a SOAK.txt || true
+
+          if [ "$ALIVE" != YES ]; then
+            echo "availability_churn=CORE_DIED" | tee -a SOAK.txt
+            exit 1
+          fi
+
+          POST_FAIL=0
           for _ in $(seq 1 20); do
-            curl -fsS --max-time 2 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null
+            if ! curl -fsS --max-time 2 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null; then
+              POST_FAIL=$((POST_FAIL + 1))
+            fi
           done
-          echo "availability_churn=PASS" | tee SOAK.txt
+          echo "post_churn_probe_failures=$POST_FAIL" | tee -a SOAK.txt
+          test "$POST_FAIL" -eq 0
+          test "$CHURN_RC" -eq 0
+
+          echo "availability_churn=PASS" | tee -a SOAK.txt
           echo "requests=8000" | tee -a SOAK.txt
           echo "parallelism=48" | tee -a SOAK.txt
           echo "core_alive_after_load=YES" | tee -a SOAK.txt
