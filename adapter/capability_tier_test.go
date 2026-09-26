@@ -324,7 +324,6 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	}
 }
 
-
 func TestIPFamilyProbeNeedsTwoFailuresToDemote(t *testing.T) {
 	entry := &capabilityEntry{
 		known:  true,
