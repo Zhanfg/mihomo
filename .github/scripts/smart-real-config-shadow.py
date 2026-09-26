@@ -361,10 +361,28 @@ def runtime_checks(bin_path,cfg,work,art):
         # but cold on startup. Force-refresh every registered rule provider to
         # validate the full Smart-proxied bootstrap path instead of assuming
         # all 71 must be referenced during initial rule evaluation.
-        import urllib.parse
+        import urllib.parse, urllib.error
+        refresh_failures={}
         for name in sorted(expected_rule_providers):
             enc=urllib.parse.quote(name, safe="")
-            get_json(f"http://127.0.0.1:29091/providers/rules/{enc}",method="PUT")
+            last=None
+            for attempt in range(8):
+                try:
+                    get_json(f"http://127.0.0.1:29091/providers/rules/{enc}",method="PUT")
+                    last=None
+                    break
+                except urllib.error.HTTPError as e:
+                    last=f"HTTP {e.code}"
+                    if e.code not in (503, 429):
+                        break
+                except Exception as e:
+                    last=repr(e)
+                time.sleep(0.25 + attempt * 0.1)
+            if last is not None:
+                refresh_failures[name]=last
+        (art/"forced-refresh-failures.json").write_text(json.dumps(refresh_failures,ensure_ascii=False,indent=2))
+        if refresh_failures:
+            die("rule-provider forced refresh failed: " + "; ".join(f"{k}={v}" for k,v in list(refresh_failures.items())[:8]))
         for _ in range(120):
             with State.lock:
                 ph=len(State.provider_hits); rh=len(State.rule_hits)
