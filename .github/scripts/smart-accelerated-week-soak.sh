@@ -182,7 +182,8 @@ bind-address: '*'
 ipv6: true
 mode: rule
 log-level: warning
-rules: [MATCH,DIRECT]
+rules:
+  - MATCH,DIRECT
 YAML
 cp "$FAST_CFG" "$SLOW_CFG"
 
