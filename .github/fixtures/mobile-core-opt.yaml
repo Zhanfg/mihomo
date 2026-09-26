@@ -3,6 +3,21 @@ allow-lan: false
 mode: rule
 log-level: warning
 ipv6: true
+keep-alive-idle: 60
+keep-alive-interval: 20
+disable-keep-alive: false
+
+dns:
+  enable: true
+  ipv6: true
+  enhanced-mode: redir-host
+  listen: 127.0.0.1:1053
+  nameserver:
+    - 1.1.1.1
+
+profile:
+  store-selected: true
+  store-fake-ip: false
 
 listeners:
   - name: ebpf-in
