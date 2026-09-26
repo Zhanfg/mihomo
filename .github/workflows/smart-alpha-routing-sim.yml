@@ -12,7 +12,7 @@ on:
       - ".github/scripts/smart-ebpf-routing-smoke.sh"
       - ".github/scripts/smart-accelerated-day-soak.sh"
       - ".github/scripts/smart-accelerated-week-soak.sh"
-      - ".github/fixtures/substore-smart-refined-20260925.shadow.yaml.gz.b64"
+      - ".github/fixtures/substore-smart-refined-20260925.structure.json.gz.b64"
       - ".github/scripts/smart-real-config-shadow.py"
       - "adapter/**"
       - "component/**"
@@ -177,7 +177,7 @@ jobs:
       - name: Validate uploaded production topology and hermetic runtime shadow
         run: |
           python3 .github/scripts/smart-real-config-shadow.py \
-            --fixture .github/fixtures/substore-smart-refined-20260925.shadow.yaml.gz.b64 \
+            --manifest .github/fixtures/substore-smart-refined-20260925.structure.json.gz.b64 \
             --bin "$PWD/mihomo-real-shadow-test"
 
       - name: Publish real-config shadow summary
