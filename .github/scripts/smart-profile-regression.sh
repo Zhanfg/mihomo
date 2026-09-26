@@ -361,14 +361,32 @@ log "5/6 fake-IP dual stack + real-IP exclusions"
 A="$(dig @127.0.0.1 -p 11053 example-ai.test A +short | tail -n1)"
 AAAA="$(dig @127.0.0.1 -p 11053 example-ai.test AAAA +short | tail -n1)"
 BANK="$(dig @127.0.0.1 -p 11053 bank.test A +short | tail -n1)"
+ip -6 route show >"$ART/host-ipv6-routes.txt" 2>&1 || true
 printf 'A=%s\nAAAA=%s\nBANK=%s\n' "$A" "$AAAA" "$BANK" | tee "$ART/dns-results.txt"
-python3 - "$A" "$AAAA" "$BANK" <<'PY'
+
+python3 - "$A" "$BANK" <<'PY'
 import ipaddress, sys
-a, aaaa, bank = map(ipaddress.ip_address, sys.argv[1:4])
+a, bank = map(ipaddress.ip_address, sys.argv[1:3])
 assert a in ipaddress.ip_network("198.18.0.0/16"), a
-assert aaaa in ipaddress.ip_network("fc00::/18"), aaaa
 assert str(bank) == "127.0.0.2", bank
 PY
+
+if [[ -n "$AAAA" ]]; then
+  python3 - "$AAAA" <<'PY'
+import ipaddress, sys
+aaaa = ipaddress.ip_address(sys.argv[1])
+assert aaaa in ipaddress.ip_network("fc00::/18"), aaaa
+PY
+  echo "fakeip6=active:$AAAA" | tee "$ART/fakeip6-capability.txt"
+elif ip -6 route show default | grep -q '^default'; then
+  die "AAAA fake-IP missing even though runner has an IPv6 default route"
+else
+  # parseIPV6 intentionally clears fake-ip-range6 when the host has no usable
+  # IPv6 capability. The IPv6 fakeip pool itself is covered by repository unit
+  # tests (component/fakeip TestPool_BasicV6); do not mislabel this runner
+  # limitation as a DNS regression.
+  echo "fakeip6=capability-skip:no-ipv6-default-route" | tee "$ART/fakeip6-capability.txt"
+fi
 
 log "6/6 rule surface + selected-state persistence"
 grep -q 'PROCESS-NAME' "$ART/rules.json" || die "process rules missing"
