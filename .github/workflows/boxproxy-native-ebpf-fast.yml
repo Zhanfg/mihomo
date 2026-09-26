@@ -9,10 +9,13 @@ on:
       - ".github/workflows/boxproxy-native-ebpf-fast.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
       - ".github/fixtures/ip-family-routing.yaml"
+      - ".github/fixtures/mobile-core-opt.yaml"
+      - "adapter/adapter.go"
       - "adapter/capability.go"
       - "adapter/outboundgroup/**"
       - "common/ebpf/**"
       - "component/smart/**"
+      - "component/keepalive/**"
       - "listener/**"
 
 permissions:
@@ -48,11 +51,18 @@ jobs:
           echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
           echo "HEAD_SHORT=$HEAD_SHORT" >> "$GITHUB_ENV"
 
+      - name: Focused mobile policy tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter -run 'Test(IPv4|IPv6|IPFamily|Capability|ExitCountry|ProxyIdentity)' -count=1
+          go test ./component/keepalive -count=1
+
       - name: Build Linux validation core
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=se-test-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=se-test-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
 
       - name: Parse BoxProxy native eBPF + Smart config
         shell: bash
@@ -68,6 +78,13 @@ jobs:
           ./mihomo-selftest -t -f .github/fixtures/ip-family-routing.yaml 2>&1 | tee IP_FAMILY_SELFTEST.txt
           grep -qi "configuration file .* test is successful" IP_FAMILY_SELFTEST.txt
 
+      - name: Parse mobile whole-core directives
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./mihomo-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee MOBILE_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" MOBILE_SELFTEST.txt
+
       - name: Android arm64 build
         shell: bash
         env:
@@ -78,13 +95,14 @@ jobs:
           set -euo pipefail
           VERSION="smart-ebpf-$HEAD_SHORT"
           OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
-          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
           test -s "$OUT"
           file "$OUT" | tee FILE_INFO.txt
           strings "$OUT" | grep -q "component/smart"
           strings "$OUT" | grep -q "listener/sing_ebpf"
           strings "$OUT" | grep -q "api4.ipify.org"
           strings "$OUT" | grep -q "api6.ipify.org"
+          strings "$OUT" | grep -q "country-affinity"
           gzip -9 -c "$OUT" > "$OUT.gz"
           sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
           {
@@ -93,8 +111,14 @@ jobs:
             echo "base=liuran001/mihomo:Alpha"
             echo "boxproxy_schema=listeners.type=ebpf"
             echo "target=android/arm64"
-            echo "tags=with_gvisor with_ebpf"
+            echo "tags=with_ebpf no_tailscale no_zerotier no_easytier"
             echo "cgo=0"
+            echo "gvisor=excluded"
+            echo "tailscale=excluded"
+            echo "zerotier=excluded"
+            echo "easytier=excluded"
+            echo "android_keepalive_default=idle60s,interval20s"
+            echo "country_routing=MMDB reuse,no new database"
           } > BUILD_INFO.txt
 
       - uses: actions/upload-artifact@v7
@@ -107,7 +131,9 @@ jobs:
             FILE_INFO.txt
             BOXPROXY_SCHEMA_SELFTEST.txt
             IP_FAMILY_SELFTEST.txt
+            MOBILE_SELFTEST.txt
             .github/fixtures/boxproxy-ebpf-listener.yaml
             .github/fixtures/ip-family-routing.yaml
+            .github/fixtures/mobile-core-opt.yaml
           if-no-files-found: error
           retention-days: 30
