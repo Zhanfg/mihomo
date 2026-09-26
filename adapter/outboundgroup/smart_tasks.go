@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"context"
 	"math/rand"
+	"runtime"
 	"sync"
 	"time"
 
@@ -358,11 +359,23 @@ func (r *smartGlobalTaskRun) admitGroupsByName() map[string][]*Smart {
 	return byName
 }
 
+func smartCacheAdjustInterval() time.Duration {
+	if runtime.GOOS == "android" {
+		// ReadMemStats is useful for keeping the Smart cache inside a process
+		// budget, but sampling it every five seconds keeps waking the runtime
+		// and GC accounting on a phone. Thirty seconds reacts quickly enough
+		// to pressure without becoming background CPU noise.
+		return 30 * time.Second
+	}
+	return 5 * time.Second
+}
+
 func (r *smartGlobalTaskRun) start() {
+	cacheAdjust := smartCacheAdjustInterval()
 	tasks := []smartScheduledTask{
 		{stalledSweepInterval, stalledSweepInterval, "Global stalled connections sweep", r.closeStalledConnections, false},
 		{5 * time.Minute, cleanupInterval, "Global orphaned groups clean up", r.cleanupOrphanedGroups, false},
-		{5 * time.Second, cacheParamAdjustInterval, "Global cache parameters adjustment", r.store.AdjustCacheParameters, false},
+		{cacheAdjust, cacheAdjust, "Global cache parameters adjustment", r.store.AdjustCacheParameters, false},
 		{5 * time.Minute, flushQueueInterval, "Global queues flush", func() { r.store.FlushQueue(true) }, false},
 	}
 	r.wg.Add(1)
