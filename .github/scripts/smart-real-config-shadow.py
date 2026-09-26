@@ -106,11 +106,12 @@ def build_shadow(m):
         groups.append(g)
 
     rps={}
-    for name,behavior,proxy in m["rp"]:
+    for rp_index,(name,behavior,proxy) in enumerate(m["rp"]):
+        token=f"rp-{rp_index:03d}"
         rps[name]={
             "type":"http","behavior":behavior,"format":"yaml",
-            "url":f"http://127.0.0.1:33000/rules/{name}.yaml",
-            "path":f"./rules/{name}.yaml",
+            "url":f"http://127.0.0.1:33000/rules/{token}.yaml",
+            "path":f"./rules/{token}.yaml",
             "interval":3600,
             "proxy":proxy or "静态资源智能",
         }
@@ -325,7 +326,7 @@ def runtime_checks(bin_path,cfg,work,art):
     runtime_cfg.pop("_shadow_forced_rule_providers", None)
     y=work/"shadow.yaml"
     y.write_text(yaml.safe_dump(runtime_cfg,allow_unicode=True,sort_keys=False,width=240),encoding="utf-8")
-    State.behaviors={k:v["behavior"] for k,v in cfg["rule-providers"].items()}
+    State.behaviors={f"rp-{i:03d}":v["behavior"] for i,(k,v) in enumerate(cfg["rule-providers"].items())}
     server=ThreadingHTTPServer(("127.0.0.1",33000),Handler)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     test=subprocess.run([bin_path,"-t","-d",str(work),"-f",str(y)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
