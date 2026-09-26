@@ -56,8 +56,6 @@ type capabilityEntry struct {
 	probing         bool
 	exitIP          netip.Addr
 	country         string
-	asn             string
-	asnOrg          string
 	datacenterKnown bool
 	datacenter      bool
 }
@@ -274,8 +272,6 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	if ok && exitIP.IsValid() {
 		if entry.exitIP != exitIP {
 			entry.country = ""
-			entry.asn = ""
-			entry.asnOrg = ""
 			entry.datacenterKnown = false
 			entry.datacenter = false
 		}
@@ -567,9 +563,9 @@ func isDatacenterASN(asn, organization string) bool {
 // family with the existing ASN MMDB. It reuses the same capability probe and
 // caches the result on the family entry, so avoid-datacenter adds no network
 // request on the selection hot path.
-func ExitDatacenterForProxy(p C.Proxy, ipv6 bool) (known, datacenter bool, asn, organization string) {
+func ExitDatacenterForProxy(p C.Proxy, ipv6 bool) (known, datacenter bool) {
 	if p == nil {
-		return false, false, "", ""
+		return false, false
 	}
 	state := capabilityStateForProxy(p)
 	entry := &state.ipv4
@@ -579,37 +575,34 @@ func ExitDatacenterForProxy(p C.Proxy, ipv6 bool) (known, datacenter bool, asn, 
 		kind = capabilityIPv6
 	}
 	if state.stateOrProbe(p, kind) != capYes {
-		return false, false, "", ""
+		return false, false
 	}
 
 	entry.mu.Lock()
 	if entry.datacenterKnown {
-		known, datacenter, asn, organization =
-			true, entry.datacenter, entry.asn, entry.asnOrg
+		datacenter = entry.datacenter
 		entry.mu.Unlock()
-		return
+		return true, datacenter
 	}
 	exitIP := entry.exitIP
 	entry.mu.Unlock()
 	if !exitIP.IsValid() {
-		return false, false, "", ""
+		return false, false
 	}
 
-	asn, organization = mmdb.ASNInstance().LookupASN(exitIP.AsSlice())
+	asn, organization := mmdb.ASNInstance().LookupASN(exitIP.AsSlice())
 	if asn == "" && organization == "" {
-		return false, false, "", ""
+		return false, false
 	}
 	datacenter = isDatacenterASN(asn, organization)
 
 	entry.mu.Lock()
 	if entry.exitIP == exitIP {
-		entry.asn = asn
-		entry.asnOrg = organization
 		entry.datacenter = datacenter
 		entry.datacenterKnown = true
 	}
 	entry.mu.Unlock()
-	return true, datacenter, asn, organization
+	return true, datacenter
 }
 
 // ExitIPForProxy exposes the cached observed public source address for
