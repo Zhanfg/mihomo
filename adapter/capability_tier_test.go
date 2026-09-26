@@ -363,7 +363,6 @@ func TestFirstFamilyProbeFailureStaysUnknown(t *testing.T) {
 	}
 }
 
-
 func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
 	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
 
