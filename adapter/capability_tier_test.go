@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/binary"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -359,5 +360,35 @@ func TestFirstFamilyProbeFailureStaysUnknown(t *testing.T) {
 	entry.mu.Unlock()
 	if known || failures != 1 {
 		t.Fatalf("first family failure = known:%v failures:%d, want false/1", known, failures)
+	}
+}
+
+
+func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+
+	oldHome := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	defer C.SetHomeDir(oldHome)
+
+	p := stub("country-missing-mmdb")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("1.1.1.1")
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	known, country := ExitCountryForProxy(p, false)
+	if known || country != "" {
+		t.Fatalf("missing MMDB country lookup = (%v, %q), want (false, empty)", known, country)
+	}
+
+	state.ipv4.mu.Lock()
+	stillHealthy := state.ipv4.known && state.ipv4.ok
+	state.ipv4.mu.Unlock()
+	if !stillHealthy {
+		t.Fatal("missing country database must not demote the proxy's IPv4 capability")
 	}
 }
