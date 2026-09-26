@@ -263,12 +263,17 @@ func (s *Store) AdjustCacheParameters() {
 		return
 	}
 
+	maxTargetsLimit := platformMaxTargetsLimit()
+	if maxTargetsLimit < MinTargetsLimit {
+		maxTargetsLimit = MinTargetsLimit
+	}
+
 	if memoryUsage > 0.9 {
 		globalCacheParams.MaxTargets = MinTargetsLimit
 		globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit
 	} else {
 		adjustFactor := (1 - memoryUsage) * 0.5
-		globalCacheParams.MaxTargets = MinTargetsLimit + int(float64(MaxTargetsLimit-MinTargetsLimit)*adjustFactor)
+		globalCacheParams.MaxTargets = MinTargetsLimit + int(float64(maxTargetsLimit-MinTargetsLimit)*adjustFactor)
 		globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit + int(float64(MaxBatchThreshLimit-MinBatchThreshLimit)*adjustFactor)
 	}
 	maxTargets := globalCacheParams.MaxTargets
