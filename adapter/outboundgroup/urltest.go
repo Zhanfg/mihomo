@@ -19,9 +19,9 @@ import (
 
 type URLTestOption struct {
 	Tolerance   uint16 `group:"tolerance,omitempty"`
-	PreferIPv4 bool   `group:"prefer-ipv4,omitempty"`
-	RequireIPv4 bool  `group:"require-ipv4,omitempty"`
-	RequireIPv6 bool  `group:"require-ipv6,omitempty"`
+	PreferIPv4  bool   `group:"prefer-ipv4,omitempty"`
+	RequireIPv4 bool   `group:"require-ipv4,omitempty"`
+	RequireIPv6 bool   `group:"require-ipv6,omitempty"`
 }
 
 type URLTest struct {
