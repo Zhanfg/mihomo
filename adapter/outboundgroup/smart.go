@@ -770,6 +770,28 @@ func (s *Smart) proxyIndexFor(all []C.Proxy) map[string]C.Proxy {
 	return byName
 }
 
+func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, autoIPv4, autoIPv6 bool) {
+	preferIPv4, preferIPv6 = s.preferIPv4, s.preferIPv6
+	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
+		ip := metadata.DstIP.Unmap()
+		autoIPv4, autoIPv6 = ip.Is4(), ip.Is6()
+		preferIPv4 = preferIPv4 || autoIPv4
+		preferIPv6 = preferIPv6 || autoIPv6
+	}
+	return
+}
+
+func (s *Smart) ipFamilyEligible(metadata *C.Metadata, p C.Proxy) bool {
+	if !adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false) {
+		return false
+	}
+	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
+	if autoIPv4 || autoIPv6 {
+		return adapter.IPFamilyRequirementsMet(p, autoIPv4, autoIPv6, true)
+	}
+	return true
+}
+
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
@@ -777,21 +799,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// Explicit require-* directives are strict: unknown capability is not
 	// enough. auto-ip-family is adaptive: confirmed mismatches are excluded,
 	// while unknown nodes may be used briefly as probes warm up.
-	autoIPv4, autoIPv6 := false, false
-	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
-		ip := metadata.DstIP.Unmap()
-		autoIPv4, autoIPv6 = ip.Is4(), ip.Is6()
-	}
-	preferIPv4 := s.preferIPv4 || autoIPv4
-	preferIPv6 := s.preferIPv6 || autoIPv6
+	preferIPv4, preferIPv6, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	familyEligible := func(p C.Proxy) bool {
-		if !adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false) {
-			return false
-		}
-		if autoIPv4 || autoIPv6 {
-			return adapter.IPFamilyRequirementsMet(p, autoIPv4, autoIPv6, true)
-		}
-		return true
+		return s.ipFamilyEligible(metadata, p)
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -1003,10 +1013,13 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 	if s.selected != "" {
 		for _, p := range proxies {
-			if p.Name() == s.selected {
+			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) {
 				return []C.Proxy{p}, true
 			}
 		}
+		// A fixed node that violates an explicit/automatic family constraint
+		// is not allowed to bypass that constraint; continue with normal Smart
+		// selection and let empty-fallback define the fail-closed outcome.
 	}
 
 	// use prefetch cache or compute in real time
