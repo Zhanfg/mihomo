@@ -1,0 +1,27 @@
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: true
+
+listeners:
+  - name: ebpf-in
+    type: ebpf
+    local:
+      include-uid: [10591, 10901]
+      ipv6-mode: off
+    network: [tcp]
+
+proxy-groups:
+  - name: SMART_SELFTEST
+    type: smart
+    proxies: [DIRECT]
+    url: http://127.0.0.1:1/generate_204
+    interval: 300
+    lazy: true
+    timeout: 500
+    expected-status: 204
+    uselightgbm: false
+
+rules:
+  - MATCH,SMART_SELFTEST
