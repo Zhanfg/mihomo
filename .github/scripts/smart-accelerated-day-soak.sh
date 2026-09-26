@@ -507,20 +507,43 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 HOLD_OPEN="$(sudo cat /tmp/mh-soak-hold-ready 2>/dev/null || echo 0)"
+# Allow outbound Smart dials to enter the statistic manager before sampling.
+sleep 0.75
+curl -fsS "http://127.0.0.1:$CTRL/connections" > "$ART/hold-connections.json"
+HOLD_TCP="$(jq '[.connections[] | select(.metadata.network == "tcp" and .metadata.destinationIP == "10.92.0.13" and .metadata.destinationPort == "18080")] | length' "$ART/hold-connections.json")"
 sample_metrics hold_peak
 HOLD_API="$(tail -n1 "$ART/metrics.csv" | cut -d, -f5)"
-printf 'opened=%s\napi_connections=%s\n' "$HOLD_OPEN" "$HOLD_API" | tee "$ART/hold-summary.txt"
+printf 'opened=%s\napi_connections=%s\nheld_tcp=%s\n' "$HOLD_OPEN" "$HOLD_API" "$HOLD_TCP" | tee "$ART/hold-summary.txt"
 (( HOLD_OPEN >= 220 )) || die "connection pressure fixture opened fewer than 220/256 sessions"
-(( HOLD_API >= 180 )) || die "Mihomo connection table did not observe enough concurrent sessions"
+(( HOLD_TCP >= 180 )) || die "Mihomo connection table did not observe enough held TCP sessions"
 wait "$HOLD_PID" || true
 
-log "Post-day quiesce and leak checks"
-sleep 2
+# The virtual day itself spans about the default 60s UDP session timeout. Verify
+# that the connection table naturally shrinks at least once before forcing final
+# cleanup; otherwise UDP tracker expiration is not working.
+NATURAL_MAX_DROP="$(python3 - "$ART/metrics.csv" <<'PY'
+import csv, sys
+vals=[]
+with open(sys.argv[1], newline="") as f:
+    for r in csv.DictReader(f):
+        if r["tag"].startswith("h"):
+            vals.append(int(r["connections"]))
+drops=[a-b for a,b in zip(vals, vals[1:]) if a>b]
+print(max(drops) if drops else 0)
+PY
+)"
+echo "natural_max_connection_drop=$NATURAL_MAX_DROP" | tee "$ART/natural-expiry.txt"
+(( NATURAL_MAX_DROP >= 16 )) || die "no meaningful natural UDP tracker expiration observed"
+
+log "Force final connection reclamation and verify manager cleanup"
+curl -fsS -X DELETE "http://127.0.0.1:$CTRL/connections" -o /dev/null
+sleep 1
 sample_metrics end
 END_RSS="$(tail -n1 "$ART/metrics.csv" | cut -d, -f2)"
 END_FD="$(tail -n1 "$ART/metrics.csv" | cut -d, -f3)"
 END_TH="$(tail -n1 "$ART/metrics.csv" | cut -d, -f4)"
 END_CONN="$(tail -n1 "$ART/metrics.csv" | cut -d, -f5)"
+PRE_CLEAN_CONN="$HOLD_API"
 RSS_DELTA=$((END_RSS-BASE_RSS))
 FD_DELTA=$((END_FD-BASE_FD))
 TH_DELTA=$((END_TH-BASE_TH))
@@ -542,6 +565,8 @@ fd_delta=$FD_DELTA
 base_threads=$BASE_TH
 end_threads=$END_TH
 thread_delta=$TH_DELTA
+pre_cleanup_connections=$PRE_CLEAN_CONN
+natural_max_connection_drop=$NATURAL_MAX_DROP
 end_connections=$END_CONN
 EOF
 cat "$ART/summary.txt"
@@ -551,7 +576,7 @@ kill -0 "$MAIN_PID" 2>/dev/null || die "Mihomo died during accelerated day"
 (( RSS_DELTA <= 131072 )) || die "RSS retained >128MiB after quiesce"
 (( FD_DELTA <= 64 )) || die "file descriptor leak >64"
 (( TH_DELTA <= 32 )) || die "thread growth >32"
-(( END_CONN <= 8 )) || die "too many residual connections after quiesce"
+(( END_CONN <= 2 )) || die "connection manager did not empty after explicit reclamation"
 
 sudo iptables -t mangle -L PREROUTING -v -n -x > "$ART/iptables-prerouting.txt"
 sudo ip6tables -t mangle -L PREROUTING -v -n -x > "$ART/ip6tables-prerouting.txt"
