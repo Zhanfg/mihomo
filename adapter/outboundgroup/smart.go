@@ -102,7 +102,10 @@ const (
 // inline on the config-parse path, so retries have to be spaced out: without
 // this every smart group in the config would pay that timeout again on every
 // reload.
-const asnInitRetryAfter = 5 * time.Minute
+const (
+	asnInitRetryAfter     = 5 * time.Minute
+	countryDBRetryAfter   = 5 * time.Minute
+)
 
 var (
 	smartStatsOnce      sync.Once
@@ -190,6 +193,11 @@ var (
 	asnInitAccess    sync.Mutex
 	asnInitDone      bool
 	asnInitLastTried time.Time
+
+	countryDBInitAccess    sync.Mutex
+	countryDBInitDone      bool
+	countryDBInitRunning   bool
+	countryDBInitLastTried time.Time
 )
 
 // initASNDatabase loads the ASN database once, but only latches on success. The
@@ -213,6 +221,41 @@ func initASNDatabase() {
 		return
 	}
 	asnInitDone = true
+}
+
+// initCountryDatabaseAsync prepares the single shared MMDB used by measured
+// Smart country routing without ever blocking config parsing or the data path.
+// Multiple Smart groups coalesce into one download attempt; a failed mobile
+// boot can retry on a later config reload.
+func initCountryDatabaseAsync() {
+	countryDBInitAccess.Lock()
+	if countryDBInitDone || countryDBInitRunning {
+		countryDBInitAccess.Unlock()
+		return
+	}
+	now := time.Now()
+	if !countryDBInitLastTried.IsZero() && now.Sub(countryDBInitLastTried) < countryDBRetryAfter {
+		countryDBInitAccess.Unlock()
+		return
+	}
+	countryDBInitLastTried = now
+	countryDBInitRunning = true
+	countryDBInitAccess.Unlock()
+
+	go func() {
+		err := geodata.InitMMDB()
+
+		countryDBInitAccess.Lock()
+		countryDBInitRunning = false
+		if err == nil {
+			countryDBInitDone = true
+		}
+		countryDBInitAccess.Unlock()
+
+		if err != nil {
+			log.Warnln("[Smart] Country database unavailable; country routing will degrade gracefully: %v", err)
+		}
+	}()
 }
 
 type SmartOption struct {
@@ -1295,6 +1338,9 @@ func (s *Smart) InitSmart() {
 
 	if s.preferASN {
 		initASNDatabase()
+	}
+	if s.country != "" || s.countryAffinity {
+		initCountryDatabaseAsync()
 	}
 
 	s.global = globalSmartTasks.acquire(s)
