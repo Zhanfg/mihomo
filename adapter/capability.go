@@ -27,12 +27,12 @@ import (
 // are still running.
 
 const (
-	capabilityProbeTimeout     = 5 * time.Second
-	capabilityEndpointTimeout  = 3 * time.Second
-	capabilityOKTTL            = 30 * time.Minute
-	capabilityFailTTL          = 10 * time.Minute
-	capabilityRetryTTL         = 30 * time.Second
-	capabilityFailConfirm      = 2
+	capabilityProbeTimeout    = 5 * time.Second
+	capabilityEndpointTimeout = 3 * time.Second
+	capabilityOKTTL           = 30 * time.Minute
+	capabilityFailTTL         = 10 * time.Minute
+	capabilityRetryTTL        = 30 * time.Second
+	capabilityFailConfirm     = 2
 
 	// STUN binding request target for the UDP probe.
 	capabilityStunServer = "stun.l.google.com:19302"
