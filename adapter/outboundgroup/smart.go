@@ -957,7 +957,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// Explicit require-* directives are strict. auto-ip-family is a soft,
 	// availability-first ranking signal: telemetry may reorder candidates but
 	// cannot blackhole the group when a probe endpoint is temporarily bad.
-	preferIPv4, preferIPv6, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
+	preferIPv4, preferIPv6, _, _ := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry()
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
