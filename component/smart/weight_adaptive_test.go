@@ -33,7 +33,6 @@ func TestModelCalibrationWeightType(t *testing.T) {
 	require.Equal(t, WeightTypeModelCalibrationUDP, ModelCalibrationWeightType(true))
 }
 
-
 func TestModelCalibrationWeightTypeForInputSeparatesFamilyAndScene(t *testing.T) {
 	v4Web := &ModelInput{IsTCP: true, DestIP: "1.1.1.1", Latency: 80}
 	v6Web := &ModelInput{IsTCP: true, DestIP: "2606:4700:4700::1111", Latency: 80}
