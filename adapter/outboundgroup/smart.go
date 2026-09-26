@@ -59,7 +59,8 @@ const (
 	deterministicDialPrefix = 3
 	parallelDials           = 5
 	connectThreshold        = 5.0
-	statsQueueSize          = 512
+	statsQueueSizeDesktop   = 512
+	statsQueueSizeAndroid   = 128
 	maintenanceActiveWindow = 30 * time.Minute
 
 	floodWindow    = 2 * time.Second
@@ -94,7 +95,8 @@ const (
 	// after which the 64-per-tick budget is what bounds the catch-up.
 	hostRecoveryBackoffMax = 4 * time.Hour
 
-	siteKeyCacheLimit = 4096 // sites remembered as site keys, relearned after eviction
+	siteKeyCacheLimitDesktop = 4096 // sites remembered as site keys, relearned after eviction
+	siteKeyCacheLimitAndroid = 1024
 )
 
 // A failed attempt downloads ASN.mmdb with a 90s timeout, and InitSmart runs
@@ -115,6 +117,20 @@ func smartWorkerCount() int {
 	return 4
 }
 
+func smartStatsQueueCapacity() int {
+	if runtime.GOOS == "android" {
+		return statsQueueSizeAndroid
+	}
+	return statsQueueSizeDesktop
+}
+
+func smartSiteKeyCacheLimit() int {
+	if runtime.GOOS == "android" {
+		return siteKeyCacheLimitAndroid
+	}
+	return siteKeyCacheLimitDesktop
+}
+
 func smartParallelism() int {
 	if runtime.GOOS == "android" {
 		return 3
@@ -122,8 +138,23 @@ func smartParallelism() int {
 	return parallelDials
 }
 
+// shouldRefreshSmartModel batches quiet, repetitive success traffic. Statistics
+// are still accumulated for every connection; only the expensive LightGBM +
+// heuristic inference is deferred. The next refresh consumes the accumulated
+// record, so learning signal is not discarded.
+func shouldRefreshSmartModel(oldWeight float64, samples int64, failed bool, connectionDuration int64, lossRate float64, peakImproved bool) bool {
+	if oldWeight <= 0 || samples <= 8 || failed || lossRate > 0 || peakImproved || connectionDuration >= 5000 {
+		return true
+	}
+	stride := int64(2)
+	if runtime.GOOS == "android" {
+		stride = 4
+	}
+	return samples%stride == 0
+}
+
 func startSmartStatsWorkers() {
-	smartStatsQueue = make(chan func(), statsQueueSize)
+	smartStatsQueue = make(chan func(), smartStatsQueueCapacity())
 	for i := 0; i < smartWorkerCount(); i++ {
 		go func() {
 			for job := range smartStatsQueue {
@@ -2787,7 +2818,7 @@ func (s *Smart) recordSiteKey(metadata *C.Metadata, site string) {
 	if _, recorded := s.siteKeyCache.Load(site); recorded {
 		return
 	}
-	if s.siteKeyCache.Size() >= siteKeyCacheLimit {
+	if s.siteKeyCache.Size() >= smartSiteKeyCacheLimit() {
 		return
 	}
 	s.siteKeyCache.LoadOrStore(site, true)
