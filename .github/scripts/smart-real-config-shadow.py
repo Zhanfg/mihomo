@@ -313,15 +313,47 @@ def runtime_checks(bin_path,cfg,work,art):
     proc=subprocess.Popen([bin_path,"-d",str(work),"-f",str(y)],stdout=log,stderr=subprocess.STDOUT,text=True)
     try:
         wait_controller()
-        proxies=get_json("http://127.0.0.1:29091/proxies")
-        providers=get_json("http://127.0.0.1:29091/providers/proxies")
-        rproviders=get_json("http://127.0.0.1:29091/providers/rules")
-        rules=get_json("http://127.0.0.1:29091/rules")
-        for name in [g["name"] for g in cfg["proxy-groups"]]:
-            if name not in proxies.get("proxies",{}): die(f"runtime missing group {name}")
-        if len(providers.get("providers",{}))!=11: die("runtime proxy-provider count != 11")
-        if len(rproviders.get("providers",{}))!=71: die("runtime rule-provider count != 71")
-        if len(rules.get("rules",[]))!=1357: die(f"runtime rule count != 1357: {len(rules.get('rules',[]))}")
+        expected_groups={g["name"] for g in cfg["proxy-groups"]}
+        expected_providers=set(cfg["proxy-providers"])
+        expected_rule_providers=set(cfg["rule-providers"])
+        deadline=time.time()+18
+        last_missing={}
+        while time.time()<deadline:
+            proxies=get_json("http://127.0.0.1:29091/proxies")
+            providers=get_json("http://127.0.0.1:29091/providers/proxies")
+            rproviders=get_json("http://127.0.0.1:29091/providers/rules")
+            rules=get_json("http://127.0.0.1:29091/rules")
+            proxy_names=set(proxies.get("proxies",{}))
+            provider_names=set(providers.get("providers",{}))
+            rule_provider_names=set(rproviders.get("providers",{}))
+            missing_groups=expected_groups-proxy_names
+            missing_providers=expected_providers-provider_names
+            missing_rule_providers=expected_rule_providers-rule_provider_names
+            rule_count=len(rules.get("rules",[]))
+            last_missing={
+                "groups":sorted(missing_groups),
+                "providers":sorted(missing_providers),
+                "rule_providers":sorted(missing_rule_providers),
+                "rules":rule_count,
+                "provider_api_total":len(provider_names),
+                "rule_provider_api_total":len(rule_provider_names),
+            }
+            if not missing_groups and not missing_providers and not missing_rule_providers and rule_count==1357:
+                break
+            time.sleep(.2)
+        (art/"runtime-readiness.json").write_text(json.dumps(last_missing,ensure_ascii=False,indent=2))
+        (art/"proxies.json").write_text(json.dumps(proxies,ensure_ascii=False,indent=2))
+        (art/"providers.json").write_text(json.dumps(providers,ensure_ascii=False,indent=2))
+        (art/"rule-providers.json").write_text(json.dumps(rproviders,ensure_ascii=False,indent=2))
+        (art/"rules.json").write_text(json.dumps(rules,ensure_ascii=False,indent=2))
+        if last_missing["groups"]:
+            die("runtime missing groups after convergence: " + ", ".join(last_missing["groups"][:8]))
+        if last_missing["providers"]:
+            die("runtime missing proxy providers after convergence: " + ", ".join(last_missing["providers"][:8]))
+        if last_missing["rule_providers"]:
+            die("runtime missing rule providers after convergence: " + ", ".join(last_missing["rule_providers"][:8]))
+        if last_missing["rules"]!=1357:
+            die(f"runtime rule count != 1357 after convergence: {last_missing['rules']}")
         for _ in range(100):
             with State.lock: ph=len(State.provider_hits); rh=len(State.rule_hits)
             if ph==11 and rh==71: break
