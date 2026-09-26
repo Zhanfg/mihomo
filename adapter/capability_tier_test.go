@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/binary"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -14,11 +15,15 @@ type capabilityProbeProxy struct {
 	C.Proxy
 	statusCalled bool
 	urlCalled    bool
+	fail         bool
 }
 
 func (p *capabilityProbeProxy) Name() string { return "probe" }
 func (p *capabilityProbeProxy) StatusTest(context.Context, string) (uint16, bool, error) {
 	p.statusCalled = true
+	if p.fail {
+		return 599, false, nil
+	}
 	return 204, true, nil
 }
 func (p *capabilityProbeProxy) URLTest(context.Context, string, utils.IntRanges[uint16]) (uint16, error) {
@@ -317,5 +322,72 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	}
 	if known, country := ExitCountryForProxy(p, true); !known || country != "US" {
 		t.Fatalf("IPv6 country = (%v, %q), want (true, US)", known, country)
+	}
+}
+
+func TestIPFamilyProbeNeedsTwoFailuresToDemote(t *testing.T) {
+	entry := &capabilityEntry{
+		known:  true,
+		ok:     true,
+		expire: time.Now().Add(time.Hour),
+	}
+	p := &capabilityProbeProxy{fail: true}
+
+	probeCapability(p, capabilityIPv6, entry)
+	entry.mu.Lock()
+	firstKnown, firstOK, firstFailures := entry.known, entry.ok, entry.failures
+	entry.mu.Unlock()
+	if !firstKnown || !firstOK || firstFailures != 1 {
+		t.Fatalf("first transient failure = known:%v ok:%v failures:%d, want true/true/1",
+			firstKnown, firstOK, firstFailures)
+	}
+
+	probeCapability(p, capabilityIPv6, entry)
+	entry.mu.Lock()
+	secondKnown, secondOK, secondFailures := entry.known, entry.ok, entry.failures
+	entry.mu.Unlock()
+	if !secondKnown || secondOK || secondFailures != 2 {
+		t.Fatalf("second consecutive failure = known:%v ok:%v failures:%d, want true/false/2",
+			secondKnown, secondOK, secondFailures)
+	}
+}
+
+func TestFirstFamilyProbeFailureStaysUnknown(t *testing.T) {
+	entry := &capabilityEntry{}
+	probeCapability(&capabilityProbeProxy{fail: true}, capabilityIPv4, entry)
+	entry.mu.Lock()
+	known, failures := entry.known, entry.failures
+	entry.mu.Unlock()
+	if known || failures != 1 {
+		t.Fatalf("first family failure = known:%v failures:%d, want false/1", known, failures)
+	}
+}
+
+func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+
+	oldHome := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	defer C.SetHomeDir(oldHome)
+
+	p := stub("country-missing-mmdb")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("1.1.1.1")
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	known, country := ExitCountryForProxy(p, false)
+	if known || country != "" {
+		t.Fatalf("missing MMDB country lookup = (%v, %q), want (false, empty)", known, country)
+	}
+
+	state.ipv4.mu.Lock()
+	stillHealthy := state.ipv4.known && state.ipv4.ok
+	state.ipv4.mu.Unlock()
+	if !stillHealthy {
+		t.Fatal("missing country database must not demote the proxy's IPv4 capability")
 	}
 }
