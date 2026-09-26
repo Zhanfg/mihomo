@@ -11,6 +11,7 @@ on:
       - ".github/scripts/smart-profile-regression.sh"
       - ".github/scripts/smart-ebpf-routing-smoke.sh"
       - ".github/scripts/smart-accelerated-day-soak.sh"
+      - ".github/scripts/smart-accelerated-week-soak.sh"
       - "adapter/**"
       - "component/**"
       - "config/**"
@@ -272,6 +273,74 @@ jobs:
           name: smart-accelerated-day-${{ matrix.netfilter }}-${{ github.run_id }}
           path: |
             .soak-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+
+  accelerated-week-soak:
+    name: Accelerated 7d aging (${{ matrix.netfilter }}) / provider / cache / history / reclaim
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    needs: smart-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        netfilter: [nft, legacy]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install aging-test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates curl dnsutils iproute2 iptables jq kmod nftables python3
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Select netfilter backend
+        run: |
+          sudo update-alternatives --set iptables /usr/sbin/iptables-${{ matrix.netfilter }}
+          sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-${{ matrix.netfilter }}
+          iptables --version
+          ip6tables --version
+
+      - name: Build seven-day aging core
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-week-${GITHUB_SHA::7}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-week-soak-test
+
+      - name: Run compressed seven-day aging suite
+        run: |
+          chmod +x .github/scripts/smart-accelerated-week-soak.sh
+          .github/scripts/smart-accelerated-week-soak.sh
+
+      - name: Publish seven-day summary
+        if: always()
+        run: |
+          if [[ -f .week-soak-artifacts/summary.txt ]]; then
+            echo "### Accelerated 7d aging (${{ matrix.netfilter }})" >> "$GITHUB_STEP_SUMMARY"
+            sed 's/^/- /' .week-soak-artifacts/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload seven-day diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-accelerated-week-${{ matrix.netfilter }}-${{ github.run_id }}
+          path: |
+            .week-soak-artifacts/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
