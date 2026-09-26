@@ -26,6 +26,10 @@ VF_H="mhwkfh"
 VF_N="mhwkfn"
 VS_H="mhwkslh"
 VS_N="mhwksln"
+VF_W="mhwkfw"
+VW_F="mhwkwf"
+VS_W="mhwksw"
+VW_S="mhwkws"
 
 TPROXY_PORT=29898
 TPROXY_MARK=0x1
@@ -126,6 +130,35 @@ sudo ip -n "$NS_SLOW" -6 addr add fd104::2/64 dev "$VS_N" nodad
 sudo ip -n "$NS_SLOW" link set "$VS_N" up
 sudo ip -n "$NS_SLOW" route add default via 10.104.0.1
 sudo ip -n "$NS_SLOW" -6 route add default via fd104::1
+
+# Dedicated proxy->WAN transit links keep aging results independent of hosted-runner FORWARD policy.
+sudo ip link add "$VF_W" type veth peer name "$VW_F"
+sudo ip link set "$VF_W" netns "$NS_FAST"
+sudo ip link set "$VW_F" netns "$NS_WAN"
+sudo ip -n "$NS_FAST" addr add 10.105.0.1/30 dev "$VF_W"
+sudo ip -n "$NS_FAST" -6 addr add fd105::1/64 dev "$VF_W" nodad
+sudo ip -n "$NS_WAN" addr add 10.105.0.2/30 dev "$VW_F"
+sudo ip -n "$NS_WAN" -6 addr add fd105::2/64 dev "$VW_F" nodad
+sudo ip -n "$NS_FAST" link set "$VF_W" up
+sudo ip -n "$NS_WAN" link set "$VW_F" up
+sudo ip -n "$NS_FAST" route replace 10.102.0.0/24 via 10.105.0.2 dev "$VF_W" src 10.103.0.2
+sudo ip -n "$NS_FAST" -6 route replace fd102::/64 via fd105::2 dev "$VF_W" src fd103::2
+sudo ip -n "$NS_WAN" route replace 10.103.0.0/24 via 10.105.0.1 dev "$VW_F"
+sudo ip -n "$NS_WAN" -6 route replace fd103::/64 via fd105::1 dev "$VW_F"
+
+sudo ip link add "$VS_W" type veth peer name "$VW_S"
+sudo ip link set "$VS_W" netns "$NS_SLOW"
+sudo ip link set "$VW_S" netns "$NS_WAN"
+sudo ip -n "$NS_SLOW" addr add 10.106.0.1/30 dev "$VS_W"
+sudo ip -n "$NS_SLOW" -6 addr add fd106::1/64 dev "$VS_W" nodad
+sudo ip -n "$NS_WAN" addr add 10.106.0.2/30 dev "$VW_S"
+sudo ip -n "$NS_WAN" -6 addr add fd106::2/64 dev "$VW_S" nodad
+sudo ip -n "$NS_SLOW" link set "$VS_W" up
+sudo ip -n "$NS_WAN" link set "$VW_S" up
+sudo ip -n "$NS_SLOW" route replace 10.102.0.0/24 via 10.106.0.2 dev "$VS_W" src 10.104.0.2
+sudo ip -n "$NS_SLOW" -6 route replace fd102::/64 via fd106::2 dev "$VS_W" src fd104::2
+sudo ip -n "$NS_WAN" route replace 10.104.0.0/24 via 10.106.0.1 dev "$VW_S"
+sudo ip -n "$NS_WAN" -6 route replace fd104::/64 via fd106::1 dev "$VW_S"
 
 sudo iptables -I FORWARD 1 -j ACCEPT
 sudo ip6tables -I FORWARD 1 -j ACCEPT
