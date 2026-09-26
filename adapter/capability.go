@@ -30,6 +30,8 @@ const (
 	capabilityProbeTimeout = 5 * time.Second
 	capabilityOKTTL        = 30 * time.Minute
 	capabilityFailTTL      = 10 * time.Minute
+	capabilityRetryTTL     = 30 * time.Second
+	capabilityFailConfirm  = 2
 
 	// STUN binding request target for the UDP probe.
 	capabilityStunServer = "stun.l.google.com:19302"
@@ -49,13 +51,14 @@ const (
 )
 
 type capabilityEntry struct {
-	mu      sync.Mutex
-	known   bool
-	ok      bool
-	expire  time.Time
-	probing bool
-	exitIP  netip.Addr
-	country string
+	mu       sync.Mutex
+	known    bool
+	ok       bool
+	expire   time.Time
+	probing  bool
+	failures uint8
+	exitIP   netip.Addr
+	country  string
 }
 
 type capabilityState struct {
@@ -258,25 +261,50 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		}
 	}
 
-	ttl := capabilityOKTTL
-	if !ok {
-		ttl = capabilityFailTTL
-	}
+	now := time.Now()
 	entry.mu.Lock()
-	entry.known = true
-	entry.ok = ok
-	entry.expire = time.Now().Add(ttl)
-	entry.probing = false
-	if ok && exitIP.IsValid() {
-		if entry.exitIP != exitIP {
-			entry.country = ""
+	if ok {
+		entry.known = true
+		entry.ok = true
+		entry.failures = 0
+		entry.expire = now.Add(capabilityOKTTL)
+		entry.probing = false
+		if exitIP.IsValid() {
+			if entry.exitIP != exitIP {
+				entry.country = ""
+			}
+			entry.exitIP = exitIP
 		}
-		entry.exitIP = exitIP
-	} else if kind == capabilityIPv4 || kind == capabilityIPv6 {
-		entry.exitIP = netip.Addr{}
-		entry.country = ""
+		entry.mu.Unlock()
+	} else {
+		if entry.failures < 0xff {
+			entry.failures++
+		}
+		// Family telemetry is advisory unless the configuration explicitly
+		// says require-ipv4/require-ipv6. A single failed public-IP probe is
+		// commonly just radio handover, captive portal, DNS jitter or endpoint
+		// trouble. Never turn a previously working family into capNo on one
+		// sample, and keep a first-ever failure unknown until it is confirmed.
+		if (kind == capabilityIPv4 || kind == capabilityIPv6) && entry.failures < capabilityFailConfirm {
+			if !(entry.known && entry.ok) {
+				entry.known = false
+				entry.ok = false
+			}
+			entry.expire = now.Add(capabilityRetryTTL)
+			entry.probing = false
+			entry.mu.Unlock()
+		} else {
+			entry.known = true
+			entry.ok = false
+			entry.expire = now.Add(capabilityFailTTL)
+			entry.probing = false
+			if kind == capabilityIPv4 || kind == capabilityIPv6 {
+				entry.exitIP = netip.Addr{}
+				entry.country = ""
+			}
+			entry.mu.Unlock()
+		}
 	}
-	entry.mu.Unlock()
 
 	kindName := "udp"
 	switch kind {
@@ -476,8 +504,15 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 		return false, ""
 	}
 
-	codes := mmdb.IPInstance().LookupCode(exitIP.AsSlice())
-	if len(codes) == 0 || codes[0] == "" {
+	codes, err := mmdb.LookupCodeOptional(C.Path.MMDB(), exitIP.AsSlice())
+	if err != nil || len(codes) == 0 || codes[0] == "" {
+		// Country routing is advisory unless the user explicitly selected a
+		// strict country. Missing/invalid GeoIP data must never terminate the
+		// proxy process; unknown country simply lets affinity mode fall back to
+		// normal Smart selection.
+		if err != nil {
+			log.Debugln("[Capability] country lookup unavailable for %s: %v", p.Name(), err)
+		}
 		return false, ""
 	}
 	country = strings.ToUpper(codes[0])
