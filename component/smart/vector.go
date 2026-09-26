@@ -3,7 +3,6 @@ package smart
 import (
 	"encoding/binary"
 	"math"
-	"sync"
 	"time"
 )
 
@@ -18,8 +17,6 @@ type VectorMemory struct {
 	FailureMass float32
 	Updated     int64
 }
-
-var vectorMemoryMu sync.Mutex
 
 func vectorMemoryKey(group, config, target string) string {
 	return FormatDBKey(KeyTypeVector, config, group, target)
@@ -129,7 +126,11 @@ func (s *Store) UpdateVectorMemory(group, config, target string, vector []float3
 	}
 	key := vectorMemoryKey(group, config, target)
 
-	vectorMemoryMu.Lock()
+	// Reuse Smart's existing sharded target locks instead of one global vector
+	// mutex. Unrelated services can learn concurrently without growing another
+	// lock table.
+	lock := GetTargetNodeLock(target, group, "__vector__")
+	lock.Lock()
 	v, _ := loadVectorMemory(s, key)
 	if success {
 		updateVectorCentroid(&v.Success, &v.SuccessMass, vector, strength)
@@ -141,7 +142,7 @@ func (s *Store) UpdateVectorMemory(group, config, target string, vector []float3
 		vectorMemoryCache.Set(key, v)
 	}
 	data := encodeVectorMemory(v)
-	vectorMemoryMu.Unlock()
+	lock.Unlock()
 
 	s.AppendToGlobalQueue(StoreOperation{
 		Type:   OpSaveVector,
