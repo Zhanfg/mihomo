@@ -292,7 +292,6 @@ func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func(
 
 			log.Debugln("ProxyGroup: %s failed count: %d", gb.Name(), gb.failedTimes)
 			if gb.failedTimes >= gb.maxFailedTimes {
-				log.Warnln("because %s failed multiple times, activate health check", gb.Name())
 				trigger = true
 			}
 		}
@@ -310,6 +309,7 @@ func (gb *GroupBase) healthCheck() {
 	if !gb.failedTesting.CompareAndSwap(false, true) {
 		return
 	}
+	log.Warnln("because %s failed multiple times, activate health check", gb.Name())
 
 	wg := sync.WaitGroup{}
 	for _, proxyProvider := range gb.providers {
