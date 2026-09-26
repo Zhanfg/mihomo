@@ -309,9 +309,9 @@ curl -fsS "http://127.0.0.1:$CTRL/version" | tee "$ART/version.json"
 sample_metrics(){
   local tag="$1"
   local rss fd th conns
-  rss="$(awk '/VmRSS:/ {print $2}' /proc/$MAIN_PID/status 2>/dev/null || echo 0)"
-  fd="$(find /proc/$MAIN_PID/fd -maxdepth 1 -type l 2>/dev/null | wc -l)"
-  th="$(awk '/Threads:/ {print $2}' /proc/$MAIN_PID/status 2>/dev/null || echo 0)"
+  rss="$(sudo awk '/VmRSS:/ {print $2}' /proc/$MAIN_PID/status 2>/dev/null || echo 0)"
+  fd="$(sudo find /proc/$MAIN_PID/fd -maxdepth 1 -type l 2>/dev/null | wc -l)"
+  th="$(sudo awk '/Threads:/ {print $2}' /proc/$MAIN_PID/status 2>/dev/null || echo 0)"
   conns="$(curl -fsS "http://127.0.0.1:$CTRL/connections" 2>/dev/null | jq '.connections|length' 2>/dev/null || echo 0)"
   printf '%s,%s,%s,%s,%s\n' "$tag" "$rss" "$fd" "$th" "$conns" >> "$ART/metrics.csv"
 }
