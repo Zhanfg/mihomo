@@ -320,7 +320,6 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	}
 }
 
-
 func TestDatacenterASNClassification(t *testing.T) {
 	cases := []struct {
 		asn  string
