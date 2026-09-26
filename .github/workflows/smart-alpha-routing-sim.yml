@@ -10,6 +10,7 @@ on:
       - ".github/scripts/smart-routing-sim.sh"
       - ".github/scripts/smart-profile-regression.sh"
       - ".github/scripts/smart-ebpf-routing-smoke.sh"
+      - ".github/scripts/smart-accelerated-day-soak.sh"
       - "adapter/**"
       - "component/**"
       - "config/**"
@@ -205,6 +206,74 @@ jobs:
             .route-artifacts/**
           if-no-files-found: warn
           include-hidden-files: true
+          retention-days: 14
+
+
+  accelerated-day-soak:
+    name: Accelerated 24h soak (${{ matrix.netfilter }}) / stress / churn / leak gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: smart-unit
+    strategy:
+      fail-fast: false
+      matrix:
+        netfilter: [nft, legacy]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Install soak dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ca-certificates curl dnsutils iproute2 iptables jq kmod nftables python3
+          sudo update-ca-certificates
+          cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+      - name: Select netfilter backend
+        run: |
+          sudo update-alternatives --set iptables /usr/sbin/iptables-${{ matrix.netfilter }}
+          sudo update-alternatives --set ip6tables /usr/sbin/ip6tables-${{ matrix.netfilter }}
+          iptables --version
+          ip6tables --version
+
+      - name: Build soak-test core
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go build -v -buildvcs=false -tags "with_gvisor" -trimpath \
+            -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-alpha-soak-${GITHUB_SHA::7}' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid=" \
+            -o mihomo-soak-test
+
+      - name: Run 1-minute virtual-day soak and pressure suite
+        run: |
+          chmod +x .github/scripts/smart-accelerated-day-soak.sh
+          .github/scripts/smart-accelerated-day-soak.sh
+
+      - name: Publish soak summary
+        if: always()
+        run: |
+          if [[ -f .soak-artifacts/summary.txt ]]; then
+            echo "### Accelerated 24h soak (${{ matrix.netfilter }})" >> "$GITHUB_STEP_SUMMARY"
+            sed 's/^/- /' .soak-artifacts/summary.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload soak diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-accelerated-day-${{ matrix.netfilter }}-${{ github.run_id }}
+          path: |
+            .soak-artifacts/**
+          include-hidden-files: true
+          if-no-files-found: warn
           retention-days: 14
 
 
