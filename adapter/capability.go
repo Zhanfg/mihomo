@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,6 +56,8 @@ type capabilityEntry struct {
 	probing bool
 	exitIP  netip.Addr
 	country string
+	asn     string
+	vendor  string
 }
 
 type capabilityState struct {
@@ -260,11 +263,15 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	if ok && exitIP.IsValid() {
 		if entry.exitIP != exitIP {
 			entry.country = ""
+			entry.asn = ""
+			entry.vendor = ""
 		}
 		entry.exitIP = exitIP
 	} else if kind == capabilityIPv4 || kind == capabilityIPv6 {
 		entry.exitIP = netip.Addr{}
 		entry.country = ""
+		entry.asn = ""
+		entry.vendor = ""
 	}
 	entry.mu.Unlock()
 
@@ -478,6 +485,71 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	}
 	entry.mu.Unlock()
 	return true, country
+}
+
+// ExitNetworkForProxy returns the measured exit ASN and organization for one
+// address family. It reuses the same ASN.mmdb Mihomo already maintains for
+// IP-ASN rules/Smart; it never downloads an additional database. If ASN.mmdb
+// is absent, network metadata simply remains unknown.
+func ExitNetworkForProxy(p C.Proxy, ipv6 bool) (known bool, asn, vendor string) {
+	if p == nil {
+		return false, "", ""
+	}
+	state := capabilityStateForProxy(p)
+	entry := &state.ipv4
+	kind := capabilityIPv4
+	if ipv6 {
+		entry = &state.ipv6
+		kind = capabilityIPv6
+	}
+	if state.stateOrProbe(p, kind) != capYes {
+		return false, "", ""
+	}
+
+	entry.mu.Lock()
+	if entry.asn != "" || entry.vendor != "" {
+		asn, vendor = entry.asn, entry.vendor
+		entry.mu.Unlock()
+		return true, asn, vendor
+	}
+	exitIP := entry.exitIP
+	entry.mu.Unlock()
+	if !exitIP.IsValid() {
+		return false, "", ""
+	}
+	if _, err := os.Stat(C.Path.ASN()); err != nil {
+		return false, "", ""
+	}
+
+	asn, vendor = mmdb.ASNInstance().LookupASN(exitIP.AsSlice())
+	if asn == "" && vendor == "" {
+		return false, "", ""
+	}
+
+	entry.mu.Lock()
+	if entry.exitIP == exitIP {
+		entry.asn = asn
+		entry.vendor = vendor
+	}
+	entry.mu.Unlock()
+	return true, asn, vendor
+}
+
+// UDPCapabilityKnown returns the measured end-to-end UDP verdict. Unknown
+// schedules the existing STUN probe and is intentionally distinct from false.
+func UDPCapabilityKnown(p C.Proxy) (known, ok bool) {
+	if p == nil {
+		return false, false
+	}
+	state := capabilityStateForProxy(p)
+	switch state.stateOrProbe(p, capabilityUDP) {
+	case capYes:
+		return true, true
+	case capNo:
+		return true, false
+	default:
+		return false, false
+	}
 }
 
 // ExitIPForProxy exposes the cached observed public source address for
