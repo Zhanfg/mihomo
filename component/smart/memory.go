@@ -23,7 +23,8 @@ var (
 
 	blockedNodesCache *lru.LruCache[string, map[string]bool]
 
-	hostStatusCache *lru.LruCache[string, *HostStatus]
+	hostStatusCache  *lru.LruCache[string, *HostStatus]
+	vectorMemoryCache *lru.LruCache[string, VectorMemory]
 )
 
 var (
@@ -100,6 +101,12 @@ func InitCache() {
 		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets / 3),
 		lru.WithAge[string, *HostStatus](300),
 		lru.WithStale[string, *HostStatus](true),
+	)
+
+	vectorMemoryCache = lru.New[string, VectorMemory](
+		lru.WithSize[string, VectorMemory](globalCacheParams.MaxTargets / 3),
+		lru.WithAge[string, VectorMemory](600),
+		lru.WithStale[string, VectorMemory](true),
 	)
 }
 
@@ -286,6 +293,7 @@ func (s *Store) AdjustCacheParameters() {
 	dbResultCache.Resize(cacheSize)
 	blockedNodesCache.Resize(cacheSize)
 	hostStatusCache.Resize(cacheSize)
+	vectorMemoryCache.Resize(cacheSize)
 	go s.FlushQueue(true)
 }
 
@@ -300,6 +308,7 @@ func (s *Store) clearCache(level string, config string, group string) {
 		dbResultCache.Clear()
 		blockedNodesCache.Clear()
 		hostStatusCache.Clear()
+		vectorMemoryCache.Clear()
 		return
 	}
 
@@ -313,6 +322,7 @@ func (s *Store) clearCache(level string, config string, group string) {
 		}
 		blockedNodesCache.RemoveByKeyPrefix(FormatDBKey(config) + "/")
 		hostStatusCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeHostFailures, config) + "/")
+		vectorMemoryCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeVector, config) + "/")
 	} else if level == "group" {
 		groupKey := FormatDBKey(config, group) // "smart/{config}/{group}"
 		unwrapCache.RemoveByKeyPrefix(groupKey + "/")
@@ -322,5 +332,6 @@ func (s *Store) clearCache(level string, config string, group string) {
 		}
 		blockedNodesCache.Delete(groupKey)
 		hostStatusCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeHostFailures, config, group) + "/")
+		vectorMemoryCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeVector, config, group) + "/")
 	}
 }
