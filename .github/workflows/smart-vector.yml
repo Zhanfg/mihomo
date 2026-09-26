@@ -1,0 +1,121 @@
+name: Smart Vector Core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - feature/smart-vector-store
+    paths:
+      - "adapter/capability.go"
+      - "adapter/vector_profile.go"
+      - "adapter/vector_profile_test.go"
+      - "adapter/outboundgroup/smart.go"
+      - ".github/workflows/smart-vector.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-vector-core
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(git rev-parse HEAD)"
+          HEAD_SHORT="$(printf '%s' "$HEAD_SHA" | cut -c1-7)"
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          echo "HEAD_SHORT=$HEAD_SHORT" >> "$GITHUB_ENV"
+          go version
+          git log -1 --oneline
+
+      - name: gofmt gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          gofmt -d             adapter/capability.go             adapter/vector_profile.go             adapter/vector_profile_test.go             adapter/outboundgroup/smart.go | tee /tmp/gofmt.diff
+          test ! -s /tmp/gofmt.diff
+
+      - name: Vector/capability tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter -run 'Test(NodeVector|BuildNodeVector|IPv4|IPv6|IPFamily|Capability|ExitCountry|ProxyIdentity)' -count=1
+
+      - name: Smart regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./adapter/outboundgroup ./component/smart/... -count=1
+
+      - name: Android-adjacent regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/keepalive ./dns ./hub/executor -count=1
+
+      - name: Build Linux parser core
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64             go build -buildvcs=false -tags "with_ebpf no_tailscale no_zerotier no_easytier" -trimpath               -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=smart-ebpf-$HEAD_SHORT' -w -s -buildid="               -o mihomo-selftest
+          ./mihomo-selftest -t -f .github/fixtures/mobile-core-opt.yaml 2>&1 | tee VECTOR_SELFTEST.txt
+          grep -qi "configuration file .* test is successful" VECTOR_SELFTEST.txt
+
+      - name: Build Android arm64
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+          GOOS: android
+          GOARCH: arm64
+        run: |
+          set -euo pipefail
+          VERSION="smart-ebpf-$HEAD_SHORT"
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
+          TAGS="with_ebpf no_tailscale no_zerotier no_easytier"
+          go build -buildvcs=false -tags "$TAGS" -trimpath             -ldflags "-X 'github.com/metacubex/mihomo/constant.Version=$VERSION' -X 'github.com/metacubex/mihomo/constant.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)' -w -s -buildid="             -o "$OUT"
+          test -s "$OUT"
+          file "$OUT" | tee FILE_INFO.txt
+          strings "$OUT" | grep -q "api4.ipify.org"
+          strings "$OUT" | grep -q "api6.ipify.org"
+          strings "$OUT" | grep -q "country-affinity"
+          gzip -9 -c "$OUT" > "$OUT.gz"
+          sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
+          {
+            echo "source=$HEAD_SHA"
+            echo "version=$VERSION"
+            echo "target=android/arm64"
+            echo "vector_dimensions=12"
+            echo "vector_rerank_window=24"
+            echo "vector_storage=reuse-smart-bbolt-and-capability-cache"
+            echo "geo=reuse-MMDB-and-ASN-mmdb"
+            echo "new_downloader=none"
+            echo "new_database=none"
+            echo "new_ann_library=none"
+          } > BUILD_INFO.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smart-ebpf-vector-a64-${{ env.HEAD_SHORT }}
+          path: |
+            mihomo-a64-smart-ebpf-*
+            SHA256SUMS
+            BUILD_INFO.txt
+            FILE_INFO.txt
+            VECTOR_SELFTEST.txt
+          if-no-files-found: error
+          retention-days: 30
