@@ -108,10 +108,10 @@ done
 sudo ip link add "$V_CLIENT_HOST" type veth peer name "$V_CLIENT_NS"
 sudo ip link set "$V_CLIENT_NS" netns "$NS_CLIENT"
 sudo ip addr add 10.10.0.1/24 dev "$V_CLIENT_HOST"
-sudo ip -6 addr add 2001:db8:10::1/64 dev "$V_CLIENT_HOST"
+sudo ip -6 addr add 2001:db8:10::1/64 dev "$V_CLIENT_HOST" nodad
 sudo ip link set "$V_CLIENT_HOST" up
 sudo ip -n "$NS_CLIENT" addr add 10.10.0.2/24 dev "$V_CLIENT_NS"
-sudo ip -n "$NS_CLIENT" -6 addr add 2001:db8:10::2/64 dev "$V_CLIENT_NS"
+sudo ip -n "$NS_CLIENT" -6 addr add 2001:db8:10::2/64 dev "$V_CLIENT_NS" nodad
 sudo ip -n "$NS_CLIENT" link set "$V_CLIENT_NS" up
 sudo ip -n "$NS_CLIENT" route add default via 10.10.0.1
 sudo ip -n "$NS_CLIENT" -6 route add default via 2001:db8:10::1
@@ -119,12 +119,12 @@ sudo ip -n "$NS_CLIENT" -6 route add default via 2001:db8:10::1
 sudo ip link add "$V_WAN_HOST" type veth peer name "$V_WAN_NS"
 sudo ip link set "$V_WAN_NS" netns "$NS_WAN"
 sudo ip addr add 10.20.0.1/24 dev "$V_WAN_HOST"
-sudo ip -6 addr add 2001:db8:20::1/64 dev "$V_WAN_HOST"
+sudo ip -6 addr add 2001:db8:20::1/64 dev "$V_WAN_HOST" nodad
 sudo ip link set "$V_WAN_HOST" up
 sudo ip -n "$NS_WAN" addr add 10.20.0.2/24 dev "$V_WAN_NS"
 sudo ip -n "$NS_WAN" addr add 10.20.0.3/24 dev "$V_WAN_NS"
-sudo ip -n "$NS_WAN" -6 addr add 2001:db8:20::2/64 dev "$V_WAN_NS"
-sudo ip -n "$NS_WAN" -6 addr add 2001:db8:20::3/64 dev "$V_WAN_NS"
+sudo ip -n "$NS_WAN" -6 addr add 2001:db8:20::2/64 dev "$V_WAN_NS" nodad
+sudo ip -n "$NS_WAN" -6 addr add 2001:db8:20::3/64 dev "$V_WAN_NS" nodad
 sudo ip -n "$NS_WAN" link set "$V_WAN_NS" up
 sudo ip -n "$NS_WAN" route add default via 10.20.0.1
 sudo ip -n "$NS_WAN" -6 route add default via 2001:db8:20::1
@@ -132,10 +132,10 @@ sudo ip -n "$NS_WAN" -6 route add default via 2001:db8:20::1
 sudo ip link add "$V_FAST_HOST" type veth peer name "$V_FAST_NS"
 sudo ip link set "$V_FAST_NS" netns "$NS_FAST"
 sudo ip addr add 10.30.0.1/24 dev "$V_FAST_HOST"
-sudo ip -6 addr add 2001:db8:30::1/64 dev "$V_FAST_HOST"
+sudo ip -6 addr add 2001:db8:30::1/64 dev "$V_FAST_HOST" nodad
 sudo ip link set "$V_FAST_HOST" up
 sudo ip -n "$NS_FAST" addr add 10.30.0.2/24 dev "$V_FAST_NS"
-sudo ip -n "$NS_FAST" -6 addr add 2001:db8:30::2/64 dev "$V_FAST_NS"
+sudo ip -n "$NS_FAST" -6 addr add 2001:db8:30::2/64 dev "$V_FAST_NS" nodad
 sudo ip -n "$NS_FAST" link set "$V_FAST_NS" up
 sudo ip -n "$NS_FAST" route add default via 10.30.0.1
 sudo ip -n "$NS_FAST" -6 route add default via 2001:db8:30::1
@@ -143,10 +143,10 @@ sudo ip -n "$NS_FAST" -6 route add default via 2001:db8:30::1
 sudo ip link add "$V_SLOW_HOST" type veth peer name "$V_SLOW_NS"
 sudo ip link set "$V_SLOW_NS" netns "$NS_SLOW"
 sudo ip addr add 10.31.0.1/24 dev "$V_SLOW_HOST"
-sudo ip -6 addr add 2001:db8:31::1/64 dev "$V_SLOW_HOST"
+sudo ip -6 addr add 2001:db8:31::1/64 dev "$V_SLOW_HOST" nodad
 sudo ip link set "$V_SLOW_HOST" up
 sudo ip -n "$NS_SLOW" addr add 10.31.0.2/24 dev "$V_SLOW_NS"
-sudo ip -n "$NS_SLOW" -6 addr add 2001:db8:31::2/64 dev "$V_SLOW_NS"
+sudo ip -n "$NS_SLOW" -6 addr add 2001:db8:31::2/64 dev "$V_SLOW_NS" nodad
 sudo ip -n "$NS_SLOW" link set "$V_SLOW_NS" up
 sudo ip -n "$NS_SLOW" route add default via 10.31.0.1
 sudo ip -n "$NS_SLOW" -6 route add default via 2001:db8:31::1
@@ -211,8 +211,12 @@ sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" http 2001:db8:20:
 sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" udp 10.20.0.3 18081 foreign-udp-v4 >"${ART}/wan-udp-v4.log" 2>&1 &
 sudo ip netns exec "$NS_WAN" python3 "${STATE}/peer_server.py" udp 2001:db8:20::3 18081 foreign-udp-v6 >"${ART}/wan-udp-v6.log" 2>&1 &
 
-sleep 0.5
+for _ in $(seq 1 30); do
+  if sudo ip netns exec "$NS_WAN" ss -lntup | grep -q '\[2001:db8:20::2\]:18080'; then break; fi
+  sleep 0.1
+done
 log "Preflight WAN IPv4/IPv6 endpoints before transparent interception"
+sudo ip netns exec "$NS_WAN" ip -6 addr show | tee "${ART}/wan-ip6-addr.txt"
 sudo ip netns exec "$NS_WAN" ss -lntup | tee "${ART}/wan-listeners.txt"
 curl --noproxy '*' -fsS --max-time 5 http://10.20.0.2:18080/preflight-v4 | tee "${ART}/preflight-host-v4.txt"
 curl --noproxy '*' -g -6 -v --max-time 5 'http://[2001:db8:20::2]:18080/preflight-v6' \
