@@ -1,6 +1,7 @@
 package outboundgroup
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/metacubex/mihomo/common/structure"
@@ -65,5 +66,38 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 	}
 	if !urlOpt.RequireIPv6 || urlOpt.RequireIPv4 || urlOpt.PreferIPv4 {
 		t.Fatalf("unexpected url-test directives: %+v", urlOpt)
+	}
+}
+
+
+func TestCountryAffinityFirstWriterWins(t *testing.T) {
+	s := &Smart{countryAffinity: true}
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, country := range []string{"US", "JP"} {
+		country := country
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			s.setAffinityCountryIfEmpty(country)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	got := s.currentAffinityCountry()
+	if got != "US" && got != "JP" {
+		t.Fatalf("unexpected affinity country %q", got)
+	}
+	other := "US"
+	if got == "US" {
+		other = "JP"
+	}
+	if s.setAffinityCountryIfEmpty(other) {
+		t.Fatalf("existing affinity %q must not be overwritten by %q", got, other)
+	}
+	if after := s.currentAffinityCountry(); after != got {
+		t.Fatalf("affinity changed from %q to %q", got, after)
 	}
 }
