@@ -41,13 +41,14 @@ func TestCustomIPFamilyDirectivesDecode(t *testing.T) {
 		"auto-ip-family":   true,
 		"country":          "JP",
 		"country-affinity": true,
+		"avoid-datacenter": true,
 	}
 	smartOpt := SmartOption{}
 	if err := decoder.Decode(smartRaw, &smartOpt); err != nil {
 		t.Fatalf("decode smart directives: %v", err)
 	}
 	if !smartOpt.PreferIPv4 || !smartOpt.RequireIPv6 || !smartOpt.AutoIPFamily ||
-		smartOpt.Country != "JP" || !smartOpt.CountryAffinity {
+		smartOpt.Country != "JP" || !smartOpt.CountryAffinity || !smartOpt.AvoidDatacenter {
 		t.Fatalf("unexpected smart directives: %+v", smartOpt)
 	}
 
