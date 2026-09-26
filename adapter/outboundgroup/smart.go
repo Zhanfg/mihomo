@@ -1984,7 +1984,8 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 			if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
-				calculatedWeight, newCalibration := smart.AdaptModelPrediction(
+				var newCalibration float64
+				calculatedWeight, newCalibration = smart.AdaptModelPrediction(
 					calculatedWeight,
 					observedWeight,
 					oldCalibration,
