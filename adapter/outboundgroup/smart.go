@@ -130,15 +130,15 @@ func initASNDatabase() {
 }
 
 type SmartOption struct {
-	PolicyPriority string  `group:"policy-priority,omitempty"`
-	UseLightGBM    bool    `group:"uselightgbm,omitempty"`
-	CollectData    bool    `group:"collectdata,omitempty"`
-	SampleRate     float64 `group:"sample-rate,omitempty"`
-	PreferASN      bool    `group:"prefer-asn,omitempty"`
-	Tolerance      uint16  `group:"tolerance,omitempty"`
-	PreferIPv4     bool    `group:"prefer-ipv4,omitempty"`
-	RequireIPv4    bool    `group:"require-ipv4,omitempty"`
-	RequireIPv6    bool    `group:"require-ipv6,omitempty"`
+	PolicyPriority  string  `group:"policy-priority,omitempty"`
+	UseLightGBM     bool    `group:"uselightgbm,omitempty"`
+	CollectData     bool    `group:"collectdata,omitempty"`
+	SampleRate      float64 `group:"sample-rate,omitempty"`
+	PreferASN       bool    `group:"prefer-asn,omitempty"`
+	Tolerance       uint16  `group:"tolerance,omitempty"`
+	PreferIPv4      bool    `group:"prefer-ipv4,omitempty"`
+	RequireIPv4     bool    `group:"require-ipv4,omitempty"`
+	RequireIPv6     bool    `group:"require-ipv6,omitempty"`
 	AutoIPFamily    bool    `group:"auto-ip-family,omitempty"`
 	Country         string  `group:"country,omitempty"`
 	CountryAffinity bool    `group:"country-affinity,omitempty"`
@@ -160,23 +160,23 @@ type Smart struct {
 	expectedStatus string
 	disableUDP     bool
 
-	weightModel    *lightgbm.WeightModel
-	policyPriority []priorityRule
-	priorityCache  xsync.Map[string, float64]
-	sampleRate     float64
-	useLightGBM    bool
-	collectData    bool
-	preferASN      bool
-	preferIPv4     bool
-	requireIPv4    bool
-	requireIPv6    bool
-	autoIPFamily   bool
-	country        string
+	weightModel     *lightgbm.WeightModel
+	policyPriority  []priorityRule
+	priorityCache   xsync.Map[string, float64]
+	sampleRate      float64
+	useLightGBM     bool
+	collectData     bool
+	preferASN       bool
+	preferIPv4      bool
+	requireIPv4     bool
+	requireIPv6     bool
+	autoIPFamily    bool
+	country         string
 	countryAffinity bool
 	affinityMu      sync.Mutex
 	affinityCountry string
-	hostFailLimit  atomic.Int32
-	tolerance      uint16
+	hostFailLimit   atomic.Int32
+	tolerance       uint16
 
 	freshNodesGroup singleflight.Group[nodeResult]
 
@@ -274,22 +274,22 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 			PreferIPv6:       option.PreferIPv6,
 			Providers:        providers,
 		}),
-		testUrl:        option.URL,
-		expectedStatus: option.ExpectedStatus,
-		configName:     configName,
-		disableUDP:     option.DisableUDP,
-		policyPriority: make([]priorityRule, 0),
-		sampleRate:     1,
-		useLightGBM:    smartOption.UseLightGBM,
-		collectData:    smartOption.CollectData,
-		preferASN:      smartOption.PreferASN,
-		preferIPv4:     smartOption.PreferIPv4,
-		requireIPv4:    smartOption.RequireIPv4,
-		requireIPv6:    smartOption.RequireIPv6,
-		autoIPFamily:   smartOption.AutoIPFamily,
-		country:        country,
+		testUrl:         option.URL,
+		expectedStatus:  option.ExpectedStatus,
+		configName:      configName,
+		disableUDP:      option.DisableUDP,
+		policyPriority:  make([]priorityRule, 0),
+		sampleRate:      1,
+		useLightGBM:     smartOption.UseLightGBM,
+		collectData:     smartOption.CollectData,
+		preferASN:       smartOption.PreferASN,
+		preferIPv4:      smartOption.PreferIPv4,
+		requireIPv4:     smartOption.RequireIPv4,
+		requireIPv6:     smartOption.RequireIPv6,
+		autoIPFamily:    smartOption.AutoIPFamily,
+		country:         country,
 		countryAffinity: smartOption.CountryAffinity,
-		tolerance:      smartOption.Tolerance,
+		tolerance:       smartOption.Tolerance,
 	}
 
 	s.hostFailLimit.Store(int32(s.maxFailedTimes))
