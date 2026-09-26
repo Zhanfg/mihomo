@@ -139,13 +139,22 @@ func startSmartStatsWorkers() {
 // latency for bounded RAM and scheduler pressure.
 func enqueueSmartStats(ctx context.Context, job func()) bool {
 	smartStatsOnce.Do(startSmartStatsWorkers)
-	if ctx == nil {
-		ctx = context.Background()
+	if ctx != nil {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
 	}
+	// Statistics are auxiliary learning data. Under a burst, blocking the
+	// connection close path to preserve every sample creates exactly the wrong
+	// failure mode on mobile: goroutines accumulate, RAM rises and the data
+	// plane can appear stalled. Drop an overloaded sample instead; later
+	// sessions continue training the same persistent model calibration.
 	select {
 	case smartStatsQueue <- job:
 		return true
-	case <-ctx.Done():
+	default:
 		return false
 	}
 }
@@ -932,23 +941,22 @@ func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, au
 }
 
 func (s *Smart) ipFamilyEligible(metadata *C.Metadata, p C.Proxy) bool {
-	if !adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false) {
-		return false
-	}
-	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
-	if autoIPv4 || autoIPv6 {
-		return adapter.IPFamilyRequirementsMet(p, autoIPv4, autoIPv6, true)
-	}
-	return true
+	// Only explicit require-* directives are hard admission rules.
+	//
+	// auto-ip-family is availability-first: it contributes ranking penalties
+	// through ipFamilyPolicy/AddCapabilityPenaltyExtended, but never removes a
+	// node solely because an external capability probe failed. A transient
+	// api4/api6 failure must not turn every Smart group into REJECT.
+	return adapter.IPFamilyRequirementsMet(p, s.requireIPv4, s.requireIPv6, false)
 }
 
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
-	// Explicit require-* directives are strict: unknown capability is not
-	// enough. auto-ip-family is adaptive: confirmed mismatches are excluded,
-	// while unknown nodes may be used briefly as probes warm up.
+	// Explicit require-* directives are strict. auto-ip-family is a soft,
+	// availability-first ranking signal: telemetry may reorder candidates but
+	// cannot blackhole the group when a probe endpoint is temporarily bad.
 	preferIPv4, preferIPv6, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry()
 	familyEligible := func(p C.Proxy) bool {
@@ -1130,9 +1138,9 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		return s.filterProxies(metadata, wildcardTarget, names, weights, all, minCount, isUDP)
 	}
 
-	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || autoIPv4 || autoIPv6 || strictCountry) {
-		// Caller-controlled empty-fallback defines the fail-closed behavior.
-		// For strict routing configurations this should be REJECT/REJECT-DROP.
+	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || strictCountry) {
+		// Only explicit hard constraints fail closed. auto-ip-family remains a
+		// preference and therefore preserves the ordinary Smart fallback path.
 		selected = append(selected, s.EmptyFallback())
 	}
 
