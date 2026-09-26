@@ -922,7 +922,14 @@ func (s *Smart) vectorRerank(metadata *C.Metadata, proxies []C.Proxy, learned ma
 			learnedWeight = learned[identity]
 		}
 
-		vectorScore := adapter.NodeVectorMatch(p, s.testUrl, metadata, learnedWeight)
+		profile := adapter.BuildNodeVector(p, s.testUrl, learnedWeight)
+		vectorScore := adapter.NodeVectorScore(profile, metadata)
+		if affinity, ok := s.store.VectorAffinity(s.Name(), s.configName, metadata.SmartTarget, profile.Vector[:]); ok {
+			// Context vector memory is learned per Smart target and complements
+			// the generic node profile. Keep it strong enough to matter, but
+			// never let a young centroid erase the base health/capability view.
+			vectorScore = 0.70*vectorScore + 0.30*affinity
+		}
 		delay := p.LastDelayForTestUrl(s.testUrl)
 		delayScore := 0.0
 		if delay > 0 && delay < 0xffff {
@@ -2009,6 +2016,19 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// closes on this node racing to append would otherwise let the older
 	// snapshot overwrite the newer one.
 	s.saveStatsRecord(target, proxy, statsSnapshot)
+
+	// Learn one compact target centroid from the same close event. This is a
+	// projection of data we already collected; no extra network request or
+	// background worker is created. Successful and failed profiles are kept
+	// separately so Smart can move toward proven shapes and away from repeated
+	// bad ones without memorising one exact node name.
+	vectorProfile := adapter.BuildNodeVector(proxy, s.testUrl, newWeight)
+	vectorSuccess := err == nil && !isDegraded && !failedBlock && blockCode == smart.BlockNone
+	vectorStrength := float32(0.75)
+	if newWeight > 0 {
+		vectorStrength = float32(math.Min(1.5, math.Max(0.5, newWeight)))
+	}
+	s.store.UpdateVectorMemory(s.Name(), s.configName, target, vectorProfile.Vector[:], vectorSuccess, vectorStrength)
 
 	// Closing stalled connections can block on I/O, so it runs without the
 	// lock; the stats goroutines those closes spawn take it.
