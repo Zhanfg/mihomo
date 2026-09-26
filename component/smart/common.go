@@ -260,6 +260,8 @@ func formatOperationKey(op *StoreOperation) string {
 			return FormatDBKey(KeyTypePrefetch, op.Config, op.Group, op.Target)
 		case KeyTypeRanking:
 			return FormatDBKey(KeyTypeRanking, op.Config, op.Group)
+		case KeyTypeVector:
+			return FormatDBKey(KeyTypeVector, op.Config, op.Group, op.Target)
 		default:
 			return FormatDBKey(KeyTypeHostFailures, op.Config, op.Group, op.Target)
 		}
