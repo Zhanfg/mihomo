@@ -52,8 +52,8 @@ const (
 	flushQueueInterval       = 5 * time.Minute
 	rankingInterval          = 5 * time.Minute
 
-	maxRetries        = 5
-	maxSelected       = 10
+	maxRetries         = 5
+	maxSelected        = 10
 	vectorRerankWindow = 24
 
 	deterministicDialPrefix = 3
