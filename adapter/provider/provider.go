@@ -72,6 +72,18 @@ func (bp *baseProvider) HealthCheck() {
 	bp.healthCheck.check()
 }
 
+// ScheduleHealthCheck requests the provider's existing coalesced/background-aware
+// health-check loop. It is intentionally not part of the public provider
+// interface: callers can feature-detect it without forcing third-party/mock
+// provider implementations to change.
+func (bp *baseProvider) ScheduleHealthCheck() bool {
+	if !bp.healthCheck.auto() {
+		return false
+	}
+	bp.healthCheck.scheduleCheck()
+	return true
+}
+
 func (bp *baseProvider) Type() P.ProviderType {
 	return P.Proxy
 }
