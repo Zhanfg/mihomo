@@ -1357,35 +1357,6 @@ func (s *Smart) desiredCountry(metadata *C.Metadata, all []C.Proxy) (country str
 	return country, false
 }
 
-func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
-	if desired == "" {
-		return true
-	}
-	countryFor := adapter.CachedExitCountryForProxy
-	if strict {
-		// Explicit country is a hard user constraint, so unknown candidates are
-		// allowed to actively verify themselves rather than silently bypass it.
-		countryFor = adapter.ExitCountryForProxy
-	}
-	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
-		known, country := countryFor(p, ipv6)
-		if !known {
-			return !strict
-		}
-		return strings.EqualFold(country, desired)
-	}
-
-	known4, country4 := countryFor(p, false)
-	known6, country6 := countryFor(p, true)
-	if (known4 && strings.EqualFold(country4, desired)) || (known6 && strings.EqualFold(country6, desired)) {
-		return true
-	}
-	if strict {
-		return false
-	}
-	return !known4 || !known6
-}
-
 func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, autoIPv4, autoIPv6 bool) {
 	preferIPv4, preferIPv6 = s.preferIPv4, s.preferIPv6
 	if s.autoIPFamily && metadata != nil && metadata.DstIP.IsValid() {
@@ -1429,8 +1400,12 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// selected for the same target before an A/AAAA family change.
 	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry(metadata, all)
+	countryFit := func(p C.Proxy) (bool, smartCountryFit) {
+		return s.countryGreedyFit(metadata, p, desiredCountry, strictCountry)
+	}
 	familyEligible := func(p C.Proxy) bool {
-		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
+		eligible, _ := countryFit(p)
+		return s.ipFamilyEligible(metadata, p) && eligible
 	}
 	autoFamilyMismatch := func(p C.Proxy) bool {
 		return s.autoIPFamilyMismatch(metadata, p)
@@ -1444,13 +1419,13 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	checkNodeUsed := make(map[string]bool, len(names))
 
 	selected := make([]C.Proxy, 0, minCount+1)
+	selectedWeights := make([]float64, 0, minCount+1)
 
 	for i, name := range names {
 		proxy := proxyByName[name]
 		if proxy == nil || blockedNodes[name] || !proxy.AliveForTestUrl(s.testUrl) || (isUDP && !proxy.SupportUDP()) || !familyEligible(proxy) || autoFamilyMismatch(proxy) {
 			continue
 		}
-		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
 		w := 0.0
 		if weights != nil && i < len(weights) {
 			w = weights[i]
@@ -1461,7 +1436,33 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if excludedForHost(wtFailNodes, wtBlocked, name) {
 			continue
 		}
-		selected = append(selected, proxy)
+		checkNodeUsed[adapter.ProxyIdentity(proxy)] = true
+
+		if weights == nil {
+			selected = append(selected, proxy)
+			continue
+		}
+
+		_, fit := countryFit(proxy)
+		effectiveWeight := adjustedCountryWeight(w, fit)
+		insertAt := len(selectedWeights)
+		for j := range selectedWeights {
+			if effectiveWeight > selectedWeights[j] {
+				insertAt = j
+				break
+			}
+		}
+		if insertAt >= minCount {
+			continue
+		}
+		if len(selected) < minCount {
+			selected = append(selected, nil)
+			selectedWeights = append(selectedWeights, 0)
+		}
+		copy(selected[insertAt+1:], selected[insertAt:len(selected)-1])
+		copy(selectedWeights[insertAt+1:], selectedWeights[insertAt:len(selectedWeights)-1])
+		selected[insertAt] = proxy
+		selectedWeights[insertAt] = effectiveWeight
 	}
 
 	// Unwrap result should not filled
@@ -1514,6 +1515,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 			} else if autoIPv6 {
 				delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
 			}
+			_, fit := countryFit(p)
+			delay = adjustedCountryDelay(delay, fit)
 			candidate := rankedCandidate{proxy: p, delay: delay, index: index}
 			if hasPriority {
 				candidate.factor = s.getPriorityFactor(p.Name())
@@ -1581,14 +1584,6 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 				return familyEligible(p)
 			})
 		}
-	}
-
-	if len(selected) == 0 && desiredCountry != "" && !strictCountry && s.countryAffinity {
-		// Only this service target loses its affinity when the recorded country
-		// has no viable node for the requested family. Other SmartTargets keep
-		// their own pins and measured countries.
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
-		return s.filterProxies(metadata, wildcardTarget, nil, nil, all, minCount, isUDP)
 	}
 
 	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || strictCountry) {
@@ -1724,6 +1719,23 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 	isUDP := metadata.NetWork == C.UDP
 	resultNames, resultWeights, pinned := trySelector(isUDP)
+
+	// A soft country-affinity pin is not a contract. If the destination switches
+	// IP family and the cached winner is now a measured country mismatch, drop
+	// the pin and let the bounded greedy ranking compare aligned and faster
+	// alternatives. The mismatch remains selectable with a finite penalty.
+	if pinned && s.countryAffinity && s.country == "" && len(resultNames) > 0 {
+		desiredCountry, _ := s.desiredCountry(metadata, proxies)
+		if desiredCountry != "" {
+			proxyByName := s.proxyIndexFor(proxies)
+			if p := proxyByName[resultNames[0]]; p != nil {
+				if _, fit := s.countryGreedyFit(metadata, p, desiredCountry, false); fit == smartCountryMismatch {
+					resultNames, resultWeights = computeFreshSingleFlight(isUDP)
+					pinned = false
+				}
+			}
+		}
+	}
 
 	// a pin that cannot serve this network leaves it to the other one, so the candidates are
 	// taken per network instead; the winner of this dial still replaces the pin
