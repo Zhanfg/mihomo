@@ -121,3 +121,47 @@ Family-aware Smart routing:
 
 These directives are optional. Configurations that do not use them preserve
 their previous behavior.
+
+
+## Country-coherent dual-stack routing
+
+Smart groups also support measured exit-country routing without another GeoIP
+database or a second per-target cache.
+
+### `country-affinity: true`
+
+Country affinity is scoped to one Smart target (service/rule target). The first
+successful family records the measured two-letter exit country in the existing
+unwrap pin. IPv4 and IPv6 sibling flows for that same target are then selected
+from nodes whose measured exit for the requested family is in the same country.
+
+Different services in the same Smart group may independently use different
+countries. This avoids the old group-wide latch where one service could force
+every other service into its country.
+
+If that country has no viable node for the other family, only that target's pin
+is released and Smart reselects; unrelated target affinities are untouched.
+
+The core reuses the existing single-stack public-IP probes and the existing
+country MMDB. The target pin stores only a two-letter country string, so no
+extra resident country map, worker, or database is added.
+
+### `country: JP`
+
+An explicit ISO-3166 alpha-2 country remains a strict group constraint. It
+overrides target-local affinity and fails closed through the group's
+`empty-fallback` when no node in that country is eligible.
+
+Example:
+
+```yaml
+- name: AI智能
+  type: smart
+  use: [main-a, main-b, main-c, main-d, main-e]
+  auto-ip-family: true
+  country-affinity: true
+  empty-fallback: REJECT
+```
+
+For a service that first exits over IPv4 in Japan, later IPv6 flows for the same
+Smart target are kept in Japan when an IPv6-capable Japanese exit exists.

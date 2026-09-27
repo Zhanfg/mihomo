@@ -37,6 +37,7 @@ type (
 	UnwrapMap struct {
 		Proxies []string `json:"proxies,omitempty"`
 		Ref     string   `json:"ref,omitempty"`
+		Country string   `json:"country,omitempty"`
 	}
 
 	NodesWithWeights struct {
@@ -177,6 +178,14 @@ func (s *Store) GetPrefetchResult(group, config string, target string, isUDP boo
 }
 
 func (s *Store) StoreUnwrapResult(group, config string, target string, proxies []C.Proxy) {
+	s.StoreUnwrapResultWithCountry(group, config, target, proxies, "")
+}
+
+// StoreUnwrapResultWithCountry keeps the winning node and, when available, the
+// two-letter exit country observed for this Smart target. Reusing the existing
+// unwrap LRU avoids a second per-target map: country affinity costs one tiny
+// string per already-cached target and expires with the same 10-minute pin.
+func (s *Store) StoreUnwrapResultWithCountry(group, config string, target string, proxies []C.Proxy, country string) {
 	if target == "" || len(proxies) == 0 {
 		return
 	}
@@ -187,24 +196,46 @@ func (s *Store) StoreUnwrapResult(group, config string, target string, proxies [
 	}
 
 	targetKey := FormatDBKey(config, group, target)
-	if existing, expireTime, found := unwrapCache.GetWithExpire(targetKey); !found || len(existing.Proxies) == 0 || expireTime.Before(time.Now()) {
-		unwrapCache.Set(targetKey, UnwrapMap{Proxies: names})
+	existing, expireTime, found := unwrapCache.GetWithExpire(targetKey)
+	if found && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
+		// Do not rewrite a live winner merely to add metadata. If the caller is
+		// refreshing the same winner, enrich the cached entry in place.
+		if len(names) == len(existing.Proxies) {
+			same := true
+			for i := range names {
+				if names[i] != existing.Proxies[i] {
+					same = false
+					break
+				}
+			}
+			if same && country != "" && existing.Country != country {
+				existing.Country = country
+				unwrapCache.Set(targetKey, existing)
+			}
+		}
+		return
 	}
+	unwrapCache.Set(targetKey, UnwrapMap{Proxies: names, Country: country})
 }
 
-func (s *Store) GetUnwrapResult(group, config, target string) (proxies []string, expired bool) {
+func (s *Store) GetUnwrapAffinity(group, config, target string) (proxies []string, country string, expired bool) {
 	if target == "" {
-		return nil, false
+		return nil, "", false
 	}
 
 	targetKey := FormatDBKey(config, group, target)
 	if value, expireTime, found := unwrapCache.GetWithExpire(targetKey); found {
 		if len(value.Proxies) > 0 {
-			return value.Proxies, expireTime.Before(time.Now())
+			return value.Proxies, value.Country, expireTime.Before(time.Now())
 		}
 	}
 
-	return nil, false
+	return nil, "", false
+}
+
+func (s *Store) GetUnwrapResult(group, config, target string) (proxies []string, expired bool) {
+	proxies, _, expired = s.GetUnwrapAffinity(group, config, target)
+	return proxies, expired
 }
 
 func (s *Store) DeleteUnwrapResult(group, config string, target string) {
