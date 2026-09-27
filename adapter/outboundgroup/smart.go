@@ -1494,34 +1494,17 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		return stableDelayLess(a.delay, a.index, b.delay, b.index, s.tolerance)
 	}
 
-	// topCandidates performs bounded insertion selection. Smart never consumes
-	// more than minCount candidates (normally maxSelected=10), so sorting every
-	// provider member is wasted work. This keeps O(K) candidate memory and
-	// O(N*K) comparisons; with fixed K<=10 the hot path is linear in provider
-	// size while preserving the existing priority/tolerance ordering.
+	// topCandidates uses lazy two-stage greedy selection. The full provider is
+	// scanned with only cheap, cache-local costs; live tunnel assessment is
+	// read for a tiny shortlist. That keeps expensive transient-state lookups
+	// O(K) instead of O(N) while retaining enough alternatives for a stressed
+	// path to be displaced. K is bounded by maxSelected.
 	topCandidates := func(limit int, accept func(C.Proxy) bool) []C.Proxy {
 		if limit <= 0 {
 			return nil
 		}
-		ranked := make([]rankedCandidate, 0, limit)
-		for index, p := range all {
-			if !accept(p) {
-				continue
-			}
-			delay := adapter.AddCapabilityPenaltyExtended(
-				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
-			if autoIPv4 {
-				delay = adapter.AddAutoIPFamilyPenalty(delay, p, false)
-			} else if autoIPv6 {
-				delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
-			}
-			_, fit := countryFit(p)
-			delay = adjustedGreedyDelay(delay, fit, adapter.TunnelPathAssessmentForProxy(p))
-			candidate := rankedCandidate{proxy: p, delay: delay, index: index}
-			if hasPriority {
-				candidate.factor = s.getPriorityFactor(p.Name())
-			}
 
+		insertBounded := func(ranked []rankedCandidate, candidate rankedCandidate, bound int) []rankedCandidate {
 			insertAt := len(ranked)
 			for i := range ranked {
 				if betterCandidate(candidate, ranked[i]) {
@@ -1529,14 +1512,83 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 					break
 				}
 			}
-			if insertAt >= limit {
-				continue
+			if insertAt >= bound {
+				return ranked
 			}
-			if len(ranked) < limit {
+			if len(ranked) < bound {
 				ranked = append(ranked, rankedCandidate{})
 			}
 			copy(ranked[insertAt+1:], ranked[insertAt:len(ranked)-1])
 			ranked[insertAt] = candidate
+			return ranked
+		}
+
+		shortLimit := limit + 4
+		if shortLimit > maxSelected+4 {
+			shortLimit = maxSelected + 4
+		}
+		if shortLimit < limit {
+			shortLimit = limit
+		}
+
+		type shortlistCandidate struct {
+			rankedCandidate
+			rawDelay uint16
+			fit      smartCountryFit
+		}
+		shortlist := make([]shortlistCandidate, 0, shortLimit)
+
+		for index, p := range all {
+			if !accept(p) {
+				continue
+			}
+			rawDelay := adapter.AddCapabilityPenaltyExtended(
+				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
+			if autoIPv4 {
+				rawDelay = adapter.AddAutoIPFamilyPenalty(rawDelay, p, false)
+			} else if autoIPv6 {
+				rawDelay = adapter.AddAutoIPFamilyPenalty(rawDelay, p, true)
+			}
+			_, fit := countryFit(p)
+			candidate := shortlistCandidate{
+				rankedCandidate: rankedCandidate{
+					proxy: p,
+					delay: adjustedCountryDelay(rawDelay, fit),
+					index: index,
+				},
+				rawDelay: rawDelay,
+				fit:      fit,
+			}
+			if hasPriority {
+				candidate.factor = s.getPriorityFactor(p.Name())
+			}
+
+			insertAt := len(shortlist)
+			for i := range shortlist {
+				if betterCandidate(candidate.rankedCandidate, shortlist[i].rankedCandidate) {
+					insertAt = i
+					break
+				}
+			}
+			if insertAt >= shortLimit {
+				continue
+			}
+			if len(shortlist) < shortLimit {
+				shortlist = append(shortlist, shortlistCandidate{})
+			}
+			copy(shortlist[insertAt+1:], shortlist[insertAt:len(shortlist)-1])
+			shortlist[insertAt] = candidate
+		}
+
+		ranked := make([]rankedCandidate, 0, limit)
+		for _, candidate := range shortlist {
+			live := candidate.rankedCandidate
+			live.delay = adjustedGreedyDelay(
+				candidate.rawDelay,
+				candidate.fit,
+				adapter.TunnelPathAssessmentForProxy(candidate.proxy),
+			)
+			ranked = insertBounded(ranked, live, limit)
 		}
 
 		result := make([]C.Proxy, len(ranked))
