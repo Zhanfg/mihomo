@@ -736,6 +736,26 @@ func (s *Smart) isWeakDialPath(metadata *C.Metadata, proxies []C.Proxy) bool {
 	return limit >= 2 && weak >= 2
 }
 
+func (s *Smart) isCommonModeWeakPath(metadata *C.Metadata, proxies []C.Proxy) bool {
+	limit := len(proxies)
+	if limit > 3 {
+		limit = 3
+	}
+	if limit < 2 {
+		return false
+	}
+
+	weak := 0
+	for i := 0; i < limit; i++ {
+		history := s.getHistoryConnectStats(metadata, proxies[i])
+		delay := proxies[i].LastDelayForTestUrl(s.testUrl)
+		if history >= weakConnectThresholdMS || delay >= weakDelayThresholdMS {
+			weak++
+		}
+	}
+	return weak >= 2
+}
+
 // stabilizeSmartOrder keeps the existing winner when a new ranking is only
 // marginally better. This is hysteresis, not a fixed pin: a materially better
 // candidate or a failed/blocked winner still takes over.
@@ -1618,14 +1638,26 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		if len(previous) > 0 && len(weights) == len(names) {
 			names = slices.Clone(names)
 			weights = slices.Clone(weights)
-			switchMargin := smartSwitchMargin
+
+			assessment := linkprofile.Assessment{Condition: linkprofile.ConditionUnknown}
 			if currentProxy, ok := proxyByName[previous[0]]; ok {
-				assessment := adapter.TunnelPathAssessmentForProxy(currentProxy)
-				if assessment.Condition != linkprofile.ConditionUnknown && assessment.SwitchMargin > 0 {
-					switchMargin = assessment.SwitchMargin
+				assessment = adapter.TunnelPathAssessmentForProxy(currentProxy)
+			}
+
+			// Inspect only the first three ranked candidates. If several are weak
+			// at once, treat that as common-mode network noise and increase
+			// hysteresis instead of churning nodes for a problem they likely share.
+			candidateProxies := make([]C.Proxy, 0, 3)
+			for _, name := range names {
+				if p, ok := proxyByName[name]; ok {
+					candidateProxies = append(candidateProxies, p)
+					if len(candidateProxies) == 3 {
+						break
+					}
 				}
 			}
-			stabilizeSmartOrder(names, weights, previous[0], switchMargin)
+			commonModeWeak := s.isCommonModeWeakPath(metadata, candidateProxies)
+			stabilizeSmartOrder(names, weights, previous[0], switchMarginForPath(assessment, commonModeWeak))
 		}
 		resultProxies := make([]C.Proxy, 0, len(names))
 		for _, name := range names {
