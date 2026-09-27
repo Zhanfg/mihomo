@@ -98,6 +98,18 @@ func tunnelPathSnapshot(state *capabilityState, now time.Time, epoch uint64) (li
 	return state.path.tunnel, state.path.factor, state.path.samples, true
 }
 
+func TunnelPathFactorForProxy(p C.Proxy) float64 {
+	if p == nil {
+		return 1
+	}
+	state := capabilityStateForProxy(p)
+	_, factor, _, fresh := tunnelPathSnapshot(state, time.Now(), netstate.CurrentEpoch())
+	if !fresh || factor <= 0 {
+		return 1
+	}
+	return factor
+}
+
 func egressPathSnapshot(entry *capabilityEntry, ipv6 bool, now time.Time, epoch uint64) EgressPathProfile {
 	entry.mu.Lock()
 	profile := EgressPathProfile{
