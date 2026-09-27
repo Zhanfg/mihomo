@@ -35,7 +35,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: boxproxy-native-ebpf-android
+  group: boxproxy-native-ebpf-android-${{ github.ref }}
   cancel-in-progress: true
 
 env:
