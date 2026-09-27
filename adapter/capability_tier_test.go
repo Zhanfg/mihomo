@@ -304,6 +304,56 @@ func TestIPv4PreferencePenalty(t *testing.T) {
 	}
 }
 
+func TestExitIdentityRejectsPreviousEpochEvidence(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("stale-egress")
+	state := capabilityStateForProxy(p)
+
+	oldEpoch := netstate.CurrentEpoch()
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("203.0.113.9")
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = oldEpoch
+	state.ipv4.probing = true // prevent the test from launching real network I/O
+	state.ipv4.mu.Unlock()
+
+	netstate.Advance()
+	defer netstate.Advance()
+
+	if known, country := ExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("previous-epoch country leaked as current: (%v,%q)", known, country)
+	}
+	if known, ip := ExitIPForProxy(p, false); known || ip.IsValid() {
+		t.Fatalf("previous-epoch IP leaked as current: (%v,%v)", known, ip)
+	}
+}
+
+func TestExitIdentityRejectsExpiredEvidence(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("expired-egress")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("198.51.100.7")
+	state.ipv4.country = "US"
+	state.ipv4.expire = time.Now().Add(-time.Second)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.probing = true // suppress active refresh inside this unit test
+	state.ipv4.mu.Unlock()
+
+	if known, country := ExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("expired country leaked as fresh: (%v,%q)", known, country)
+	}
+	if known, ip := ExitIPForProxy(p, false); known || ip.IsValid() {
+		t.Fatalf("expired IP leaked as fresh: (%v,%v)", known, ip)
+	}
+}
+
 func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
 	p := stub("country")
