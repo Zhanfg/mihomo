@@ -38,6 +38,29 @@ func TestRankTargetStatsKeepsOnlyTopK(t *testing.T) {
 	}
 }
 
+func TestRankTargetStatsPrefersLiveAtomicRecord(t *testing.T) {
+	InitCache()
+	now := time.Now().Unix()
+	group, config, target := "live-group", "live-config", "live-target"
+	stats := map[string][]byte{
+		"live": encodedRankRecord(t, 0.45, now),
+		"disk": encodedRankRecord(t, 0.80, now),
+	}
+
+	cacheKey := FormatDBKey(KeyTypeStats, config, group, target, "live")
+	record := &AtomicStatsRecord{
+		weights: lru.New[string, float64](lru.WithSize[string, float64](8)),
+	}
+	record.lastUsed.Store(now)
+	record.SetWeight(WeightTypeTCP, 0.95)
+	recordCache.Set(cacheKey, record)
+
+	got := (&Store{}).rankTargetStats(group, config, target, stats, false, 2, now)
+	if len(got) != 2 || got[0].Node != "live" {
+		t.Fatalf("ranking=%+v, live atomic weight should override stale JSON", got)
+	}
+}
+
 func TestRankTargetStatsTieBreakIsStable(t *testing.T) {
 	now := time.Now().Unix()
 	stats := map[string][]byte{
