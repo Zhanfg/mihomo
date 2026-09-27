@@ -13,9 +13,12 @@ type activeTargetKey struct {
 }
 
 type activeTargetGroup struct {
-	mu     sync.Mutex
-	active map[activeTargetKey]int64
-	dirty  map[activeTargetKey]int64
+	mu         sync.Mutex
+	active     map[activeTargetKey]int64
+	dirty      map[activeTargetKey]int64
+	ring       [activeTargetHardLimit]activeTargetKey
+	ringUsed   int
+	ringCursor int
 }
 
 var activeTargetGroups sync.Map // FormatDBKey("active", config, group) -> *activeTargetGroup
@@ -49,23 +52,27 @@ func (s *Store) TouchActiveTarget(group, config, target string, isUDP bool, last
 	k := activeTargetKey{target: target, udp: isUDP}
 
 	g.mu.Lock()
-	g.active[k] = lastUsed
-	g.dirty[k] = lastUsed
-
-	// A pathological stream of one-shot hostnames must not turn the runtime
-	// activity index into an unbounded cache. Pruning is intentionally rare:
-	// the O(n) scan happens only after crossing the hard cap, never per touch.
-	if len(g.active) > activeTargetHardLimit {
-		var oldest activeTargetKey
-		oldestAt := int64(^uint64(0) >> 1)
-		for key, at := range g.active {
-			if at < oldestAt {
-				oldest, oldestAt = key, at
+	if _, exists := g.active[k]; !exists {
+		if g.ringUsed < activeTargetHardLimit {
+			g.ring[g.ringUsed] = k
+			g.ringUsed++
+		} else {
+			// Fixed FIFO-ish admission ring: every new one-shot target replaces
+			// exactly one old slot. This makes Touch O(1) even under an endless
+			// random-subdomain stream instead of scanning all 4096 entries on
+			// every insertion after saturation.
+			victim := g.ring[g.ringCursor]
+			delete(g.active, victim)
+			delete(g.dirty, victim)
+			g.ring[g.ringCursor] = k
+			g.ringCursor++
+			if g.ringCursor == activeTargetHardLimit {
+				g.ringCursor = 0
 			}
 		}
-		delete(g.active, oldest)
-		delete(g.dirty, oldest)
 	}
+	g.active[k] = lastUsed
+	g.dirty[k] = lastUsed
 	g.mu.Unlock()
 }
 
