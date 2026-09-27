@@ -324,9 +324,10 @@ type Smart struct {
 	suppressCount atomic.Int64
 	suppressLast  atomic.Int64
 
-	workMu      sync.Mutex
-	workWG      sync.WaitGroup
-	workClosing bool
+	workMu       sync.Mutex
+	workWG       sync.WaitGroup
+	workClosing  bool
+	statsSampler smartStatsSampler
 
 	lastTrafficActivity atomic.Int64
 	recoveryCursor      atomic.Uint64
@@ -2162,7 +2163,11 @@ func (s *Smart) admitConnectionStats(metadata *C.Metadata, err error, now int64)
 
 func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
-	connectionDuration int64, tcpStats *tcpstats.Stats, err error) {
+	connectionDuration int64, tcpStats *tcpstats.Stats, err error, sampleScale int64) {
+
+	if sampleScale <= 0 {
+		sampleScale = 1
+	}
 
 	if proxy.Type() == C.Compatible || proxy.Type() == C.Reject || proxy.Type() == C.Pass || proxy.Type() == C.RejectDrop {
 		return
@@ -2227,7 +2232,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	case err != nil:
 		atomicRecord.Add("failure", int64(1))
 	default:
-		atomicRecord.Add("success", int64(1))
+		atomicRecord.Add("success", sampleScale)
 		if asnNumber != "" && !smart.SharedASNs[asnNumber] {
 			if kind := smart.ClassifyTargetName(target); kind == smart.TargetKindRuleName || kind == smart.TargetKindService {
 				atomicRecord.AddASNEvidence(asnNumber)
@@ -2284,8 +2289,8 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	maxUploadRateKB := float64(maxUploadRate) / 1024.0
 	maxDownloadRateKB := float64(maxDownloadRate) / 1024.0
 
-	atomicRecord.Add("uploadTotal", uploadTotalMB)
-	atomicRecord.Add("downloadTotal", downloadTotalMB)
+	atomicRecord.Add("uploadTotal", uploadTotalMB*float64(sampleScale))
+	atomicRecord.Add("downloadTotal", downloadTotalMB*float64(sampleScale))
 
 	oldMaxUploadRate := atomicRecord.Get("maxUploadRate").(float64)
 	if maxUploadRateKB > oldMaxUploadRate {
@@ -2389,6 +2394,10 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error, markCloseFailure bool,
 ) bool {
+	sampleScale := s.sampleScale(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, connectionDuration, tcpStats, err)
+	if sampleScale == 0 {
+		return true
+	}
 	if !s.beginBackgroundWork() {
 		return false
 	}
@@ -2402,7 +2411,7 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
 			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
 		}
-		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err)
+		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err, sampleScale)
 	}
 	if !enqueueSmartStats(s.ctx, job) {
 		s.finishBackgroundWork()
