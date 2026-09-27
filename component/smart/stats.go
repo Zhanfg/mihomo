@@ -653,17 +653,29 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 	h := make(nodeWeightMinHeap, 0, limit)
 	heap.Init(&h)
 
+	liveCache := recordCache
 	for nodeName, data := range stats {
 		weight := 0.0
 		lastUsed := int64(0)
-		cacheKey := FormatDBKey(KeyTypeStats, config, group, target, nodeName)
 
 		// The live AtomicStatsRecord is already the source that recordConnectionStats
 		// updates before persistence. Reuse it when resident instead of decoding the
-		// same full JSON record again merely to read two fields.
-		if record, ok := recordCache.Get(cacheKey); ok && record != nil {
-			weight = record.GetWeight(weightType)
-			lastUsed = record.lastUsed.Load()
+		// same full JSON record again merely to read two fields. A Store can also be
+		// used by tests/tools before InitCache; in that case this optimization simply
+		// becomes the cold persisted-data path.
+		if liveCache != nil {
+			cacheKey := FormatDBKey(KeyTypeStats, config, group, target, nodeName)
+			if record, ok := liveCache.Get(cacheKey); ok && record != nil {
+				weight = record.GetWeight(weightType)
+				lastUsed = record.lastUsed.Load()
+			} else {
+				var record StatsRecord
+				if json.Unmarshal(data, &record) != nil || record.Weights == nil {
+					continue
+				}
+				weight = record.Weights[weightType]
+				lastUsed = record.LastUsed
+			}
 		} else {
 			var record StatsRecord
 			if json.Unmarshal(data, &record) != nil || record.Weights == nil {
