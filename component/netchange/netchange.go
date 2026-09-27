@@ -126,6 +126,14 @@ type scheduledHealthChecker interface {
 	ScheduleHealthCheck() bool
 }
 
+func requestScheduledHealthCheck(android bool, provider P.ProxyProvider) bool {
+	if !android || provider == nil {
+		return false
+	}
+	scheduler, ok := provider.(scheduledHealthChecker)
+	return ok && scheduler.ScheduleHealthCheck()
+}
+
 // recheckProviders keeps desktop's immediate compatibility behavior. Android
 // first requests the provider's own coalesced/background-aware scheduler; only
 // providers without an automatic health-check loop fall back to synchronous
@@ -146,10 +154,8 @@ func recheckProviders(ctx context.Context, source func() map[string]P.ProxyProvi
 			if ctx.Err() != nil {
 				return struct{}{}, nil
 			}
-			if runtime.GOOS == "android" {
-				if scheduler, ok := provider.(scheduledHealthChecker); ok && scheduler.ScheduleHealthCheck() {
-					return struct{}{}, nil
-				}
+			if requestScheduledHealthCheck(runtime.GOOS == "android", provider) {
+				return struct{}{}, nil
 			}
 			// Compatibility fallback for providers without an automatic health
 			// loop. This path remains serialized on Android.
