@@ -205,7 +205,7 @@ func TestCapabilityCacheSeparatesProxyIdentity(t *testing.T) {
 	b := stubProxy{name: "same", type_: C.Http, provider: "two"}
 	stateA := capabilityStateForProxy(a)
 	stateA.udp.mu.Lock()
-	stateA.udp.known, stateA.udp.ok, stateA.udp.expire = true, yes, time.Now().Add(time.Hour)
+	stateA.udp.known, stateA.udp.ok, stateA.udp.expire, stateA.udp.epoch = true, yes, time.Now().Add(time.Hour), netstate.CurrentEpoch()
 	stateA.udp.mu.Unlock()
 	stateB := capabilityStateForProxy(b)
 	stateB.udp.mu.Lock()
@@ -254,6 +254,7 @@ func TestIPFamilyRequirementsFailClosedAndWarmUp(t *testing.T) {
 		entry.ok = ok
 		entry.probing = probing
 		entry.expire = time.Now().Add(time.Hour)
+		entry.epoch = netstate.CurrentEpoch()
 		entry.mu.Unlock()
 	}
 
@@ -295,6 +296,7 @@ func TestIPv4PreferencePenalty(t *testing.T) {
 	state.ipv4.known = true
 	state.ipv4.ok = false
 	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
 	state.ipv4.mu.Unlock()
 
 	if got := CapabilityPenaltyExtended(p, false, true, false); got != capabilityMissingPenalty {
@@ -312,6 +314,7 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	state.ipv4.ok = true
 	state.ipv4.country = "JP"
 	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
 	state.ipv4.mu.Unlock()
 
 	state.ipv6.mu.Lock()
@@ -319,6 +322,7 @@ func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
 	state.ipv6.ok = true
 	state.ipv6.country = "US"
 	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.epoch = netstate.CurrentEpoch()
 	state.ipv6.mu.Unlock()
 
 	if known, country := ExitCountryForProxy(p, false); !known || country != "JP" {
@@ -381,6 +385,7 @@ func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
 	state.ipv4.ok = true
 	state.ipv4.exitIP = netip.MustParseAddr("1.1.1.1")
 	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
 	state.ipv4.mu.Unlock()
 
 	known, country := ExitCountryForProxy(p, false)
@@ -422,6 +427,7 @@ func TestAutoIPFamilyPenaltyStronglyDemotesConfirmedMismatch(t *testing.T) {
 	state.ipv6.known = true
 	state.ipv6.ok = false
 	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.epoch = netstate.CurrentEpoch()
 	state.ipv6.mu.Unlock()
 
 	got := AddAutoIPFamilyPenalty(80, p, true)
