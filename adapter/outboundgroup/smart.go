@@ -329,6 +329,7 @@ type Smart struct {
 	statsSampler smartStatsSampler
 
 	lastTrafficActivity atomic.Int64
+	maintenanceWake     chan struct{}
 	lastWinner          atomic.TypedValue[smartWinnerState]
 	lastEndToEnd        atomic.TypedValue[smartEndToEndState]
 	recoveryCursor      atomic.Uint64
@@ -1740,7 +1741,10 @@ func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.lastTrafficActivity.Store(time.Now().UnixNano())
+	s.maintenanceWake = make(chan struct{}, 1)
+	// Zero means no real traffic has occurred yet. Group maintenance stays
+	// parked until DialContext/ListenPacketContext reports actual use.
+	s.lastTrafficActivity.Store(0)
 	s.recoveryBackoff = make(map[string]hostRecoveryState)
 
 	if s.preferASN {
@@ -2923,6 +2927,14 @@ func hostRecoveryKey(wildcardTarget, nodeName, host string) string {
 
 func (s *Smart) markTrafficActivity() {
 	s.lastTrafficActivity.Store(time.Now().UnixNano())
+	if s.maintenanceWake == nil {
+		return
+	}
+	select {
+	case s.maintenanceWake <- struct{}{}:
+	default:
+		// Coalesce bursts: one pending wake is enough to re-arm maintenance.
+	}
 }
 
 func (s *Smart) maintenanceRecentlyActive(now time.Time) bool {
