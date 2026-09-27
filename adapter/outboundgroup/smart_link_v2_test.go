@@ -10,7 +10,7 @@ func TestStabilizeSmartOrderKeepsNearWinner(t *testing.T) {
 	names := []string{"new", "old", "third"}
 	weights := []float64{1.00, 0.91, 0.70}
 
-	stabilizeSmartOrder(names, weights, "old")
+	stabilizeSmartOrder(names, weights, "old", smartSwitchMargin)
 
 	if names[0] != "old" || weights[0] != 0.91 {
 		t.Fatalf("order=%v weights=%v, expected old winner to remain first", names, weights)
@@ -21,7 +21,7 @@ func TestStabilizeSmartOrderAllowsMaterialImprovement(t *testing.T) {
 	names := []string{"new", "old"}
 	weights := []float64{1.00, 0.75}
 
-	stabilizeSmartOrder(names, weights, "old")
+	stabilizeSmartOrder(names, weights, "old", smartSwitchMargin)
 
 	if names[0] != "new" {
 		t.Fatalf("order=%v, expected materially better node to win", names)
@@ -32,7 +32,7 @@ func TestStabilizeSmartOrderRejectsUnusableCurrent(t *testing.T) {
 	names := []string{"new", "old"}
 	weights := []float64{0.50, smart.AllowedWeight - 0.01}
 
-	stabilizeSmartOrder(names, weights, "old")
+	stabilizeSmartOrder(names, weights, "old", smartSwitchMargin)
 
 	if names[0] != "new" {
 		t.Fatalf("order=%v, unusable current winner must not be retained", names)
