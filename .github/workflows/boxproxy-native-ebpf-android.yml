@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - integration/boxproxy-native-ebpf
+      - opt/smart-link-v2
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
@@ -181,6 +182,7 @@ jobs:
           retention-days: 30
 
       - name: Publish rolling Android Smart eBPF prerelease
+        if: github.ref == 'refs/heads/integration/boxproxy-native-ebpf'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
