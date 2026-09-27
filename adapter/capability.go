@@ -287,7 +287,9 @@ func (s *capabilityState) warm(p C.Proxy, kind capabilityKind, attest bool) {
 // no longer probe every candidate. The egress family is corroborated by two
 // independent endpoints when possible; UDP is measured only for UDP traffic.
 func WarmProxyPath(p C.Proxy, isUDP, familyKnown, ipv6 bool) {
-	if p == nil {
+	if p == nil || (!familyKnown && !isUDP) {
+		// No address-family or UDP evidence can be improved for this flow.
+		// Avoid allocating/touching capability identity state on the hot path.
 		return
 	}
 	state := capabilityStateForProxy(p)
