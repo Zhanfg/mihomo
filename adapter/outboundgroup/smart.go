@@ -309,8 +309,6 @@ type Smart struct {
 	autoIPFamily    bool
 	country         string
 	countryAffinity bool
-	affinityMu      sync.Mutex
-	affinityCountry string
 	hostFailLimit   atomic.Int32
 	tolerance       uint16
 
@@ -789,9 +787,22 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	isUDP := metadata != nil && metadata.NetWork == C.UDP
 	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
 	adapter.WarmProxyPath(p, isUDP, knownFamily, ipv6)
-	s.rememberAffinityCountry(metadata, p)
+
 	target := metadata.SmartTarget
-	existing, _ := s.store.GetUnwrapResult(s.Name(), s.configName, target)
+	existing, _, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, target)
+
+	country := ""
+	if s.countryAffinity && s.country == "" && knownFamily {
+		// The actual winner is allowed to warm active evidence. Soft candidate
+		// ranking remains probe-free; this selected node is the one place where
+		// establishing measured egress identity is worth the radio/socket cost.
+		if known, measured := adapter.ExitCountryForProxy(p, ipv6); known {
+			country = strings.ToUpper(measured)
+		}
+		// Warm the sibling family in the background/cached capability layer so a
+		// later A/AAAA sibling flow can keep the same service in one country.
+		adapter.ExitCountryForProxy(p, !ipv6)
+	}
 
 	// A new winner steers the dials that come after it, and nothing else. This
 	// used to also close every connection in the bucket that was not on the
@@ -805,12 +816,16 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	// that has actually stopped carrying traffic.
 	switch {
 	case len(existing) == 0:
-		s.store.StoreUnwrapResult(s.Name(), s.configName, target, []C.Proxy{p})
+		s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
 	case existing[0] == p.Name():
-		// Unchanged: nothing to record.
+		// Same winner: enrich only this SmartTarget's live pin once measured
+		// country evidence becomes available.
+		if country != "" {
+			s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
+		}
 	default:
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, target)
-		s.store.StoreUnwrapResult(s.Name(), s.configName, target, []C.Proxy{p})
+		s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
 	}
 }
 
@@ -1002,7 +1017,7 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 	}
 
 	if s.selected != "" {
-		desiredCountry, strictCountry := s.desiredCountry()
+		desiredCountry, strictCountry := s.desiredCountry(metadata, proxies)
 		for _, p := range proxies {
 			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) &&
 				s.countryEligible(metadata, p, desiredCountry, strictCountry) {
@@ -1213,7 +1228,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"autoIPFamily":    s.autoIPFamily,
 		"country":         s.country,
 		"countryAffinity": s.countryAffinity,
-		"affinityCountry": s.currentAffinityCountry(),
+		"affinityScope":   "target",
 		"pathProfile":     pathProfile,
 		"endToEnd":        endToEnd,
 	})
@@ -1284,33 +1299,63 @@ func metadataIPFamily(metadata *C.Metadata) (known, ipv6 bool) {
 	return false, false
 }
 
-func (s *Smart) currentAffinityCountry() string {
-	s.affinityMu.Lock()
-	defer s.affinityMu.Unlock()
-	return s.affinityCountry
-}
-
-func (s *Smart) setAffinityCountry(country string) {
-	country = strings.ToUpper(strings.TrimSpace(country))
-	s.affinityMu.Lock()
-	s.affinityCountry = country
-	s.affinityMu.Unlock()
-}
-
 // desiredCountry returns the country constraint for this selection.
 //
-// Explicit country is strict. country-affinity is sticky and intentionally
-// constant-time on the hot path: we do not scan the whole provider on every
-// connection. If the pinned country yields no eligible node, filterProxies
-// clears it once and retries selection without the pin.
-func (s *Smart) desiredCountry() (country string, strict bool) {
+// Explicit country is strict. country-affinity is scoped to SmartTarget and
+// reuses the existing unwrap LRU. Reads are cache-only so soft selection never
+// turns one ranking pass into an all-node active-probe storm.
+func (s *Smart) desiredCountry(metadata *C.Metadata, all []C.Proxy) (country string, strict bool) {
 	if s.country != "" {
 		return s.country, true
 	}
-	if !s.countryAffinity {
+	if !s.countryAffinity || metadata == nil || metadata.SmartTarget == "" {
 		return "", false
 	}
-	return s.currentAffinityCountry(), false
+
+	names, pinnedCountry, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, metadata.SmartTarget)
+	if pinnedCountry != "" {
+		return strings.ToUpper(pinnedCountry), false
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+
+	p := s.proxyIndexFor(all)[names[0]]
+	if p == nil {
+		return "", false
+	}
+
+	// Prefer the opposite family's already measured country on A/AAAA sibling
+	// transitions. If it has not been measured yet, use the current family's
+	// cached evidence. The selected winner's adopt path owns active warming.
+	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
+		if known, measured := adapter.CachedExitCountryForProxy(p, !ipv6); known && measured != "" {
+			country = strings.ToUpper(measured)
+			s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, metadata.SmartTarget, []C.Proxy{p}, country)
+			return country, false
+		}
+		if known, measured := adapter.CachedExitCountryForProxy(p, ipv6); known && measured != "" {
+			country = strings.ToUpper(measured)
+			s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, metadata.SmartTarget, []C.Proxy{p}, country)
+			return country, false
+		}
+		return "", false
+	}
+
+	known4, country4 := adapter.CachedExitCountryForProxy(p, false)
+	known6, country6 := adapter.CachedExitCountryForProxy(p, true)
+	switch {
+	case known4 && known6 && strings.EqualFold(country4, country6):
+		country = strings.ToUpper(country4)
+	case known4:
+		country = strings.ToUpper(country4)
+	case known6:
+		country = strings.ToUpper(country6)
+	}
+	if country != "" {
+		s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, metadata.SmartTarget, []C.Proxy{p}, country)
+	}
+	return country, false
 }
 
 func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
@@ -1340,19 +1385,6 @@ func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string,
 		return false
 	}
 	return !known4 || !known6
-}
-
-func (s *Smart) rememberAffinityCountry(metadata *C.Metadata, p C.Proxy) {
-	if p == nil || !s.countryAffinity || s.country != "" || s.currentAffinityCountry() != "" {
-		return
-	}
-	knownFamily, ipv6 := metadataIPFamily(metadata)
-	if !knownFamily {
-		return
-	}
-	if known, country := adapter.ExitCountryForProxy(p, ipv6); known && country != "" {
-		s.setAffinityCountry(country)
-	}
 }
 
 func (s *Smart) ipFamilyPolicy(metadata *C.Metadata) (preferIPv4, preferIPv6, autoIPv4, autoIPv6 bool) {
@@ -1397,7 +1429,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// lack the destination family must not keep winning merely because it was
 	// selected for the same target before an A/AAAA family change.
 	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
-	desiredCountry, strictCountry := s.desiredCountry()
+	desiredCountry, strictCountry := s.desiredCountry(metadata, all)
 	familyEligible := func(p C.Proxy) bool {
 		return s.ipFamilyEligible(metadata, p) && s.countryEligible(metadata, p, desiredCountry, strictCountry)
 	}
@@ -1553,11 +1585,11 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	}
 
 	if len(selected) == 0 && desiredCountry != "" && !strictCountry && s.countryAffinity {
-		// The sticky country is no longer usable for this family. Clear it and
-		// retry exactly once without a country pin; the successful winner will
-		// establish the next affinity country.
-		s.setAffinityCountry("")
-		return s.filterProxies(metadata, wildcardTarget, names, weights, all, minCount, isUDP)
+		// Only this service target loses its affinity when the recorded country
+		// has no viable node for the requested family. Other SmartTargets keep
+		// their own pins and measured countries.
+		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+		return s.filterProxies(metadata, wildcardTarget, nil, nil, all, minCount, isUDP)
 	}
 
 	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || strictCountry) {
@@ -1601,7 +1633,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	}
 
 	if s.selected != "" {
-		desiredCountry, strictCountry := s.desiredCountry()
+		desiredCountry, strictCountry := s.desiredCountry(metadata, proxies)
 		for _, p := range proxies {
 			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) &&
 				s.countryEligible(metadata, p, desiredCountry, strictCountry) {
