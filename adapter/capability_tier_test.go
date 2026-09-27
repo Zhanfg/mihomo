@@ -475,3 +475,59 @@ func TestCachedExitCountryIsProbeFree(t *testing.T) {
 		t.Fatalf("fresh cached country = (%v, %q), want (true, JP)", known, country)
 	}
 }
+
+
+func TestCachedIPFamilyCapabilityKnownNeverStartsProbe(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool {
+		capabilityCache.Delete(k)
+		return true
+	})
+	p := stub("cached-family-passive")
+	state := capabilityStateForProxy(p)
+
+	known, ok := CachedIPFamilyCapabilityKnown(p, false)
+	if known || ok {
+		t.Fatalf("unknown cache returned known=%v ok=%v", known, ok)
+	}
+	state.ipv4.mu.Lock()
+	probing := state.ipv4.probing
+	state.ipv4.mu.Unlock()
+	if probing {
+		t.Fatal("probe-free cached family lookup started active probing")
+	}
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	known, ok = CachedIPFamilyCapabilityKnown(p, false)
+	if !known || !ok {
+		t.Fatalf("fresh positive cache returned known=%v ok=%v", known, ok)
+	}
+}
+
+func TestCachedIPFamilyCapabilityKnownRejectsPreviousEpoch(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool {
+		capabilityCache.Delete(k)
+		return true
+	})
+	p := stub("cached-family-epoch")
+	state := capabilityStateForProxy(p)
+	oldEpoch := netstate.CurrentEpoch()
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = false
+	state.ipv6.epoch = oldEpoch
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.mu.Unlock()
+
+	netstate.Advance()
+	known, _ := CachedIPFamilyCapabilityKnown(p, true)
+	if known {
+		t.Fatal("previous-network family verdict must not survive the epoch transition")
+	}
+}
