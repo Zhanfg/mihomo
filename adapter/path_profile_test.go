@@ -61,3 +61,26 @@ func TestPathProfileConfidenceRewardsCorroboratedEgress(t *testing.T) {
 		t.Fatalf("confidence=%v, expected corroborated evidence", profile.Confidence)
 	}
 }
+
+
+func TestUnavailableUDPDoesNotExposeOldMapping(t *testing.T) {
+	p := stub("udp-old-mapping")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+
+	state.udp.mu.Lock()
+	state.udp.known = true
+	state.udp.ok = false
+	state.udp.epoch = epoch
+	state.udp.expire = time.Now().Add(time.Hour)
+	state.udp.exitIP = netip.MustParseAddr("203.0.113.44")
+	state.udp.mu.Unlock()
+
+	profile := PathProfileForProxy(p, false)
+	if !profile.UDPKnown || profile.UDPAvailable {
+		t.Fatalf("unexpected UDP verdict: known=%v available=%v", profile.UDPKnown, profile.UDPAvailable)
+	}
+	if profile.UDPEgressIP.IsValid() {
+		t.Fatalf("failed UDP probe exposed stale mapping %v", profile.UDPEgressIP)
+	}
+}
