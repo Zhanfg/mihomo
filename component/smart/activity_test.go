@@ -1,6 +1,9 @@
 package smart
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 func TestActiveTargetIndexIsIncrementalAndDirty(t *testing.T) {
 	store := &Store{}
@@ -38,5 +41,24 @@ func TestActiveTargetIndexClearsByGroup(t *testing.T) {
 	clearTargetActivity("group", config, group)
 	if got := store.GetActiveTargets(group, config, 8); len(got) != 0 {
 		t.Fatalf("active after clear=%+v", got)
+	}
+}
+
+
+func TestActiveTargetIndexStaysBoundedAfterSaturation(t *testing.T) {
+	store := &Store{}
+	group, config := "g-cap", "c-cap"
+	clearTargetActivity("group", config, group)
+
+	for i := 0; i < activeTargetHardLimit+512; i++ {
+		store.TouchActiveTarget(group, config, fmt.Sprintf("host-%d.example", i), false, int64(i+1))
+	}
+
+	active := store.GetActiveTargets(group, config, activeTargetHardLimit+1024)
+	if len(active) != activeTargetHardLimit {
+		t.Fatalf("active len=%d want=%d", len(active), activeTargetHardLimit)
+	}
+	if active[0].Target != fmt.Sprintf("host-%d.example", activeTargetHardLimit+511) {
+		t.Fatalf("newest target missing: %+v", active[0])
 	}
 }
