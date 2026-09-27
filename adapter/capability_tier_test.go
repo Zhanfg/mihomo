@@ -446,3 +446,32 @@ func TestAutoIPFamilyPenaltyStronglyDemotesConfirmedMismatch(t *testing.T) {
 		t.Fatalf("unknown IPv6 delay=%d, want %d", got, 80+autoFamilyUnknownPenalty)
 	}
 }
+
+
+func TestCachedExitCountryIsProbeFree(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("cached-country")
+	state := capabilityStateForProxy(p)
+
+	if known, country := CachedExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("empty cached country = (%v, %q), want unknown", known, country)
+	}
+	state.ipv4.mu.Lock()
+	probing := state.ipv4.probing
+	state.ipv4.mu.Unlock()
+	if probing {
+		t.Fatal("cached country lookup must not schedule an active probe")
+	}
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.mu.Unlock()
+
+	if known, country := CachedExitCountryForProxy(p, false); !known || country != "JP" {
+		t.Fatalf("fresh cached country = (%v, %q), want (true, JP)", known, country)
+	}
+}
