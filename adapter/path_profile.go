@@ -127,24 +127,32 @@ func TunnelPathFactorForProxy(p C.Proxy) float64 {
 
 func egressPathSnapshot(entry *capabilityEntry, ipv6 bool, now time.Time, epoch uint64) EgressPathProfile {
 	entry.mu.Lock()
+	freshIdentity := entry.known && entry.ok &&
+		entry.epoch == epoch && now.Before(entry.expire) && entry.exitIP.IsValid()
 	profile := EgressPathProfile{
-		Known:      entry.known && entry.ok,
-		Fresh:      entry.known && entry.ok && entry.epoch == epoch && now.Before(entry.expire),
-		IP:         entry.exitIP,
-		IPv6:       ipv6,
-		Country:    entry.country,
-		ASN:        entry.asn,
-		ASNOrg:     entry.asnOrg,
-		Sources:    entry.sources,
-		Consistent: entry.consistent,
-		Divergent:  entry.sources >= 2 && !entry.consistent,
-		ExpiresAt:  entry.expire,
+		Known:     freshIdentity,
+		Fresh:     freshIdentity,
+		IPv6:      ipv6,
+		ExpiresAt: entry.expire,
+	}
+	if freshIdentity {
+		profile.IP = entry.exitIP
+		profile.Country = entry.country
+		profile.ASN = entry.asn
+		profile.ASNOrg = entry.asnOrg
+		profile.Sources = entry.sources
+		profile.Consistent = entry.consistent
+		profile.Divergent = entry.sources >= 2 && !entry.consistent
 	}
 	entry.mu.Unlock()
 
-	if !profile.IP.IsValid() {
+	// EgressPathProfile represents current identity, not last-known history.
+	// Stale/previous-epoch values stay in the internal capability cache only as
+	// refresh context and are never surfaced or counted as current evidence.
+	if !profile.Known {
 		return profile
 	}
+
 	if profile.Country == "" {
 		if codes, err := mmdb.LookupCodeOptional(C.Path.MMDB(), profile.IP.AsSlice()); err == nil && len(codes) > 0 {
 			profile.Country = codes[0]
@@ -157,7 +165,7 @@ func egressPathSnapshot(entry *capabilityEntry, ipv6 bool, now time.Time, epoch 
 	}
 	if profile.Country != "" || profile.ASN != "" {
 		entry.mu.Lock()
-		if entry.exitIP == profile.IP {
+		if entry.exitIP == profile.IP && entry.epoch == epoch {
 			if profile.Country != "" {
 				entry.country = profile.Country
 			}
