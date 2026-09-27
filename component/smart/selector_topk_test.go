@@ -6,6 +6,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/metacubex/mihomo/common/lru"
 )
 
 func encodedRankRecord(t *testing.T, weight float64, lastUsed int64) []byte {
@@ -27,7 +29,7 @@ func TestRankTargetStatsKeepsOnlyTopK(t *testing.T) {
 		stats[fmt.Sprintf("node-%03d", i)] = encodedRankRecord(t, float64(i+1), now)
 	}
 
-	got := rankTargetStats(stats, false, 10, now)
+	got := (&Store{}).rankTargetStats("g", "c", "t", stats, false, 10, now)
 	if len(got) != 10 {
 		t.Fatalf("len=%d, want 10", len(got))
 	}
@@ -43,17 +45,38 @@ func TestRankTargetStatsTieBreakIsStable(t *testing.T) {
 		"a": encodedRankRecord(t, 1, now),
 		"m": encodedRankRecord(t, 1, now),
 	}
-	got := rankTargetStats(stats, false, 2, now)
+	got := (&Store{}).rankTargetStats("g", "c", "t", stats, false, 2, now)
 	if len(got) != 2 || got[0].Node != "a" || got[1].Node != "m" {
 		t.Fatalf("got=%+v", got)
 	}
 }
 
 func BenchmarkRankTargetStatsTop10(b *testing.B) {
-	stats, now := benchmarkRankDataset(b)
+	stats, now := benchmarkRankDatasetN(b, 1000)
+	store := &Store{}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = rankTargetStats(stats, false, 10, now)
+		_ = store.rankTargetStats("bench", "cfg", "target", stats, false, 10, now)
+	}
+}
+
+func BenchmarkRankTargetStatsHotAtomic128(b *testing.B) {
+	InitCache()
+	stats, now := benchmarkRankDatasetN(b, 128)
+	store := &Store{}
+	for i := 0; i < 128; i++ {
+		node := fmt.Sprintf("node-%04d", i)
+		cacheKey := FormatDBKey(KeyTypeStats, "cfg-hot", "bench-hot", "target-hot", node)
+		record := &AtomicStatsRecord{
+			weights: lru.New[string, float64](lru.WithSize[string, float64](8)),
+		}
+		record.lastUsed.Store(now)
+		record.SetWeight(WeightTypeTCP, float64((i%97)+1)/97)
+		recordCache.Set(cacheKey, record)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = store.rankTargetStats("bench-hot", "cfg-hot", "target-hot", stats, false, 10, now)
 	}
 }
 
@@ -88,11 +111,11 @@ func rankTargetStatsFullSortBaseline(stats map[string][]byte, isUDP bool, now in
 	return all
 }
 
-func benchmarkRankDataset(b *testing.B) (map[string][]byte, int64) {
+func benchmarkRankDatasetN(b *testing.B, count int) (map[string][]byte, int64) {
 	b.Helper()
 	now := time.Now().Unix()
-	stats := make(map[string][]byte, 1000)
-	for i := 0; i < 1000; i++ {
+	stats := make(map[string][]byte, count)
+	for i := 0; i < count; i++ {
 		data, _ := json.Marshal(StatsRecord{
 			LastUsed: now,
 			Weights: map[string]float64{WeightTypeTCP: float64((i%97)+1) / 97},
@@ -103,7 +126,7 @@ func benchmarkRankDataset(b *testing.B) (map[string][]byte, int64) {
 }
 
 func BenchmarkRankTargetStatsFullSortBaseline(b *testing.B) {
-	stats, now := benchmarkRankDataset(b)
+	stats, now := benchmarkRankDatasetN(b, 1000)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = rankTargetStatsFullSortBaseline(stats, false, now)
