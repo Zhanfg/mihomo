@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - integration/boxproxy-native-ebpf
+      - feature/per-target-country-affinity
     paths:
       - ".github/workflows/boxproxy-native-ebpf-fast.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
