@@ -7,6 +7,15 @@ type Stats struct {
 	BytesRetrans uint64
 	SegsOut      uint64
 	RetransSegs  uint64
+
+	// Linux TCP_INFO exposes these without extra probe traffic. They let Smart
+	// distinguish a genuinely weak path from a merely slow application server.
+	RTTUsec    uint32
+	RTTVarUsec uint32
+	RTOUsec    uint32
+	Unacked    uint32
+	Lost       uint32
+	Cwnd       uint32
 }
 
 func (s *Stats) LossRate() float64 {
