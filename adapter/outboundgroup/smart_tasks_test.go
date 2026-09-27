@@ -503,3 +503,107 @@ func TestSmartActivitySignalsDoNotPostponeDueMaintenance(t *testing.T) {
 		t.Fatal("run-once activity schedule did not finish")
 	}
 }
+
+
+func TestTrafficDrivenSweepDoesNothingWithoutTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	activity := make(chan struct{}, 1)
+	var active atomic.Bool
+	var sweeps atomic.Int32
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runTrafficDrivenSweep(ctx, activity, active.Load, func() {
+			sweeps.Add(1)
+		}, 5*time.Millisecond, 8*time.Millisecond)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	if got := sweeps.Load(); got != 0 {
+		t.Fatalf("idle stalled sweep ran %d times", got)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle stalled sweep did not stop")
+	}
+}
+
+func TestTrafficDrivenSweepChecksShortBurstOnceThenParks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	activity := make(chan struct{}, 1)
+	var active atomic.Bool
+	var sweeps atomic.Int32
+	ran := make(chan struct{}, 4)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runTrafficDrivenSweep(ctx, activity, active.Load, func() {
+			sweeps.Add(1)
+			ran <- struct{}{}
+		}, 5*time.Millisecond, 8*time.Millisecond)
+	}()
+
+	// The activity edge remains meaningful even if the one-second rate sampler
+	// has already gone quiet before the stall deadline arrives.
+	activity <- struct{}{}
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("short traffic burst did not trigger delayed stalled sweep")
+	}
+
+	time.Sleep(25 * time.Millisecond)
+	if got := sweeps.Load(); got != 1 {
+		t.Fatalf("short burst kept periodic sweep alive: %d runs", got)
+	}
+	cancel()
+	<-done
+}
+
+func TestTrafficDrivenSweepKeepsCadenceOnlyWhileTrafficActive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	activity := make(chan struct{}, 1)
+	var active atomic.Bool
+	active.Store(true)
+	ran := make(chan struct{}, 8)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runTrafficDrivenSweep(ctx, activity, active.Load, func() {
+			ran <- struct{}{}
+		}, 5*time.Millisecond, 8*time.Millisecond)
+	}()
+
+	activity <- struct{}{}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ran:
+		case <-time.After(time.Second):
+			t.Fatal("continuous traffic did not keep stalled sweep cadence")
+		}
+	}
+
+	active.Store(false)
+	// The already-armed next check runs once, observes quiet, then parks.
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("final quiet-transition sweep did not run")
+	}
+	select {
+	case <-ran:
+		t.Fatal("stalled sweep kept ticking after traffic became idle")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	cancel()
+	<-done
+}

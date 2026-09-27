@@ -421,6 +421,111 @@ func runSmartActivityTaskSchedule(
 	}
 }
 
+// runTrafficDrivenSweep replaces a permanent periodic ticker with a traffic
+// edge plus a timer that exists only while useful. A short burst gets one
+// delayed sweep after stalledReplyAfter; continuous traffic keeps the historic
+// stalledSweepInterval cadence. Once the core has one quiet rate interval, the
+// loop parks until the next idle->active edge.
+//
+// Activity received while the timer is already armed is drained without
+// resetting the deadline, so continuous bursts cannot postpone recovery.
+func runTrafficDrivenSweep(
+	ctx context.Context,
+	activity <-chan struct{},
+	active func() bool,
+	sweep func(),
+	firstDelay, interval time.Duration,
+) {
+	if firstDelay <= 0 {
+		firstDelay = time.Millisecond
+	}
+	if interval <= 0 {
+		interval = firstDelay
+	}
+
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	for {
+		paused, changed := power.BackgroundState()
+		if paused {
+			select {
+			case <-ctx.Done():
+				return
+			case <-changed:
+				continue
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+			continue
+		case <-activity:
+		}
+
+		delay := firstDelay
+	activeBurst:
+		for {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(delay)
+
+		waitDeadline:
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-activity:
+					// Keep the original deadline: more traffic strengthens the
+					// reason to sweep, it must not postpone the sweep.
+					continue waitDeadline
+				case <-changed:
+					if paused, _ := power.BackgroundState(); paused {
+						if !timer.Stop() {
+							select {
+							case <-timer.C:
+							default:
+							}
+						}
+						break activeBurst
+					}
+					continue waitDeadline
+				case <-timer.C:
+					break waitDeadline
+				}
+			}
+
+			if paused, _ := power.BackgroundState(); paused {
+				break
+			}
+			sweep()
+			if !active() {
+				// One sweep after a short burst is enough to catch exactly the
+				// "sent and never answered" shape. A later burst publishes a
+				// fresh edge and re-arms us.
+				break
+			}
+			delay = interval
+		}
+	}
+}
+
 func smartTaskJitter() time.Duration {
 	return time.Duration(rand.Float64() * 30 * float64(time.Second))
 }
@@ -559,15 +664,25 @@ func (r *smartGlobalTaskRun) admitGroupsByName() map[string][]*Smart {
 
 func (r *smartGlobalTaskRun) start() {
 	tasks := []smartScheduledTask{
-		{stalledSweepInterval, stalledSweepInterval, "Global stalled connections sweep", r.closeStalledConnections, false},
 		{5 * time.Minute, cleanupInterval, "Global orphaned groups clean up", r.cleanupOrphanedGroups, false},
 		{5 * time.Second, cacheParamAdjustInterval, "Global cache parameters adjustment", r.store.AdjustCacheParameters, false},
 		{5 * time.Minute, flushQueueInterval, "Global queues flush", func() { r.store.FlushQueue(true) }, false},
 	}
-	r.wg.Add(1)
+	r.wg.Add(2)
 	go func() {
 		defer r.wg.Done()
 		runSmartTaskSchedule(r.ctx, tasks, func() bool { return tunnel.Status() == tunnel.Running }, smartTaskReadyPollInterval, smartTaskJitter)
+	}()
+	go func() {
+		defer r.wg.Done()
+		runTrafficDrivenSweep(
+			r.ctx,
+			statistic.DefaultManager.TrafficWake(),
+			statistic.DefaultManager.TrafficActive,
+			r.closeStalledConnections,
+			stalledReplyAfter,
+			stalledSweepInterval,
+		)
 	}()
 }
 

@@ -142,3 +142,25 @@ func TestRateSamplerConcurrentWakeCannotLoseBytes(t *testing.T) {
 
 	stopRateLoop(t, stop, done)
 }
+
+
+func TestTrafficWakeIsOneEdgePerActiveBurst(t *testing.T) {
+	m := &Manager{}
+	wake := m.TrafficWake()
+
+	m.PushUploaded(1)
+	select {
+	case <-wake:
+	case <-time.After(time.Second):
+		t.Fatal("first traffic did not publish activity edge")
+	}
+
+	// Without a quiet transition the sampler is already active, so another
+	// packet must not turn the maintenance channel into a per-packet queue.
+	m.PushDownloaded(1)
+	select {
+	case <-wake:
+		t.Fatal("continuous traffic published a second activity edge")
+	case <-time.After(20 * time.Millisecond):
+	}
+}

@@ -43,9 +43,10 @@ type Manager struct {
 	// while the core was completely idle. rateWake is a single coalesced edge:
 	// the first byte after an idle period arms sampling; sustained traffic keeps
 	// the loop active without one signal per packet.
-	rateInit   sync.Once
-	rateWake   chan struct{}
-	rateActive atomic.Bool
+	rateInit    sync.Once
+	rateWake    chan struct{}
+	trafficWake chan struct{}
+	rateActive  atomic.Bool
 }
 
 func (m *Manager) Join(c Tracker) {
@@ -90,6 +91,7 @@ func (m *Manager) PushDownloaded(size int64) {
 func (m *Manager) ensureRateWake() chan struct{} {
 	m.rateInit.Do(func() {
 		m.rateWake = make(chan struct{}, 1)
+		m.trafficWake = make(chan struct{}, 1)
 	})
 	return m.rateWake
 }
@@ -106,6 +108,25 @@ func (m *Manager) wakeRateLoop() {
 	default:
 		// A queued wake already represents the same active edge.
 	}
+	select {
+	case m.trafficWake <- struct{}{}:
+	default:
+		// Consumers need only one idle->active edge, not one event per byte.
+	}
+}
+
+// TrafficWake reports the first real traffic after the rate sampler had parked.
+// It is a coalesced edge for low-frequency maintenance such as stalled-flow
+// recovery; it is deliberately not a per-packet notification.
+func (m *Manager) TrafficWake() <-chan struct{} {
+	m.ensureRateWake()
+	return m.trafficWake
+}
+
+// TrafficActive reports whether the rate sampler still observes continuous
+// traffic. It becomes false after one quiet sampling interval.
+func (m *Manager) TrafficActive() bool {
+	return m.rateActive.Load()
 }
 
 func (m *Manager) Now() (up int64, down int64) {
