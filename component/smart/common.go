@@ -833,6 +833,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 	}
 
 	s.clearCache(level, config, group)
+	clearTargetActivity(level, config, group)
 
 	if level == "all" {
 		s.DBBatchDeletePrefix([]string{"smart"}, false)
