@@ -340,3 +340,166 @@ func TestSmartTaskScheduleRunsWhatCameDueWhilePaused(t *testing.T) {
 		t.Fatal("scheduler did not stop")
 	}
 }
+
+
+func TestSmartActivityScheduleStaysParkedWithoutTraffic(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	activity := make(chan struct{}, 1)
+	var activeUntil atomic.Int64
+	var runs atomic.Int32
+	done := make(chan struct{})
+
+	recent := func(now time.Time) bool {
+		return now.UnixNano() < activeUntil.Load()
+	}
+	go func() {
+		defer close(done)
+		runSmartActivityTaskSchedule(
+			ctx,
+			[]smartScheduledTask{{
+				initialDelay: time.Millisecond,
+				interval:     5 * time.Millisecond,
+				name:         "idle",
+				run:          func() { runs.Add(1) },
+			}},
+			func() bool { return true },
+			recent,
+			activity,
+			time.Millisecond,
+			func() time.Duration { return 0 },
+		)
+	}()
+
+	time.Sleep(30 * time.Millisecond)
+	if got := runs.Load(); got != 0 {
+		t.Fatalf("idle activity scheduler ran %d tasks without traffic", got)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("idle activity scheduler did not stop")
+	}
+}
+
+func TestSmartActivityScheduleWakesOnTrafficAndParksAgain(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	activity := make(chan struct{}, 1)
+	var activeUntil atomic.Int64
+	var runs atomic.Int32
+	ran := make(chan struct{}, 16)
+	done := make(chan struct{})
+
+	recent := func(now time.Time) bool {
+		return now.UnixNano() < activeUntil.Load()
+	}
+	go func() {
+		defer close(done)
+		runSmartActivityTaskSchedule(
+			ctx,
+			[]smartScheduledTask{{
+				initialDelay: time.Millisecond,
+				interval:     5 * time.Millisecond,
+				name:         "active",
+				run: func() {
+					runs.Add(1)
+					select {
+					case ran <- struct{}{}:
+					default:
+					}
+				},
+			}},
+			func() bool { return true },
+			recent,
+			activity,
+			time.Millisecond,
+			func() time.Duration { return 0 },
+		)
+	}()
+
+	// Let the task become overdue while completely parked.
+	time.Sleep(15 * time.Millisecond)
+	activeUntil.Store(time.Now().Add(35 * time.Millisecond).UnixNano())
+	activity <- struct{}{}
+
+	select {
+	case <-ran:
+	case <-time.After(time.Second):
+		t.Fatal("real traffic did not wake overdue maintenance")
+	}
+
+	// Once the activity window expires, no more group task executions occur.
+	time.Sleep(50 * time.Millisecond)
+	before := runs.Load()
+	time.Sleep(30 * time.Millisecond)
+	if after := runs.Load(); after != before {
+		t.Fatalf("scheduler kept running after activity expired: before=%d after=%d", before, after)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("activity scheduler did not stop")
+	}
+}
+
+func TestSmartActivitySignalsDoNotPostponeDueMaintenance(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	activity := make(chan struct{}, 1)
+	var activeUntil atomic.Int64
+	activeUntil.Store(time.Now().Add(time.Second).UnixNano())
+	ran := make(chan struct{}, 1)
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		runSmartActivityTaskSchedule(
+			ctx,
+			[]smartScheduledTask{{
+				initialDelay: 15 * time.Millisecond,
+				interval:     time.Hour,
+				name:         "deadline",
+				runOnce:      true,
+				run:          func() { ran <- struct{}{} },
+			}},
+			func() bool { return true },
+			func(now time.Time) bool { return now.UnixNano() < activeUntil.Load() },
+			activity,
+			time.Millisecond,
+			func() time.Duration { return 0 },
+		)
+	}()
+
+	spamDone := make(chan struct{})
+	go func() {
+		defer close(spamDone)
+		for i := 0; i < 20; i++ {
+			select {
+			case activity <- struct{}{}:
+			default:
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-ran:
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("traffic signals kept postponing a due maintenance task")
+	}
+	<-spamDone
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("run-once activity schedule did not finish")
+	}
+}
