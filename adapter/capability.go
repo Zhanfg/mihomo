@@ -651,6 +651,28 @@ func IPFamilyRequirementsMet(p C.Proxy, requireIPv4, requireIPv6, allowUnknown b
 	return !requireIPv6 || check(capabilityIPv6)
 }
 
+// CachedIPFamilyCapabilityKnown returns only fresh evidence from the current
+// network epoch. It never schedules a probe and is intended for soft ranking,
+// stale-pin rejection and other multi-candidate hot paths.
+func CachedIPFamilyCapabilityKnown(p C.Proxy, ipv6 bool) (known, ok bool) {
+	if p == nil {
+		return false, false
+	}
+	state := capabilityStateForProxy(p)
+	kind := capabilityIPv4
+	if ipv6 {
+		kind = capabilityIPv6
+	}
+	switch state.cachedState(kind) {
+	case capYes:
+		return true, true
+	case capNo:
+		return true, false
+	default:
+		return false, false
+	}
+}
+
 // IPFamilyCapabilityKnown reports the current cached family verdict and also
 // schedules a refresh when it is absent/stale. It is mainly intended for
 // diagnostics and group policy code.
