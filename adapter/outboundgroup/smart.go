@@ -719,6 +719,8 @@ func stabilizeSmartOrder(names []string, weights []float64, current string) {
 }
 
 func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	adapter.WarmProxyPath(p, metadata != nil && metadata.NetWork == C.UDP, knownFamily, ipv6)
 	s.rememberAffinityCountry(metadata, p)
 	target := metadata.SmartTarget
 	existing, _ := s.store.GetUnwrapResult(s.Name(), s.configName, target)
