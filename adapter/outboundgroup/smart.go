@@ -1361,133 +1361,121 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	hasPriority := len(s.policyPriority) > 0
 
-	type sortKey struct {
+	type rankedCandidate struct {
+		proxy  C.Proxy
 		delay  uint16
 		factor float64
 		index  int
 	}
-	allKeys := make(map[string]sortKey, len(all))
-	for i, p := range all {
-		name := p.Name()
-		// Capability preferences demote a node here rather than removing it
-		// from the pool, so a failed UDP / IPv6 probe costs a node its rank
-		// but never its availability.
-		delay := adapter.AddCapabilityPenaltyExtended(
-			p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
-		if autoIPv4 {
-			delay = adapter.AddAutoIPFamilyPenalty(delay, p, false)
-		} else if autoIPv6 {
-			delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
+
+	betterCandidate := func(a, b rankedCandidate) bool {
+		if hasPriority && a.factor != b.factor {
+			return a.factor > b.factor
 		}
-		k := sortKey{
-			delay: delay,
-			index: i,
+		if s.tolerance > 0 {
+			var diff uint16
+			if a.delay > b.delay {
+				diff = a.delay - b.delay
+			} else {
+				diff = b.delay - a.delay
+			}
+			if diff <= s.tolerance {
+				return a.index < b.index
+			}
 		}
-		if hasPriority {
-			k.factor = s.getPriorityFactor(name)
+		if a.delay != b.delay {
+			return a.delay < b.delay
 		}
-		allKeys[adapter.ProxyIdentity(p)] = k
+		return a.index < b.index
 	}
 
-	defaultSort := func(proxies []C.Proxy) []C.Proxy {
-		sort.SliceStable(proxies, func(i, j int) bool {
-			ni, nj := adapter.ProxyIdentity(proxies[i]), adapter.ProxyIdentity(proxies[j])
-			ki, kj := allKeys[ni], allKeys[nj]
-			if hasPriority && ki.factor != kj.factor {
-				return ki.factor > kj.factor
+	// topCandidates performs bounded insertion selection. Smart never consumes
+	// more than minCount candidates (normally maxSelected=10), so sorting every
+	// provider member is wasted work. This keeps O(K) candidate memory and
+	// O(N*K) comparisons; with fixed K<=10 the hot path is linear in provider
+	// size while preserving the existing priority/tolerance ordering.
+	topCandidates := func(limit int, accept func(C.Proxy) bool) []C.Proxy {
+		if limit <= 0 {
+			return nil
+		}
+		ranked := make([]rankedCandidate, 0, limit)
+		for index, p := range all {
+			if !accept(p) {
+				continue
 			}
-			// Tolerance: delays within tolerance are treated as equal, preventing jitter
-			if s.tolerance > 0 {
-				var diff uint16
-				if ki.delay > kj.delay {
-					diff = ki.delay - kj.delay
-				} else {
-					diff = kj.delay - ki.delay
+			delay := adapter.AddCapabilityPenaltyExtended(
+				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
+			if autoIPv4 {
+				delay = adapter.AddAutoIPFamilyPenalty(delay, p, false)
+			} else if autoIPv6 {
+				delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
+			}
+			candidate := rankedCandidate{proxy: p, delay: delay, index: index}
+			if hasPriority {
+				candidate.factor = s.getPriorityFactor(p.Name())
+			}
+
+			insertAt := len(ranked)
+			for i := range ranked {
+				if betterCandidate(candidate, ranked[i]) {
+					insertAt = i
+					break
 				}
-				if diff <= s.tolerance {
-					return ki.index < kj.index
-				}
 			}
-			if ki.delay != kj.delay {
-				return ki.delay < kj.delay
+			if insertAt >= limit {
+				continue
 			}
-			return ki.index < kj.index
+			if len(ranked) < limit {
+				ranked = append(ranked, rankedCandidate{})
+			}
+			copy(ranked[insertAt+1:], ranked[insertAt:len(ranked)-1])
+			ranked[insertAt] = candidate
+		}
+
+		result := make([]C.Proxy, len(ranked))
+		for i := range ranked {
+			result[i] = ranked[i].proxy
+		}
+		return result
+	}
+
+	need := minCount - len(selected)
+	if need > 0 {
+		topUp := topCandidates(need, func(p C.Proxy) bool {
+			name := p.Name()
+			if checkNodeUsed[adapter.ProxyIdentity(p)] || excludedForHost(wtFailNodes, wtBlocked, name) || blockedNodes[name] {
+				return false
+			}
+			return p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p)
 		})
-		return proxies
-	}
-
-	filteredAll := make([]C.Proxy, 0, len(all))
-
-	for _, p := range all {
-		name := p.Name()
-		if checkNodeUsed[adapter.ProxyIdentity(p)] {
-			continue
-		}
-		if excludedForHost(wtFailNodes, wtBlocked, name) {
-			continue
-		}
-		if blockedNodes[name] {
-			continue
-		}
-		if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) || !familyEligible(p) {
-			continue
-		}
-		filteredAll = append(filteredAll, p)
-	}
-
-	filteredAll = defaultSort(filteredAll)
-
-	for _, p := range filteredAll {
-		selected = append(selected, p)
-		if len(selected) >= minCount {
-			break
-		}
+		selected = append(selected, topUp...)
 	}
 
 	if len(selected) == 0 {
-		fallbackAll := defaultSort(slices.Clone(all))
-		for _, p := range fallbackAll {
-			if (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) && p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p) {
-				selected = append(selected, p)
-			}
-			if len(selected) >= minCount {
-				break
-			}
+		// Preserve the historical availability fallbacks, but each relaxation
+		// now selects only the K candidates it can return instead of cloning and
+		// sorting the entire provider.
+		selected = topCandidates(minCount, func(p C.Proxy) bool {
+			return (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) &&
+				p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p)
+		})
+
+		if len(selected) == 0 {
+			selected = topCandidates(minCount, func(p C.Proxy) bool {
+				return p.AliveForTestUrl(s.testUrl) && familyEligible(p)
+			})
 		}
 
 		if len(selected) == 0 {
-			for _, p := range fallbackAll {
-				if p.AliveForTestUrl(s.testUrl) && familyEligible(p) {
-					selected = append(selected, p)
-				}
-				if len(selected) >= minCount {
-					break
-				}
-			}
+			selected = topCandidates(minCount, func(p C.Proxy) bool {
+				return wtFailNodes[p.Name()] != smart.BlockManual && familyEligible(p)
+			})
 		}
 
 		if len(selected) == 0 {
-			for _, p := range fallbackAll {
-				if wtFailNodes[p.Name()] == smart.BlockManual || !familyEligible(p) {
-					continue
-				}
-				selected = append(selected, p)
-				if len(selected) >= minCount {
-					break
-				}
-			}
-
-			if len(selected) == 0 {
-				for _, p := range fallbackAll {
-					if !familyEligible(p) {
-						continue
-					}
-					selected = append(selected, p)
-					if len(selected) >= minCount {
-						break
-					}
-				}
-			}
+			selected = topCandidates(minCount, func(p C.Proxy) bool {
+				return familyEligible(p)
+			})
 		}
 	}
 
