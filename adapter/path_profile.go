@@ -133,6 +133,8 @@ func egressPathSnapshot(entry *capabilityEntry, ipv6 bool, now time.Time, epoch 
 		IP:         entry.exitIP,
 		IPv6:       ipv6,
 		Country:    entry.country,
+		ASN:        entry.asn,
+		ASNOrg:     entry.asnOrg,
 		Sources:    entry.sources,
 		Consistent: entry.consistent,
 		Divergent:  entry.sources >= 2 && !entry.consistent,
@@ -148,8 +150,23 @@ func egressPathSnapshot(entry *capabilityEntry, ipv6 bool, now time.Time, epoch 
 			profile.Country = codes[0]
 		}
 	}
-	if asn, org, err := mmdb.LookupASNOptional(C.Path.ASN(), profile.IP.AsSlice()); err == nil {
-		profile.ASN, profile.ASNOrg = asn, org
+	if profile.ASN == "" {
+		if asn, org, err := mmdb.LookupASNOptional(C.Path.ASN(), profile.IP.AsSlice()); err == nil {
+			profile.ASN, profile.ASNOrg = asn, org
+		}
+	}
+	if profile.Country != "" || profile.ASN != "" {
+		entry.mu.Lock()
+		if entry.exitIP == profile.IP {
+			if profile.Country != "" {
+				entry.country = profile.Country
+			}
+			if profile.ASN != "" {
+				entry.asn = profile.ASN
+				entry.asnOrg = profile.ASNOrg
+			}
+		}
+		entry.mu.Unlock()
 	}
 	return profile
 }
