@@ -673,6 +673,28 @@ func IPFamilyCapabilityKnown(p C.Proxy, ipv6 bool) (known, ok bool) {
 	}
 }
 
+// CachedExitCountryForProxy returns only fresh already-measured country
+// evidence. It never schedules network I/O and is intended for soft affinity
+// ranking/filtering over many candidates.
+func CachedExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
+	if p == nil {
+		return false, ""
+	}
+	state := capabilityStateForProxy(p)
+	entry := &state.ipv4
+	if ipv6 {
+		entry = &state.ipv6
+	}
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.known || !entry.ok || entry.epoch != epoch || !now.Before(entry.expire) || entry.country == "" {
+		return false, ""
+	}
+	return true, entry.country
+}
+
 // ExitCountryForProxy returns the measured exit country for one address family.
 //
 // The public exit IP is collected by the same tiny single-stack probe already
