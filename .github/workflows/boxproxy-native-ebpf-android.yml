@@ -17,6 +17,8 @@ on:
       - "listener/**"
       - "common/ebpf/**"
       - "adapter/outboundgroup/**"
+      - "adapter/outbound/masque.go"
+      - "adapter/outbound/masque_weaknet_test.go"
       - "component/smart/**"
       - "component/keepalive/**"
       - "dns/connection_pool.go"
@@ -77,6 +79,12 @@ jobs:
         run: |
           set -euo pipefail
           CGO_ENABLED=0 go test ./adapter/outboundgroup ./component/smart/... -count=1
+
+      - name: MASQUE weak-network regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test ./adapter/outbound -run 'TestMasqueLoopRetryDelay' -count=1
 
       - name: Keepalive regressions
         shell: bash
