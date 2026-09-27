@@ -6,14 +6,10 @@ on:
     branches:
       - integration/boxproxy-native-ebpf
       - opt/smart-link-v2
-      - opt/smart-link-v2
     paths:
       - ".github/workflows/mobile-core-stress.yml"
       - "adapter/**"
       - "component/smart/**"
-      - "component/linkprofile/**"
-      - "component/netstate/**"
-      - "component/netchange/**"
       - "component/linkprofile/**"
       - "component/netstate/**"
       - "component/netchange/**"
