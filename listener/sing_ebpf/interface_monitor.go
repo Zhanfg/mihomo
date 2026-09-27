@@ -13,6 +13,7 @@ import (
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	"github.com/metacubex/mihomo/component/iface"
 	"github.com/metacubex/mihomo/component/netchange"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/power"
 	"github.com/metacubex/mihomo/listener/sing_tun"
 	"github.com/metacubex/mihomo/log"
@@ -185,6 +186,7 @@ func (i *Inbound) setDefaultInterfaceName(interfaceName string) {
 	state.access.Lock()
 	changed := state.defaultInterfaceName != interfaceName
 	state.defaultInterfaceName = interfaceName
+	netstate.SetDefaultInterface(interfaceName)
 	state.backgroundNetwork.SetAvailable(interfaceName != "")
 	updates := state.updates
 	active := state.network != nil && updates != nil
