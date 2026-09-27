@@ -5,6 +5,7 @@ import (
 	"math"
 	"runtime"
 	"sync"
+	stdatomic "sync/atomic"
 	"time"
 
 	"github.com/metacubex/mihomo/common/lru"
@@ -14,6 +15,12 @@ import (
 )
 
 var (
+	// cacheReady is the lifecycle contract for hot paths that want to reuse
+	// resident AtomicStatsRecord entries. A non-nil pointer alone is not a
+	// sufficient readiness signal in tests/tools that can construct globals
+	// outside InitCache.
+	cacheReady stdatomic.Bool
+
 	targetCache *lru.LruCache[string, string]
 
 	unwrapCache *lru.LruCache[string, UnwrapMap]
@@ -103,6 +110,7 @@ func InitCache() {
 		lru.WithAge[string, *HostStatus](300),
 		lru.WithStale[string, *HostStatus](true),
 	)
+	cacheReady.Store(true)
 }
 
 // 存储预取结果
