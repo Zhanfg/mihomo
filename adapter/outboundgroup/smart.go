@@ -1317,16 +1317,22 @@ func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string,
 	if desired == "" {
 		return true
 	}
+	countryFor := adapter.CachedExitCountryForProxy
+	if strict {
+		// Explicit country is a hard user constraint, so unknown candidates are
+		// allowed to actively verify themselves rather than silently bypass it.
+		countryFor = adapter.ExitCountryForProxy
+	}
 	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
-		known, country := adapter.ExitCountryForProxy(p, ipv6)
+		known, country := countryFor(p, ipv6)
 		if !known {
 			return !strict
 		}
 		return strings.EqualFold(country, desired)
 	}
 
-	known4, country4 := adapter.ExitCountryForProxy(p, false)
-	known6, country6 := adapter.ExitCountryForProxy(p, true)
+	known4, country4 := countryFor(p, false)
+	known6, country6 := countryFor(p, true)
 	if (known4 && strings.EqualFold(country4, desired)) || (known6 && strings.EqualFold(country6, desired)) {
 		return true
 	}
