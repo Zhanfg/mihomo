@@ -638,7 +638,7 @@ func (h *nodeWeightMinHeap) Pop() any {
 	return x
 }
 
-func rankTargetStats(stats map[string][]byte, isUDP bool, limit int, now int64) []NodeWithWeight {
+func (s *Store) rankTargetStats(group, config, target string, stats map[string][]byte, isUDP bool, limit int, now int64) []NodeWithWeight {
 	if len(stats) == 0 {
 		return nil
 	}
@@ -654,15 +654,29 @@ func rankTargetStats(stats map[string][]byte, isUDP bool, limit int, now int64) 
 	heap.Init(&h)
 
 	for nodeName, data := range stats {
-		var record StatsRecord
-		if json.Unmarshal(data, &record) != nil || record.Weights == nil {
-			continue
+		weight := 0.0
+		lastUsed := int64(0)
+		cacheKey := FormatDBKey(KeyTypeStats, config, group, target, nodeName)
+
+		// The live AtomicStatsRecord is already the source that recordConnectionStats
+		// updates before persistence. Reuse it when resident instead of decoding the
+		// same full JSON record again merely to read two fields.
+		if record, ok := recordCache.Get(cacheKey); ok && record != nil {
+			weight = record.GetWeight(weightType)
+			lastUsed = record.lastUsed.Load()
+		} else {
+			var record StatsRecord
+			if json.Unmarshal(data, &record) != nil || record.Weights == nil {
+				continue
+			}
+			weight = record.Weights[weightType]
+			lastUsed = record.LastUsed
 		}
-		weight := record.Weights[weightType]
+
 		if weight <= 0 {
 			continue
 		}
-		weight *= GetTimeDecayWithCache(record.LastUsed, now, 0.4)
+		weight *= GetTimeDecayWithCache(lastUsed, now, 0.4)
 		candidate := NodeWithWeight{Node: nodeName, Weight: weight}
 
 		if h.Len() < limit {
@@ -713,7 +727,7 @@ func (s *Store) GetBestProxyForTargetLimit(group, config, target string, isUDP b
 	if err != nil {
 		return nil, nil, err
 	}
-	return bestProxySlices(rankTargetStats(stats, isUDP, limit, time.Now().Unix()))
+	return bestProxySlices(s.rankTargetStats(group, config, target, stats, isUDP, limit, time.Now().Unix()))
 }
 
 // 获取目标的最佳代理
@@ -730,7 +744,7 @@ func (s *Store) bestProxyForTargetFrom(allStatsMap map[string]map[string][]byte,
 			return nil, nil, err
 		}
 	}
-	return bestProxySlices(rankTargetStats(stats, isUDP, 0, time.Now().Unix()))
+	return bestProxySlices(s.rankTargetStats(group, config, target, stats, isUDP, 0, time.Now().Unix()))
 }
 
 // 获取活跃域名
