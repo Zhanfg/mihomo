@@ -78,3 +78,64 @@ func TestSampleFingerprintIsStableAndSeparatesTransport(t *testing.T) {
 		t.Fatalf("stripe out of range: %d", sampleStripe(a))
 	}
 }
+
+
+func TestStableTCPSamplePlanSplitsLinkAuditFromFullLearning(t *testing.T) {
+	var slot smartSampleSlot
+	const fp = uint64(0x123401)
+	want := []smartSamplePlan{
+		{statsScale: 1, observeLink: true},
+		{statsScale: 0, observeLink: true},
+		{statsScale: 0, observeLink: false},
+		{statsScale: 4, observeLink: true},
+		{statsScale: 0, observeLink: false},
+		{statsScale: 0, observeLink: true},
+		{statsScale: 0, observeLink: false},
+		{statsScale: 4, observeLink: true},
+	}
+	for i, expected := range want {
+		got := stableSamplePlan(&slot, fp, true, false)
+		if got != expected {
+			t.Fatalf("sample %d plan=%+v want=%+v", i+1, got, expected)
+		}
+	}
+}
+
+func TestStableUDPSamplePlanKeepsHalfRateWithoutTCPAudit(t *testing.T) {
+	var slot smartSampleSlot
+	const fp = uint64(0x223402)
+	wantScale := []int64{1, 2, 0, 2, 0, 2}
+	for i, expected := range wantScale {
+		got := stableSamplePlan(&slot, fp, true, true)
+		if got.statsScale != expected || got.observeLink {
+			t.Fatalf("sample %d plan=%+v wantScale=%d and no TCP audit", i+1, got, expected)
+		}
+	}
+}
+
+func TestTCPAuditPromotesHiddenTransportAnomaly(t *testing.T) {
+	base := smartSamplePlan{statsScale: 0, observeLink: true}
+	weak := &tcpstats.Stats{RTTUsec: 500_000, RTTVarUsec: 120_000}
+	got := promoteTCPAudit(base, weak)
+	if got.statsScale != 1 || !got.observeLink {
+		t.Fatalf("weak audit must become full sample: %+v", got)
+	}
+
+	healthy := &tcpstats.Stats{RTTUsec: 70_000, RTTVarUsec: 3_000}
+	got = promoteTCPAudit(base, healthy)
+	if got != base {
+		t.Fatalf("healthy audit should remain link-only: got=%+v want=%+v", got, base)
+	}
+}
+
+func TestCheapAbnormalSignalBypassesStableSampler(t *testing.T) {
+	if !informativeCheapSample(900, 0, 0, 0, 1_000, nil) {
+		t.Fatal("slow connect must remain full fidelity before TCP_INFO")
+	}
+	if !informativeCheapSample(50, 50, 3<<20, 0, 1_000, nil) {
+		t.Fatal("large flow must remain full fidelity before TCP_INFO")
+	}
+	if informativeCheapSample(50, 50, 16<<10, 16<<10, 1_000, nil) {
+		t.Fatal("healthy short flow should be eligible for staged sampling")
+	}
+}
