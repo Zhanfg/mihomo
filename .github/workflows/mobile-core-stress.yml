@@ -5,10 +5,14 @@ on:
   push:
     branches:
       - integration/boxproxy-native-ebpf
+      - opt/smart-link-v2
     paths:
       - ".github/workflows/mobile-core-stress.yml"
       - "adapter/**"
       - "component/smart/**"
+      - "component/linkprofile/**"
+      - "component/netstate/**"
+      - "component/netchange/**"
       - "component/mmdb/**"
       - "component/keepalive/**"
       - "dns/**"
@@ -19,7 +23,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: mobile-core-stress
+  group: mobile-core-stress-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
