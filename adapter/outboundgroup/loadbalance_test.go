@@ -172,8 +172,9 @@ func demotedProxies(names ...string) []C.Proxy {
 
 // awaitDemoted blocks until every proxy reports demoted.
 //
-// CapabilityDemoted dispatches its probe asynchronously and reports capUnknown
-// until the result lands, so a rotation measured while the probes are still in
+// Soft CapabilityDemoted reads do not dispatch probes. The helper explicitly
+// requests diagnostic capability refresh and waits until the result lands, so a
+// rotation measured while the probes are still in
 // flight is measuring the transition, not the steady state. Observed as a real
 // CI failure: proxy a settled first and was skipped by the preferred pass on
 // every subsequent call while b was still unknown and kept winning it, giving
@@ -184,6 +185,10 @@ func awaitDemoted(t *testing.T, proxies []C.Proxy) {
 	for {
 		settled := true
 		for _, proxy := range proxies {
+			// Soft ranking/demotion reads are intentionally probe-free. This test
+			// wants a settled diagnostic verdict, so explicitly request the IPv6
+			// capability refresh before observing the cached demotion.
+			adapter.IPFamilyCapabilityKnown(proxy, true)
 			if !adapter.CapabilityDemoted(proxy, false, true) {
 				settled = false
 				break
