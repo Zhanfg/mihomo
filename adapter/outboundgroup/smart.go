@@ -59,6 +59,11 @@ const (
 	deterministicDialPrefix = 3
 	parallelDials           = 5
 	connectThreshold        = 5.0
+	weakConnectThresholdMS  = int64(700)
+	weakDelayThresholdMS    = uint16(350)
+	severeConnectThresholdMS = int64(1200)
+	severeDelayThresholdMS   = uint16(600)
+	smartSwitchMargin       = 0.12
 	statsQueueSize          = 512
 	androidStatsQueueSize   = 256
 	maintenanceActiveWindow = 30 * time.Minute
@@ -440,8 +445,37 @@ func (s *Smart) GetConfigFilename() string {
 	return s.configName
 }
 
+// smartHedgeDelay spaces competing dials instead of waking every candidate at
+// once. A slow historical path gets a slightly longer grace period, bounded so
+// weak networks still obtain a fallback before a full timeout.
+func (s *Smart) smartHedgeDelay(metadata *C.Metadata, proxies []C.Proxy) time.Duration {
+	const (
+		defaultDelay = 250 * time.Millisecond
+		minDelay     = 120 * time.Millisecond
+		maxDelay     = 450 * time.Millisecond
+	)
+	if len(proxies) == 0 {
+		return defaultDelay
+	}
+	history := s.getHistoryConnectStats(metadata, proxies[0])
+	if history <= 0 {
+		return defaultDelay
+	}
+	delay := time.Duration(history/2) * time.Millisecond
+	if delay < minDelay {
+		return minDelay
+	}
+	if delay > maxDelay {
+		return maxDelay
+	}
+	return delay
+}
+
 // ref: component/dialer/dialer.go:314
 func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, metadata *C.Metadata, start time.Time, singleDialFunc func(context.Context, C.Proxy, *C.Metadata, time.Time) (C.Conn, int64, error)) (C.Proxy, C.Conn, int64, error) {
+	if len(proxies) == 0 {
+		return nil, nil, 0, os.ErrDeadlineExceeded
+	}
 	if len(proxies) == 1 {
 		conn, connectTime, err := singleDialFunc(ctx, proxies[0], metadata, start)
 		return proxies[0], conn, connectTime, err
@@ -452,9 +486,8 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 	defer cancel()
 
 	results := make(chan dialResult, n)
-
-	for i := 0; i < n; i++ {
-		go func(proxyIndex int) {
+	launch := func(proxyIndex int) {
+		go func() {
 			conn, connectTime, err := singleDialFunc(childCtx, proxies[proxyIndex], metadata, start)
 			results <- dialResult{
 				proxyIndex:  proxyIndex,
@@ -462,10 +495,13 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 				connectTime: connectTime,
 				error:       err,
 			}
-		}(i)
+		}()
 	}
 
 	drainRemaining := func(pending int) {
+		if pending <= 0 {
+			return
+		}
 		go func() {
 			for i := 0; i < pending; i++ {
 				if r := <-results; r.conn != nil && r.error == nil {
@@ -475,20 +511,66 @@ func (s *Smart) ParallelDialContext(ctx context.Context, proxies []C.Proxy, meta
 		}()
 	}
 
+	hedgeDelay := s.smartHedgeDelay(metadata, proxies)
+	timer := time.NewTimer(hedgeDelay)
+	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(hedgeDelay)
+	}
+
+	launched := 1
+	received := 0
+	launch(0)
+
 	errs := make([]error, 0, n)
-	for received := 0; received < n; received++ {
+	for received < n {
+		var hedge <-chan time.Time
+		if launched < n {
+			hedge = timer.C
+		}
+
 		select {
 		case res := <-results:
+			received++
 			if res.error == nil {
 				cancel()
-				drainRemaining(n - received - 1)
+				drainRemaining(launched - received)
 				return proxies[res.proxyIndex], res.conn, res.connectTime, nil
 			}
 			errs = append(errs, res.error)
 
+			// A definitive failure is stronger evidence than the hedge timer:
+			// start the next candidate immediately, but still keep only one new
+			// dial at a time.
+			if launched < n {
+				launch(launched)
+				launched++
+				if launched < n {
+					resetTimer()
+				}
+			}
+
+		case <-hedge:
+			launch(launched)
+			launched++
+			if launched < n {
+				timer.Reset(hedgeDelay)
+			}
+
 		case <-ctx.Done():
-			drainRemaining(n - received)
+			cancel()
+			drainRemaining(launched - received)
 			return nil, nil, 0, ctx.Err()
+		}
+
+		if launched == n && received == n {
+			break
 		}
 	}
 
@@ -564,6 +646,78 @@ func smartDialBatchBounds(total, iteration int, pinned bool) (begin, end int) {
 	return begin, end
 }
 
+func smartDialBatchBoundsForLink(total, iteration int, pinned, weak bool) (begin, end int) {
+	if !weak || pinned {
+		return smartDialBatchBounds(total, iteration, pinned)
+	}
+	if total <= 0 {
+		return 0, 0
+	}
+	// On a weak path, race only the best two candidates first. ParallelDialContext
+	// staggers them, so we gain failover latency without a socket/radio stampede.
+	if iteration == 0 {
+		end = 2
+		if end > total {
+			end = total
+		}
+		return 0, end
+	}
+	width := smartParallelism()
+	begin = 2 + (iteration-1)*width
+	if begin >= total {
+		return 0, 0
+	}
+	end = begin + width
+	if end > total {
+		end = total
+	}
+	return begin, end
+}
+
+func (s *Smart) isWeakDialPath(metadata *C.Metadata, proxies []C.Proxy) bool {
+	limit := len(proxies)
+	if limit > 3 {
+		limit = 3
+	}
+	weak := 0
+	for i := 0; i < limit; i++ {
+		history := s.getHistoryConnectStats(metadata, proxies[i])
+		delay := proxies[i].LastDelayForTestUrl(s.testUrl)
+		if i == 0 && (history >= severeConnectThresholdMS || delay >= severeDelayThresholdMS) {
+			return true
+		}
+		if history >= weakConnectThresholdMS || delay >= weakDelayThresholdMS {
+			weak++
+		}
+	}
+	return limit >= 2 && weak >= 2
+}
+
+// stabilizeSmartOrder keeps the existing winner when a new ranking is only
+// marginally better. This is hysteresis, not a fixed pin: a materially better
+// candidate or a failed/blocked winner still takes over.
+func stabilizeSmartOrder(names []string, weights []float64, current string) {
+	if current == "" || len(names) < 2 || len(weights) != len(names) || weights[0] <= 0 {
+		return
+	}
+	idx := -1
+	for i, name := range names {
+		if name == current {
+			idx = i
+			break
+		}
+	}
+	if idx <= 0 {
+		return
+	}
+	currentWeight := weights[idx]
+	if currentWeight < smart.AllowedWeight || currentWeight < weights[0]*(1.0-smartSwitchMargin) {
+		return
+	}
+	names[0], names[idx] = names[idx], names[0]
+	weights[0], weights[idx] = weights[idx], weights[0]
+}
+
 func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	s.rememberAffinityCountry(metadata, p)
 	target := metadata.SmartTarget
@@ -593,8 +747,8 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, error) {
 	s.markTrafficActivity()
 
-	getBatch := func(proxies []C.Proxy, i int, pinned bool) ([]C.Proxy, time.Duration) {
-		begin, end := smartDialBatchBounds(len(proxies), i, pinned)
+	getBatch := func(proxies []C.Proxy, i int, pinned, weak bool) ([]C.Proxy, time.Duration) {
+		begin, end := smartDialBatchBoundsForLink(len(proxies), i, pinned, weak)
 		if begin == end {
 			return nil, 0
 		}
@@ -621,10 +775,10 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		return batch, timeout
 	}
 
-	tryDial := func(proxies []C.Proxy, pinned bool) (C.Conn, error) {
+	tryDial := func(proxies []C.Proxy, pinned, weak bool) (C.Conn, error) {
 		var finalErr error
 		for i := 0; i < maxRetries; i++ {
-			batch, timeout := getBatch(proxies, i, pinned)
+			batch, timeout := getBatch(proxies, i, pinned, weak)
 			if len(batch) == 0 {
 				break
 			}
@@ -639,23 +793,49 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 					return nil, err
 				}
 				finalErr = err
-			} else {
-				s.adoptUnwrapWinner(metadata, p)
-				s.onDialSuccess()
-				return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
+				continue
 			}
+
+			s.adoptUnwrapWinner(metadata, p)
+			s.onDialSuccess()
+			return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
 		}
-
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
-
-		s.groupDialFailed(proxies, finalErr)
-
+		if finalErr == nil {
+			finalErr = os.ErrDeadlineExceeded
+		}
 		return nil, finalErr
 	}
 
-	proxies, pinned := s.selectProxies(metadata, s.GetProxies(true))
+	all := s.GetProxies(true)
+	proxies, pinned := s.selectProxies(metadata, all)
+	weak := s.isWeakDialPath(metadata, proxies)
+	conn, err := tryDial(proxies, pinned, weak)
+	if err == nil || tunnel.ShouldStopRetry(err) {
+		return conn, err
+	}
 
-	return tryDial(proxies, pinned)
+	failedProxies := proxies
+	if pinned {
+		// A cached winner is a preference, not an availability contract. If it
+		// fails on this request, clear the pin and immediately re-enter Smart
+		// selection so weak-network handovers do not surface as app-visible
+		// connection failures.
+		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+		all = s.GetProxies(true)
+		fresh, _ := s.selectProxies(metadata, all)
+		if len(fresh) > 0 {
+			failedProxies = fresh
+			conn, retryErr := tryDial(fresh, false, s.isWeakDialPath(metadata, fresh))
+			if retryErr == nil || tunnel.ShouldStopRetry(retryErr) {
+				return conn, retryErr
+			}
+			err = retryErr
+		}
+	}
+
+	s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+	s.groupDialFailed(failedProxies, err)
+	return nil, err
 }
 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
@@ -1305,9 +1485,15 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 	// asynchronously update expired cache (stale-while-revalidate)
 	refreshUnwrapCache := func(isUDP bool) {
-		names, _ := computeFreshSingleFlight(isUDP)
+		previous, _ := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+		names, weights := computeFreshSingleFlight(isUDP)
 		if len(names) == 0 {
 			return
+		}
+		if len(previous) > 0 && len(weights) == len(names) {
+			names = slices.Clone(names)
+			weights = slices.Clone(weights)
+			stabilizeSmartOrder(names, weights, previous[0])
 		}
 		_, proxyByName := s.GetProxiesByName(true)
 		resultProxies := make([]C.Proxy, 0, len(names))
@@ -1968,6 +2154,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	var cumulLossRate float64
 	var calculatedWeight float64
 	var ModelPredicted bool
+	linkFactor := 1.0
 
 	proxyName := proxy.Name()
 	isUDP := metadata.NetWork == C.UDP
@@ -2041,6 +2228,25 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		atomicRecord.Add("cumulSent", int64(tcpStats.TotalSent()))
 		atomicRecord.Add("cumulRetrans", int64(tcpStats.TotalRetrans()))
 		lossRate = tcpStats.LossRate()
+
+		rttMs := float64(tcpStats.RTTUsec) / 1000.0
+		rttVarMs := float64(tcpStats.RTTVarUsec) / 1000.0
+		if rttMs > 0 {
+			rttMs = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkRTT), rttMs)
+			atomicRecord.SetWeight(smart.WeightTypeLinkRTT, rttMs)
+		}
+		if rttVarMs > 0 {
+			rttVarMs = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkRTTVar), rttVarMs)
+			atomicRecord.SetWeight(smart.WeightTypeLinkRTTVar, rttVarMs)
+		}
+		currentFactor := smart.LinkQualityFactor(rttMs, rttVarMs, lossRate, tcpStats.Unacked, tcpStats.Lost, tcpStats.Cwnd)
+		linkFactor = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkFactor), currentFactor)
+		atomicRecord.SetWeight(smart.WeightTypeLinkFactor, linkFactor)
+	} else if previousFactor := atomicRecord.GetWeight(smart.WeightTypeLinkFactor); previousFactor > 0 {
+		// Missing TCP_INFO on a wrapped transport should not freeze an old weak
+		// verdict forever. Recover it gradually toward neutral.
+		linkFactor = updateEMAFloat(previousFactor, 1.0)
+		atomicRecord.SetWeight(smart.WeightTypeLinkFactor, linkFactor)
 	}
 
 	if sent := atomicRecord.Get("cumulSent").(int64); sent > 0 {
@@ -2102,6 +2308,10 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		}
 	} else {
 		calculatedWeight, ModelPredicted = smart.CalculateWeight(input, priorityFactor)
+	}
+
+	if calculatedWeight > 0 && linkFactor > 0 {
+		calculatedWeight *= linkFactor
 	}
 
 	// extra checks and weight adjustment
