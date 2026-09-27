@@ -2688,9 +2688,7 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 			// immediately to a full Smart sample. Stable audit-only closes update
 			// only the transient phone->node path profile and never enter the heavy
 			// model/JSON/persistence queue.
-			if informativeTCPStats(tcpStats) {
-				plan.statsScale = 1
-			}
+			plan = promoteTCPAudit(plan, tcpStats)
 			if plan.statsScale == 0 {
 				if tcpStats != nil {
 					observeTCPPath(proxy, tcpStats)
