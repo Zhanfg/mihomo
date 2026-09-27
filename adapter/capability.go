@@ -795,7 +795,7 @@ func AddAutoIPFamilyPenalty(delay uint16, p C.Proxy, ipv6 bool) uint16 {
 		kind = capabilityIPv6
 	}
 	var penalty uint16
-	switch state.stateOrProbe(p, kind) {
+	switch state.cachedState(kind) {
 	case capNo:
 		penalty = autoFamilyMissingPenalty
 	case capUnknown:
