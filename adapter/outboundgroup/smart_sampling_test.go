@@ -4,7 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/metacubex/mihomo/common/atomic"
 	"github.com/metacubex/mihomo/component/smart/tcpstats"
 )
 
@@ -20,13 +19,33 @@ func TestStableSampleEvery(t *testing.T) {
 	}
 }
 
-func TestSampleCounterScaleKeepsFirstThenOneInFour(t *testing.T) {
-	var counter atomic.Uint32
+func TestSampleSlotScaleKeepsFirstThenOneInFour(t *testing.T) {
+	var slot smartSampleSlot
+	const fingerprint = uint64(0x101)
 	want := []int64{1, 0, 0, 4, 0, 0, 0, 4}
 	for i, expected := range want {
-		if got := sampleCounterScale(&counter, 4); got != expected {
+		if got := sampleSlotScale(&slot, fingerprint, 4); got != expected {
 			t.Fatalf("sample %d scale=%d want=%d", i+1, got, expected)
 		}
+	}
+}
+
+func TestSampleSlotCollisionRestartsColdStart(t *testing.T) {
+	var slot smartSampleSlot
+	first := uint64(0x101)
+	collision := uint64(0x201)
+	if sampleStripe(first) != sampleStripe(collision) {
+		t.Fatal("test fingerprints must collide into one slot")
+	}
+
+	if got := sampleSlotScale(&slot, first, 4); got != 1 {
+		t.Fatalf("first key initial scale=%d", got)
+	}
+	if got := sampleSlotScale(&slot, first, 4); got != 0 {
+		t.Fatalf("first key second scale=%d", got)
+	}
+	if got := sampleSlotScale(&slot, collision, 4); got != 1 {
+		t.Fatalf("colliding new key must retain cold-start sample, got=%d", got)
 	}
 }
 
@@ -45,14 +64,17 @@ func TestInformativeStatsAreNeverLowValue(t *testing.T) {
 	}
 }
 
-func TestSampleStripeIsStableAndSeparatesTransport(t *testing.T) {
-	a := sampleStripe("target", "node", false)
-	b := sampleStripe("target", "node", false)
-	u := sampleStripe("target", "node", true)
+func TestSampleFingerprintIsStableAndSeparatesTransport(t *testing.T) {
+	a := sampleFingerprint("target", "node", false)
+	b := sampleFingerprint("target", "node", false)
+	u := sampleFingerprint("target", "node", true)
 	if a != b {
-		t.Fatalf("stripe unstable: %d != %d", a, b)
+		t.Fatalf("fingerprint unstable: %d != %d", a, b)
 	}
 	if a == u {
-		t.Fatalf("TCP and UDP unexpectedly share stripe %d", a)
+		t.Fatalf("TCP and UDP must have distinct fingerprints: %d", a)
+	}
+	if sampleStripe(a) >= statsSampleStripes {
+		t.Fatalf("stripe out of range: %d", sampleStripe(a))
 	}
 }
