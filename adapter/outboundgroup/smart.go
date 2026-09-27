@@ -330,6 +330,7 @@ type Smart struct {
 	statsSampler smartStatsSampler
 
 	lastTrafficActivity atomic.Int64
+	lastWinner          atomic.TypedValue[smartWinnerState]
 	recoveryCursor      atomic.Uint64
 	recoveryMu          sync.Mutex
 	recoveryBackoff     map[string]hostRecoveryState
@@ -359,6 +360,13 @@ type nodeWithWeight struct {
 type nodeResult struct {
 	names   []string
 	weights []float64
+}
+
+type smartWinnerState struct {
+	Name        string
+	FamilyKnown bool
+	IPv6        bool
+	UDP         bool
 }
 
 type hostRecoveryState struct {
@@ -722,7 +730,9 @@ func stabilizeSmartOrder(names []string, weights []float64, current string) {
 
 func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	knownFamily, ipv6 := metadataIPFamily(metadata)
-	adapter.WarmProxyPath(p, metadata != nil && metadata.NetWork == C.UDP, knownFamily, ipv6)
+	isUDP := metadata != nil && metadata.NetWork == C.UDP
+	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
+	adapter.WarmProxyPath(p, isUDP, knownFamily, ipv6)
 	s.rememberAffinityCountry(metadata, p)
 	target := metadata.SmartTarget
 	existing, _ := s.store.GetUnwrapResult(s.Name(), s.configName, target)
@@ -1050,6 +1060,56 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		fmt.Fprintf(&policyPriorityBuf, "%s:%.2f", rule.pattern, rule.factor)
 	}
 
+	var pathProfile any
+	if winner, ok := s.lastWinner.LoadOk(); ok && winner.Name != "" {
+		for _, p := range proxies {
+			if p.Name() != winner.Name {
+				continue
+			}
+			profile := adapter.PathProfileForProxy(p, winner.IPv6)
+			egressIP := ""
+			if profile.Egress.IP.IsValid() {
+				egressIP = profile.Egress.IP.String()
+			}
+			udpEgressIP := ""
+			if profile.UDPEgressIP.IsValid() {
+				udpEgressIP = profile.UDPEgressIP.String()
+			}
+			pathProfile = map[string]any{
+				"node":             winner.Name,
+				"familyKnown":      winner.FamilyKnown,
+				"ipv6":             winner.IPv6,
+				"udp":              winner.UDP,
+				"epoch":            profile.Epoch,
+				"confidence":       profile.Confidence,
+				"localKnown":       profile.Local.Known,
+				"localInterface":   profile.Local.Interface,
+				"localMTU":         profile.Local.MTU,
+				"localIPv4":        profile.Local.IPv4,
+				"localIPv6":        profile.Local.IPv6,
+				"tunnelFresh":      profile.TunnelFresh,
+				"tunnelSamples":    profile.TunnelSamples,
+				"tunnelRTT":        profile.Tunnel.RTTMs,
+				"tunnelRTTVar":     profile.Tunnel.RTTVarMs,
+				"tunnelLoss":       profile.Tunnel.LossRate,
+				"tunnelFactor":     profile.TunnelFactor,
+				"egressFresh":      profile.Egress.Fresh,
+				"egressIP":         egressIP,
+				"egressCountry":    profile.Egress.Country,
+				"egressASN":        profile.Egress.ASN,
+				"egressASNOrg":     profile.Egress.ASNOrg,
+				"egressSources":    profile.Egress.Sources,
+				"egressConsistent": profile.Egress.Consistent,
+				"egressDivergent":  profile.Egress.Divergent,
+				"udpKnown":         profile.UDPKnown,
+				"udpAvailable":     profile.UDPAvailable,
+				"udpEgressIP":      udpEgressIP,
+				"transportSplit":   profile.TransportSplit,
+			}
+			break
+		}
+	}
+
 	return json.Marshal(map[string]any{
 		"type":            s.Type().String(),
 		"now":             s.Now(),
@@ -1074,6 +1134,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"country":         s.country,
 		"countryAffinity": s.countryAffinity,
 		"affinityCountry": s.currentAffinityCountry(),
+		"pathProfile":     pathProfile,
 	})
 }
 
