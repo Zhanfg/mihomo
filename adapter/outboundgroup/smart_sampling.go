@@ -148,6 +148,14 @@ func stableSamplePlan(slot *smartSampleSlot, fingerprint uint64, android, udp bo
 	return smartSamplePlan{statsScale: scale, observeLink: observe}
 }
 
+func promoteTCPAudit(plan smartSamplePlan, tcpStats *tcpstats.Stats) smartSamplePlan {
+	if informativeTCPStats(tcpStats) {
+		plan.statsScale = 1
+		plan.observeLink = true
+	}
+	return plan
+}
+
 func (s *Smart) closeSamplePlan(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, connectionDuration int64, err error,
 ) smartSamplePlan {
