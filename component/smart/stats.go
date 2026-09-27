@@ -653,7 +653,10 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 	h := make(nodeWeightMinHeap, 0, limit)
 	heap.Init(&h)
 
-	liveCache := recordCache
+	var liveCache *lru.LruCache[string, *AtomicStatsRecord]
+	if cacheReady.Load() {
+		liveCache = recordCache
+	}
 	for nodeName, data := range stats {
 		weight := 0.0
 		lastUsed := int64(0)
