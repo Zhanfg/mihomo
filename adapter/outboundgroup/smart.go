@@ -467,6 +467,10 @@ func (s *Smart) smartHedgeDelay(metadata *C.Metadata, proxies []C.Proxy) time.Du
 	if len(proxies) == 0 {
 		return defaultDelay
 	}
+	assessment := adapter.TunnelPathAssessmentForProxy(proxies[0])
+	if assessment.Condition != linkprofile.ConditionUnknown && assessment.HedgeDelay > 0 {
+		return assessment.HedgeDelay
+	}
 	history := s.getHistoryConnectStats(metadata, proxies[0])
 	if history <= 0 {
 		return defaultDelay
@@ -685,6 +689,15 @@ func smartDialBatchBoundsForLink(total, iteration int, pinned, weak bool) (begin
 }
 
 func (s *Smart) isWeakDialPath(metadata *C.Metadata, proxies []C.Proxy) bool {
+	if len(proxies) > 0 {
+		assessment := adapter.TunnelPathAssessmentForProxy(proxies[0])
+		if assessment.Condition == linkprofile.ConditionWeak || assessment.Condition == linkprofile.ConditionUnstable {
+			return true
+		}
+		if assessment.Condition == linkprofile.ConditionHealthy {
+			return false
+		}
+	}
 	limit := len(proxies)
 	if limit > 3 {
 		limit = 3
@@ -706,7 +719,7 @@ func (s *Smart) isWeakDialPath(metadata *C.Metadata, proxies []C.Proxy) bool {
 // stabilizeSmartOrder keeps the existing winner when a new ranking is only
 // marginally better. This is hysteresis, not a fixed pin: a materially better
 // candidate or a failed/blocked winner still takes over.
-func stabilizeSmartOrder(names []string, weights []float64, current string) {
+func stabilizeSmartOrder(names []string, weights []float64, current string, switchMargin float64) {
 	if current == "" || len(names) < 2 || len(weights) != len(names) || weights[0] <= 0 {
 		return
 	}
@@ -721,7 +734,10 @@ func stabilizeSmartOrder(names []string, weights []float64, current string) {
 		return
 	}
 	currentWeight := weights[idx]
-	if currentWeight < smart.AllowedWeight || currentWeight < weights[0]*(1.0-smartSwitchMargin) {
+	if switchMargin <= 0 || switchMargin >= 1 {
+		switchMargin = smartSwitchMargin
+	}
+	if currentWeight < smart.AllowedWeight || currentWeight < weights[0]*(1.0-switchMargin) {
 		return
 	}
 	names[0], names[idx] = names[idx], names[0]
@@ -1093,6 +1109,8 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 				"tunnelRTTVar":     profile.Tunnel.RTTVarMs,
 				"tunnelLoss":       profile.Tunnel.LossRate,
 				"tunnelFactor":     profile.TunnelFactor,
+				"tunnelState":      profile.TunnelAssessment.Condition.String(),
+				"tunnelStress":     profile.TunnelAssessment.Stress,
 				"egressFresh":      profile.Egress.Fresh,
 				"egressIP":         egressIP,
 				"egressCountry":    profile.Egress.Country,
@@ -1567,12 +1585,19 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		if len(names) == 0 {
 			return
 		}
+		_, proxyByName := s.GetProxiesByName(true)
 		if len(previous) > 0 && len(weights) == len(names) {
 			names = slices.Clone(names)
 			weights = slices.Clone(weights)
-			stabilizeSmartOrder(names, weights, previous[0])
+			switchMargin := smartSwitchMargin
+			if currentProxy, ok := proxyByName[previous[0]]; ok {
+				assessment := adapter.TunnelPathAssessmentForProxy(currentProxy)
+				if assessment.Condition != linkprofile.ConditionUnknown && assessment.SwitchMargin > 0 {
+					switchMargin = assessment.SwitchMargin
+				}
+			}
+			stabilizeSmartOrder(names, weights, previous[0], switchMargin)
 		}
-		_, proxyByName := s.GetProxiesByName(true)
 		resultProxies := make([]C.Proxy, 0, len(names))
 		for _, name := range names {
 			if p, ok := proxyByName[name]; ok {
