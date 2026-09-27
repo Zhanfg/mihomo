@@ -122,10 +122,15 @@ func (n *notifier) run(ctx context.Context, work fanOut) {
 	recheckProviders(ctx, work.providers)
 }
 
-// recheckProviders forces every provider to probe now. HealthCheck is the only
-// entry point that does so unconditionally: scheduleCheck just pokes the
-// background loop, which swallows the request while power reports paused, and
-// that is exactly the state a device switching networks tends to be in.
+type scheduledHealthChecker interface {
+	ScheduleHealthCheck() bool
+}
+
+// recheckProviders keeps desktop's immediate compatibility behavior. Android
+// first requests the provider's own coalesced/background-aware scheduler; only
+// providers without an automatic health-check loop fall back to synchronous
+// HealthCheck. A trigger received while power is paused is retained by the
+// HealthCheck state machine and runs after resume.
 func recheckProviders(ctx context.Context, source func() map[string]P.ProxyProvider) {
 	if source == nil {
 		return
@@ -138,12 +143,17 @@ func recheckProviders(ctx context.Context, source func() map[string]P.ProxyProvi
 	b, _ := batch.New[struct{}](ctx, batch.WithConcurrencyNum[struct{}](providerConcurrency()))
 	for name, provider := range providers {
 		b.Go(name, func() (struct{}, error) {
-			// HealthCheck blocks for the whole probe timeout and takes no
-			// context, so providers still queued behind the concurrency limit
-			// are the only place a superseded run can drop out.
-			if ctx.Err() == nil {
-				provider.HealthCheck()
+			if ctx.Err() != nil {
+				return struct{}{}, nil
 			}
+			if runtime.GOOS == "android" {
+				if scheduler, ok := provider.(scheduledHealthChecker); ok && scheduler.ScheduleHealthCheck() {
+					return struct{}{}, nil
+				}
+			}
+			// Compatibility fallback for providers without an automatic health
+			// loop. This path remains serialized on Android.
+			provider.HealthCheck()
 			return struct{}{}, nil
 		})
 	}
