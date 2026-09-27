@@ -18,6 +18,30 @@ type smartStatsSampler struct {
 	counters [statsSampleStripes]atomic.Uint32
 }
 
+func stableSampleEvery(android, udp bool) uint32 {
+	if !android {
+		return 1
+	}
+	if udp {
+		return androidStableUDPEvery
+	}
+	return androidStableTCPEvery
+}
+
+func sampleCounterScale(counter *atomic.Uint32, every uint32) int64 {
+	if every <= 1 {
+		return 1
+	}
+	count := counter.Add(1)
+	if count == 1 {
+		return 1
+	}
+	if count%every == 0 {
+		return int64(every)
+	}
+	return 0
+}
+
 func sampleStripe(target, node string, udp bool) uint32 {
 	// FNV-1a over existing strings: no allocation and a fixed-size state table.
 	h := uint32(2166136261)
@@ -78,20 +102,7 @@ func (s *Smart) sampleScale(metadata *C.Metadata, proxy C.Proxy,
 	}
 
 	udp := metadata.NetWork == C.UDP
-	every := androidStableTCPEvery
-	if udp {
-		every = androidStableUDPEvery
-	}
+	every := stableSampleEvery(true, udp)
 	idx := sampleStripe(metadata.SmartTarget, proxy.Name(), udp)
-	count := s.statsSampler.counters[idx].Add(1)
-
-	// Keep the first observation so a new target/node pair becomes useful
-	// immediately; after warm-up, retain one in every N stable successes.
-	if count == 1 {
-		return 1
-	}
-	if count%every == 0 {
-		return int64(every)
-	}
-	return 0
+	return sampleCounterScale(&s.statsSampler.counters[idx], every)
 }
