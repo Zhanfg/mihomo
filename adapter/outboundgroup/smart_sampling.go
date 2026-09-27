@@ -14,8 +14,13 @@ const (
 	androidStableUDPEvery = uint32(2)
 )
 
+type smartSampleSlot struct {
+	fingerprint atomic.Uint64
+	count       atomic.Uint32
+}
+
 type smartStatsSampler struct {
-	counters [statsSampleStripes]atomic.Uint32
+	slots [statsSampleStripes]smartSampleSlot
 }
 
 func stableSampleEvery(android, udp bool) uint32 {
@@ -28,38 +33,63 @@ func stableSampleEvery(android, udp bool) uint32 {
 	return androidStableTCPEvery
 }
 
-func sampleCounterScale(counter *atomic.Uint32, every uint32) int64 {
-	if every <= 1 {
-		return 1
-	}
-	count := counter.Add(1)
-	if count == 1 {
-		return 1
-	}
-	if count%every == 0 {
-		return int64(every)
-	}
-	return 0
-}
-
-func sampleStripe(target, node string, udp bool) uint32 {
-	// FNV-1a over existing strings: no allocation and a fixed-size state table.
-	h := uint32(2166136261)
+func sampleFingerprint(target, node string, udp bool) uint64 {
+	// 64-bit FNV-1a over existing strings: no allocation. A non-zero
+	// fingerprint is reserved so zero can mean an unused slot.
+	h := uint64(14695981039346656037)
 	mix := func(s string) {
 		for i := 0; i < len(s); i++ {
-			h ^= uint32(s[i])
-			h *= 16777619
+			h ^= uint64(s[i])
+			h *= 1099511628211
 		}
 	}
 	mix(target)
 	h ^= 0xff
-	h *= 16777619
+	h *= 1099511628211
 	mix(node)
 	if udp {
 		h ^= 0xa5
-		h *= 16777619
+		h *= 1099511628211
 	}
-	return h & (statsSampleStripes - 1)
+	if h == 0 {
+		return 1
+	}
+	return h
+}
+
+func sampleStripe(fingerprint uint64) uint32 {
+	return uint32(fingerprint) & (statsSampleStripes - 1)
+}
+
+// sampleSlotScale keeps bounded memory without sharing sampling history across
+// unrelated target/node keys. A collision replaces the slot fingerprint and
+// restarts at a first sample. Under contention this may retain an extra sample,
+// which is safe for learning and preferable to dropping a new key's cold-start
+// observation.
+func sampleSlotScale(slot *smartSampleSlot, fingerprint uint64, every uint32) int64 {
+	if every <= 1 {
+		return 1
+	}
+
+	for {
+		current := slot.fingerprint.Load()
+		if current != fingerprint {
+			if slot.fingerprint.CompareAndSwap(current, fingerprint) {
+				slot.count.Store(1)
+				return 1
+			}
+			continue
+		}
+
+		count := slot.count.Add(1)
+		if count == 1 {
+			return 1
+		}
+		if count%every == 0 {
+			return int64(every)
+		}
+		return 0
+	}
 }
 
 func informativeStatsSample(connectTime, latency, uploadTotal, downloadTotal, connectionDuration int64, tcpStats *tcpstats.Stats, err error) bool {
@@ -103,6 +133,7 @@ func (s *Smart) sampleScale(metadata *C.Metadata, proxy C.Proxy,
 
 	udp := metadata.NetWork == C.UDP
 	every := stableSampleEvery(true, udp)
-	idx := sampleStripe(metadata.SmartTarget, proxy.Name(), udp)
-	return sampleCounterScale(&s.statsSampler.counters[idx], every)
+	fingerprint := sampleFingerprint(metadata.SmartTarget, proxy.Name(), udp)
+	idx := sampleStripe(fingerprint)
+	return sampleSlotScale(&s.statsSampler.slots[idx], fingerprint, every)
 }
