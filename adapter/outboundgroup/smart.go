@@ -2387,7 +2387,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		})
 	} else {
 		linkFactor = adapter.TunnelPathFactorForProxy(proxy)
-
+	}
 
 	if sent := atomicRecord.Get("cumulSent").(int64); sent > 0 {
 		cumulLossRate = float64(atomicRecord.Get("cumulRetrans").(int64)) / float64(sent)
