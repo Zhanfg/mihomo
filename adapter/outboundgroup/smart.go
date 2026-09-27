@@ -1433,21 +1433,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if hasPriority && a.factor != b.factor {
 			return a.factor > b.factor
 		}
-		if s.tolerance > 0 {
-			var diff uint16
-			if a.delay > b.delay {
-				diff = a.delay - b.delay
-			} else {
-				diff = b.delay - a.delay
-			}
-			if diff <= s.tolerance {
-				return a.index < b.index
-			}
-		}
-		if a.delay != b.delay {
-			return a.delay < b.delay
-		}
-		return a.index < b.index
+		return stableDelayLess(a.delay, a.index, b.delay, b.index, s.tolerance)
 	}
 
 	// topCandidates performs bounded insertion selection. Smart never consumes
