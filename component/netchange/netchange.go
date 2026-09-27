@@ -11,6 +11,7 @@ import (
 
 	"github.com/metacubex/mihomo/common/batch"
 	"github.com/metacubex/mihomo/component/iface"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/resolver"
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
@@ -48,6 +49,7 @@ var defaultNotifier = &notifier{work: fanOut{
 // Notify reports that the default interface changed. A flapping link
 // supersedes the running fan-out instead of stacking another one on top of it.
 func Notify() {
+	netstate.Advance()
 	defaultNotifier.notify()
 }
 
