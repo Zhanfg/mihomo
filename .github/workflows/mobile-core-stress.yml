@@ -169,12 +169,25 @@ jobs:
           }
           trap cleanup EXIT
 
+          READY=0
           for _ in $(seq 1 100); do
             if curl -fsS --max-time 2 -x http://127.0.0.1:17890               http://127.0.0.1:18080/ >/dev/null; then
+              READY=1
+              break
+            fi
+            if ! kill -0 "$MIHOMO_PID" 2>/dev/null; then
               break
             fi
             sleep 0.1
           done
+          if [ "$READY" -ne 1 ]; then
+            echo "mihomo did not become ready" >&2
+            echo "--- mihomo.log ---" >&2
+            cat /tmp/mihomo.log >&2 || true
+            echo "--- http.log ---" >&2
+            cat /tmp/http.log >&2 || true
+            exit 1
+          fi
 
           (
             while kill -0 "$MIHOMO_PID" 2>/dev/null; do
@@ -188,9 +201,12 @@ jobs:
           ) > RESOURCE_SAMPLES.txt &
           MON_PID=$!
 
+          : > FAILURES.txt
           /usr/bin/time -v sh -c '
             seq 1 8000 | xargs -P 48 -n 1 sh -c '"'"'
-              curl -fsS --connect-timeout 2 --max-time 4                 -x http://127.0.0.1:17890                 http://127.0.0.1:18080/ >/dev/null
+              if ! curl -fsS --connect-timeout 2 --max-time 4                 -x http://127.0.0.1:17890                 http://127.0.0.1:18080/ >/dev/null 2>>CURL_ERRORS.txt; then
+                echo "$1" >> FAILURES.txt
+              fi
             '"'"' sh
           ' 2> LOAD_TIME.txt
 
@@ -214,12 +230,16 @@ jobs:
             }
           ' RESOURCE_SAMPLES.txt | tee RESOURCE_SUMMARY.txt
 
+          FAIL_COUNT="$(wc -l < FAILURES.txt 2>/dev/null || echo 0)"
           echo "requests=8000" | tee -a RESOURCE_SUMMARY.txt
           echo "parallelism=48" | tee -a RESOURCE_SUMMARY.txt
+          echo "request_failures=$FAIL_COUNT" | tee -a RESOURCE_SUMMARY.txt
           echo "core_alive_after_load=YES" | tee -a RESOURCE_SUMMARY.txt
-          tail -n 120 /tmp/mihomo.log > MIHOMO_TAIL.txt
+          tail -n 240 /tmp/mihomo.log > MIHOMO_TAIL.txt
+          test "$FAIL_COUNT" -eq 0
 
       - name: Upload churn reports
+        if: always()
         uses: actions/upload-artifact@v7
         with:
           name: stress-churn
@@ -228,3 +248,7 @@ jobs:
             RESOURCE_SUMMARY.txt
             LOAD_TIME.txt
             MIHOMO_TAIL.txt
+            FAILURES.txt
+            CURL_ERRORS.txt
+            /tmp/mihomo.log
+            /tmp/http.log
