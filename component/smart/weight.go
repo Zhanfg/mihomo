@@ -3,6 +3,8 @@ package smart
 import (
 	"math"
 	"time"
+
+	"github.com/metacubex/mihomo/component/linkprofile"
 )
 
 type sceneKind int
@@ -32,43 +34,14 @@ const (
 	WeightTypeLinkFactor = "link:factor"
 )
 
-// LinkQualityFactor converts passive kernel transport feedback into a bounded
-// correction for Smart's existing score. It only reduces confidence when the
-// path itself is demonstrably unstable; application/server slowness alone
-// should not make a proxy look like a bad radio path.
+// LinkQualityFactor is kept as a compatibility wrapper for existing Smart
+// callers/tests. The implementation lives in component/linkprofile so transient
+// path evidence is not coupled to Smart persistence.
 func LinkQualityFactor(rttMs, rttVarMs, lossRate float64, unacked, lost, cwnd uint32) float64 {
-	factor := 1.0
-
-	// High RTT by itself is weak evidence, so keep this penalty deliberately
-	// small. RTT variance and congestion pressure carry more weight.
-	if rttMs > 180 {
-		factor *= 1.0 - math.Min(0.12, (rttMs-180)/1500.0*0.12)
-	}
-
-	if rttMs > 0 && rttVarMs > 0 {
-		jitterRatio := rttVarMs / math.Max(rttMs, 1)
-		if jitterRatio > 0.10 {
-			factor *= 1.0 - math.Min(0.18, (jitterRatio-0.10)*0.35)
-		}
-	}
-
-	// Loss is already represented by the traditional scorer. This is only a
-	// small path-confidence correction so the same symptom is not double-counted.
-	if lossRate > 0 {
-		factor *= 1.0 - math.Min(0.10, lossRate*1.5)
-	}
-
-	if cwnd > 0 && unacked > cwnd {
-		pressure := float64(unacked-cwnd) / float64(cwnd)
-		factor *= 1.0 - math.Min(0.12, pressure*0.06)
-	}
-
-	if lost > 0 {
-		denom := math.Max(float64(cwnd), 1)
-		factor *= 1.0 - math.Min(0.08, float64(lost)/denom*0.04)
-	}
-
-	return math.Max(0.60, math.Min(1.0, factor))
+	return linkprofile.QualityFactor(linkprofile.TunnelMetrics{
+		RTTMs: rttMs, RTTVarMs: rttVarMs, LossRate: lossRate,
+		Unacked: unacked, Lost: lost, Cwnd: cwnd,
+	})
 }
 
 // ModelCalibrationWeightType returns the persistent online-calibration slot for
