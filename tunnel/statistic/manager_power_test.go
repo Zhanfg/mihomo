@@ -164,3 +164,33 @@ func TestTrafficWakeIsOneEdgePerActiveBurst(t *testing.T) {
 	case <-time.After(20 * time.Millisecond):
 	}
 }
+
+
+func TestReclaimActiveFromPendingPublishesMaintenanceEdge(t *testing.T) {
+	m := &Manager{}
+	wake := m.TrafficWake()
+
+	// Reproduce the idle-transition handoff deterministically: the sampler has
+	// already cleared rateActive, a producer has already added bytes, but that
+	// producer has not yet reached wakeRateLoop.
+	m.rateActive.Store(false)
+	m.uploadTemp.Add(9)
+
+	if !m.reclaimActiveFromPending() {
+		t.Fatal("pending bytes did not reclaim active state")
+	}
+	select {
+	case <-wake:
+	case <-time.After(time.Second):
+		t.Fatal("sampler reclaimed activity without publishing maintenance edge")
+	}
+
+	// The producer arriving afterwards sees active=true and must not create a
+	// duplicate edge.
+	m.wakeRateLoop()
+	select {
+	case <-wake:
+		t.Fatal("handoff produced duplicate maintenance edge")
+	case <-time.After(20 * time.Millisecond):
+	}
+}
