@@ -200,7 +200,7 @@ func PathProfileForProxy(p C.Proxy, ipv6 bool) ProxyPathProfile {
 	state.udp.mu.Lock()
 	profile.UDPKnown = state.udp.known && state.udp.epoch == epoch && now.Before(state.udp.expire)
 	profile.UDPAvailable = profile.UDPKnown && state.udp.ok
-	if profile.UDPKnown {
+	if profile.UDPAvailable && state.udp.exitIP.IsValid() {
 		profile.UDPEgressIP = state.udp.exitIP
 	}
 	state.udp.mu.Unlock()
