@@ -356,6 +356,14 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 				entry.asnOrg = ""
 			}
 			entry.exitIP = exitIP
+		} else {
+			// Capability-only success (for adapters that can StatusTest but do
+			// not expose the observed public IP) is not identity evidence. Never
+			// carry a previous network's egress identity into this fresh epoch.
+			entry.exitIP = netip.Addr{}
+			entry.country = ""
+			entry.asn = ""
+			entry.asnOrg = ""
 		}
 		entry.mu.Unlock()
 	} else {
@@ -365,6 +373,13 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		entry.epoch = epoch
 		entry.sources = 0
 		entry.consistent = false
+		// A failed current-epoch probe cannot refresh an old egress identity.
+		// Capability may intentionally remain optimistic after one family-probe
+		// failure, but identity must become unknown until measured again.
+		entry.exitIP = netip.Addr{}
+		entry.country = ""
+		entry.asn = ""
+		entry.asnOrg = ""
 		if (kind == capabilityIPv4 || kind == capabilityIPv6) && entry.failures < capabilityFailConfirm {
 			if !(entry.known && entry.ok) {
 				entry.known = false
@@ -378,12 +393,7 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 			entry.ok = false
 			entry.expire = now.Add(capabilityFailTTL)
 			entry.probing = false
-			if kind == capabilityIPv4 || kind == capabilityIPv6 {
-				entry.exitIP = netip.Addr{}
-				entry.country = ""
-				entry.asn = ""
-				entry.asnOrg = ""
-			}
+
 			entry.mu.Unlock()
 		}
 	}
