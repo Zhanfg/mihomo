@@ -2265,12 +2265,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		})
 	} else {
 		linkFactor = adapter.TunnelPathFactorForProxy(proxy)
-	} else if previousFactor := atomicRecord.GetWeight(smart.WeightTypeLinkFactor); previousFactor > 0 {
-		// Missing TCP_INFO on a wrapped transport should not freeze an old weak
-		// verdict forever. Recover it gradually toward neutral.
-		linkFactor = updateEMAFloat(previousFactor, 1.0)
-		atomicRecord.SetWeight(smart.WeightTypeLinkFactor, linkFactor)
-	}
+
 
 	if sent := atomicRecord.Get("cumulSent").(int64); sent > 0 {
 		cumulLossRate = float64(atomicRecord.Get("cumulRetrans").(int64)) / float64(sent)
