@@ -3,6 +3,7 @@ package smart
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 )
@@ -49,6 +50,46 @@ func TestRankTargetStatsTieBreakIsStable(t *testing.T) {
 }
 
 func BenchmarkRankTargetStatsTop10(b *testing.B) {
+	stats, now := benchmarkRankDataset(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = rankTargetStats(stats, false, 10, now)
+	}
+}
+
+
+func rankTargetStatsFullSortBaseline(stats map[string][]byte, isUDP bool, now int64) []NodeWithWeight {
+	weightType := WeightTypeTCP
+	if isUDP {
+		weightType = WeightTypeUDP
+	}
+	all := make([]NodeWithWeight, 0, len(stats))
+	for nodeName, data := range stats {
+		var record StatsRecord
+		if json.Unmarshal(data, &record) != nil || record.Weights == nil {
+			continue
+		}
+		weight := record.Weights[weightType]
+		if weight <= 0 {
+			continue
+		}
+		weight *= GetTimeDecayWithCache(record.LastUsed, now, 0.4)
+		all = append(all, NodeWithWeight{Node: nodeName, Weight: weight})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].Weight != all[j].Weight {
+			return all[i].Weight > all[j].Weight
+		}
+		return all[i].Node < all[j].Node
+	})
+	if len(all) > 10 {
+		all = all[:10]
+	}
+	return all
+}
+
+func benchmarkRankDataset(b *testing.B) (map[string][]byte, int64) {
+	b.Helper()
 	now := time.Now().Unix()
 	stats := make(map[string][]byte, 1000)
 	for i := 0; i < 1000; i++ {
@@ -58,8 +99,13 @@ func BenchmarkRankTargetStatsTop10(b *testing.B) {
 		})
 		stats[fmt.Sprintf("node-%04d", i)] = data
 	}
+	return stats, now
+}
+
+func BenchmarkRankTargetStatsFullSortBaseline(b *testing.B) {
+	stats, now := benchmarkRankDataset(b)
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = rankTargetStats(stats, false, 10, now)
+		_ = rankTargetStatsFullSortBaseline(stats, false, now)
 	}
 }
