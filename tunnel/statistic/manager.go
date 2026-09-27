@@ -96,6 +96,15 @@ func (m *Manager) ensureRateWake() chan struct{} {
 	return m.rateWake
 }
 
+func (m *Manager) publishTrafficWake() {
+	m.ensureRateWake()
+	select {
+	case m.trafficWake <- struct{}{}:
+	default:
+		// Consumers need only one idle->active edge, not one event per byte.
+	}
+}
+
 func (m *Manager) wakeRateLoop() {
 	// One cheap load on the hot path while sampling is already armed. Only the
 	// idle->active transition pays a CAS and channel send.
@@ -108,11 +117,21 @@ func (m *Manager) wakeRateLoop() {
 	default:
 		// A queued wake already represents the same active edge.
 	}
-	select {
-	case m.trafficWake <- struct{}{}:
-	default:
-		// Consumers need only one idle->active edge, not one event per byte.
+	m.publishTrafficWake()
+}
+
+func (m *Manager) reclaimActiveFromPending() bool {
+	if m.uploadTemp.Load() == 0 && m.downloadTemp.Load() == 0 {
+		return false
 	}
+	if m.rateActive.CompareAndSwap(false, true) {
+		// This is the narrow handoff where bytes landed after the sampler
+		// cleared rateActive but before the producer reached wakeRateLoop.
+		// We claimed the active edge ourselves, so we must publish the
+		// maintenance edge that the producer will now intentionally skip.
+		m.publishTrafficWake()
+	}
+	return m.rateActive.Load()
 }
 
 // TrafficWake reports the first real traffic after the rate sampler had parked.
@@ -252,12 +271,10 @@ func (m *Manager) runRateLoop(interval time.Duration, stop <-chan struct{}, onSa
 		// No bytes in this interval: publish zero above, then attempt to park.
 		// A concurrent producer after Store(false) owns the wake edge.
 		m.rateActive.Store(false)
-		if m.uploadTemp.Load() != 0 || m.downloadTemp.Load() != 0 {
-			// If the producer has not performed its CAS yet, claim the active
-			// state ourselves and continue in-place. If it has, its signal is
-			// already queued and will be drained on the next iteration.
-			m.rateActive.CompareAndSwap(false, true)
-		}
+		// If bytes landed in the handoff window, either the producer has
+		// already reclaimed the state (and queued both wakes), or this sampler
+		// reclaims it and publishes the maintenance edge itself.
+		m.reclaimActiveFromPending()
 	}
 }
 
