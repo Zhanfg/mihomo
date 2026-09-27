@@ -744,11 +744,19 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 		entry = &state.ipv6
 		kind = capabilityIPv6
 	}
-	if state.stateOrProbe(p, kind) != capYes {
+
+	// Schedule a refresh when evidence is absent/stale, but never return the
+	// previous epoch's identity as if it were current truth.
+	_ = state.stateOrProbe(p, kind)
+
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+	entry.mu.Lock()
+	fresh := entry.known && entry.ok && entry.epoch == epoch && now.Before(entry.expire)
+	if !fresh {
+		entry.mu.Unlock()
 		return false, ""
 	}
-
-	entry.mu.Lock()
 	if entry.country != "" {
 		country = entry.country
 		entry.mu.Unlock()
@@ -762,10 +770,6 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 
 	codes, err := mmdb.LookupCodeOptional(C.Path.MMDB(), exitIP.AsSlice())
 	if err != nil || len(codes) == 0 || codes[0] == "" {
-		// Country routing is advisory unless the user explicitly selected a
-		// strict country. Missing/invalid GeoIP data must never terminate the
-		// proxy process; unknown country simply lets affinity mode fall back to
-		// normal Smart selection.
 		if err != nil {
 			log.Debugln("[Capability] country lookup unavailable for %s: %v", p.Name(), err)
 		}
@@ -774,11 +778,13 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	country = strings.ToUpper(codes[0])
 
 	entry.mu.Lock()
-	if entry.exitIP == exitIP {
+	if entry.exitIP == exitIP && entry.epoch == epoch && time.Now().Before(entry.expire) {
 		entry.country = country
+	} else {
+		country = ""
 	}
 	entry.mu.Unlock()
-	return true, country
+	return country != "", country
 }
 
 // ExitIPForProxy exposes the cached observed public source address for
@@ -794,13 +800,20 @@ func ExitIPForProxy(p C.Proxy, ipv6 bool) (known bool, ip netip.Addr) {
 		entry = &state.ipv6
 		kind = capabilityIPv6
 	}
-	if state.stateOrProbe(p, kind) != capYes {
-		return false, netip.Addr{}
-	}
+
+	// Capability may optimistically retain a stale positive verdict through a
+	// handover, but public egress identity may not. Schedule refresh and expose
+	// only current-epoch, unexpired measured identity.
+	_ = state.stateOrProbe(p, kind)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
 	entry.mu.Lock()
-	ip = entry.exitIP
+	fresh := entry.known && entry.ok && entry.epoch == epoch && now.Before(entry.expire)
+	if fresh {
+		ip = entry.exitIP
+	}
 	entry.mu.Unlock()
-	return ip.IsValid(), ip
+	return fresh && ip.IsValid(), ip
 }
 
 // Capability preferences only ever reorder a group, never shrink it. A node
