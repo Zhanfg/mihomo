@@ -45,9 +45,11 @@ type ProxyPathProfile struct {
 	TunnelFactor float64
 	TunnelSamples uint32
 	Egress       EgressPathProfile
-	UDPKnown     bool
-	UDPAvailable bool
-	Confidence   float64
+	UDPKnown        bool
+	UDPAvailable    bool
+	UDPEgressIP     netip.Addr
+	TransportSplit  bool
+	Confidence      float64
 }
 
 // ObserveTunnelPath records passive phone->proxy evidence from the socket that
@@ -164,7 +166,18 @@ func PathProfileForProxy(p C.Proxy, ipv6 bool) ProxyPathProfile {
 	state.udp.mu.Lock()
 	profile.UDPKnown = state.udp.known && state.udp.epoch == epoch && now.Before(state.udp.expire)
 	profile.UDPAvailable = profile.UDPKnown && state.udp.ok
+	if profile.UDPKnown {
+		profile.UDPEgressIP = state.udp.exitIP
+	}
 	state.udp.mu.Unlock()
+	if profile.Egress.IP.IsValid() && profile.UDPEgressIP.IsValid() &&
+		profile.Egress.IP.Is6() == profile.UDPEgressIP.Is6() &&
+		profile.Egress.IP != profile.UDPEgressIP {
+		// This is not automatically malicious: many providers use distinct TCP
+		// and UDP NAT pools. It is still important fingerprint evidence and must
+		// be visible instead of pretending the node has one universal exit.
+		profile.TransportSplit = true
+	}
 
 	confidence := 0.0
 	if profile.Local.Known {
@@ -190,6 +203,12 @@ func PathProfileForProxy(p C.Proxy, ipv6 bool) ProxyPathProfile {
 	}
 	if profile.UDPKnown {
 		confidence += 0.05
+	}
+	if profile.UDPEgressIP.IsValid() {
+		confidence += 0.05
+	}
+	if profile.TransportSplit {
+		confidence -= 0.05
 	}
 	if profile.Egress.Divergent {
 		confidence -= 0.15
