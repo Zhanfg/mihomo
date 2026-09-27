@@ -3,6 +3,8 @@ package outboundgroup
 import (
 	"math"
 	"testing"
+
+	"github.com/metacubex/mihomo/component/linkprofile"
 )
 
 func TestAdjustedCountryWeightIsElastic(t *testing.T) {
@@ -36,5 +38,25 @@ func TestAdjustedCountryDelayIsBounded(t *testing.T) {
 	}
 	if got := adjustedCountryDelay(math.MaxUint16-10, smartCountryMismatch); got != math.MaxUint16 {
 		t.Fatalf("overflow not saturated: %d", got)
+	}
+}
+
+func TestAdjustedGreedyCostUsesBoundedLiveStress(t *testing.T) {
+	healthy := linkprofile.Assessment{Condition: linkprofile.ConditionHealthy, Stress: 0}
+	unstable := linkprofile.Assessment{Condition: linkprofile.ConditionUnstable, Stress: 1}
+
+	if got := adjustedGreedyWeight(1, smartCountryMatch, healthy); math.Abs(got-1) > 1e-9 {
+		t.Fatalf("healthy weight=%v", got)
+	}
+	if got := adjustedGreedyWeight(1, smartCountryMatch, unstable); math.Abs(got-0.86) > 1e-9 {
+		t.Fatalf("unstable weight=%v", got)
+	}
+	if got := adjustedGreedyDelay(100, smartCountryMatch, unstable); got != 200 {
+		t.Fatalf("unstable delay=%d", got)
+	}
+
+	// Even a fully stressed path is penalized, not excluded.
+	if adjustedGreedyWeight(1.3, smartCountryMismatch, unstable) <= 0 {
+		t.Fatal("greedy cost accidentally hard-excluded candidate")
 	}
 }
