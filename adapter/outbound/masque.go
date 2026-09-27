@@ -330,6 +330,34 @@ func (w *Masque) run(ctx context.Context) error {
 	return w.startLocked(runCtx)
 }
 
+const masqueLoopErrorLimit = 6
+
+func masqueLoopRetryDelay(failures int) time.Duration {
+	if failures <= 0 {
+		return 0
+	}
+	shift := failures - 1
+	if shift > 5 {
+		shift = 5
+	}
+	return 25 * time.Millisecond * time.Duration(1<<shift)
+}
+
+func waitMasqueLoopRetry(ctx context.Context, failures int) bool {
+	delay := masqueLoopRetryDelay(failures)
+	if delay <= 0 {
+		return ctx.Err() == nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 func (w *Masque) startLocked(ctx context.Context) error {
 	if !w.runDevice.Load() {
 		err := w.tunDevice.Start()
@@ -380,6 +408,7 @@ func (w *Masque) startLocked(ctx context.Context) error {
 		defer pool.Put(buf)
 		bufs := [][]byte{buf}
 		sizes := []int{0}
+		writeErrors := 0
 		for runCtx.Err() == nil {
 			_, err := w.tunDevice.Read(bufs, sizes, 0)
 			if err != nil {
@@ -392,9 +421,18 @@ func (w *Masque) startLocked(ctx context.Context) error {
 					log.Errorln("[Masque](%s) connection closed while writing to IP connection: %v", w.name, err)
 					return
 				}
-				log.Warnln("[Masque](%s) error writing to IP connection: %v, continuing...", w.name, err)
+				writeErrors++
+				if writeErrors >= masqueLoopErrorLimit {
+					log.Errorln("[Masque](%s) repeated IP write failures, resetting tunnel: %v", w.name, err)
+					return
+				}
+				log.Warnln("[Masque](%s) error writing to IP connection: %v, retrying with backoff", w.name, err)
+				if !waitMasqueLoopRetry(runCtx, writeErrors) {
+					return
+				}
 				continue
 			}
+			writeErrors = 0
 
 			if len(icmp) > 0 {
 				if _, err := w.tunDevice.Write([][]byte{icmp}, 0); err != nil {
@@ -406,6 +444,7 @@ func (w *Masque) startLocked(ctx context.Context) error {
 
 	go func() {
 		defer runCancel()
+		readErrors := 0
 		for runCtx.Err() == nil {
 			buf, err := ipConn.ReadPacket()
 			if err != nil {
@@ -413,9 +452,18 @@ func (w *Masque) startLocked(ctx context.Context) error {
 					log.Errorln("[Masque](%s) connection closed while writing to IP connection: %v", w.name, err)
 					return
 				}
-				log.Warnln("[Masque](%s) error reading from IP connection: %v, continuing...", w.name, err)
+				readErrors++
+				if readErrors >= masqueLoopErrorLimit {
+					log.Errorln("[Masque](%s) repeated IP read failures, resetting tunnel: %v", w.name, err)
+					return
+				}
+				log.Warnln("[Masque](%s) error reading from IP connection: %v, retrying with backoff", w.name, err)
+				if !waitMasqueLoopRetry(runCtx, readErrors) {
+					return
+				}
 				continue
 			}
+			readErrors = 0
 			if _, err := w.tunDevice.Write([][]byte{buf}, 0); err != nil {
 				log.Errorln("[Masque](%s) error writing to TUN device: %v", w.name, err)
 				return
