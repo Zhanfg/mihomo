@@ -328,7 +328,7 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	)
 	switch kind {
 	case capabilityUDP:
-		ok = probeUDP(ctx, p)
+		exitIP, ok = probeUDPPath(ctx, p)
 	case capabilityIPv4:
 		exitIP, sources, consistent, ok = probeIPFamilyEvidence(ctx, p, capabilityIPv4URLs[:], false, attest)
 	case capabilityIPv6:
@@ -452,22 +452,28 @@ func probeIPFamily(ctx context.Context, p C.Proxy, urls []string, wantIPv6 bool)
 	return ip, ok
 }
 
-// probeUDP sends a STUN binding request through the proxy and waits for any
-// response; a valid reply proves the node forwards UDP end to end.
+// probeUDP preserves the historical boolean probe API.
 func probeUDP(ctx context.Context, p C.Proxy) bool {
+	_, ok := probeUDPPath(ctx, p)
+	return ok
+}
+
+// probeUDPPath also returns STUN's observed public mapping, which is independent
+// evidence of the node's UDP egress identity.
+func probeUDPPath(ctx context.Context, p C.Proxy) (netip.Addr, bool) {
 	host, portStr, err := net.SplitHostPort(capabilityStunServer)
 	if err != nil {
-		return false
+		return netip.Addr{}, false
 	}
 	ip, err := resolver.ResolveIPWithResolver(ctx, host, resolver.ProxyServerHostResolver)
 	if err != nil {
-		return false
+		return netip.Addr{}, false
 	}
 	var port uint16
 	if v, err := netip.ParseAddrPort(net.JoinHostPort("0.0.0.0", portStr)); err == nil {
 		port = v.Port()
 	} else {
-		return false
+		return netip.Addr{}, false
 	}
 	metadata := &C.Metadata{
 		NetWork: C.UDP,
@@ -477,7 +483,7 @@ func probeUDP(ctx context.Context, p C.Proxy) bool {
 	}
 	pc, err := p.ListenPacketContext(ctx, metadata)
 	if err != nil {
-		return false
+		return netip.Addr{}, false
 	}
 	defer func() { _ = pc.Close() }()
 
@@ -486,7 +492,7 @@ func probeUDP(ctx context.Context, p C.Proxy) bool {
 	binary.BigEndian.PutUint16(req[0:2], 0x0001)
 	binary.BigEndian.PutUint32(req[4:8], 0x2112A442)
 	if _, err = rand.Read(req[8:20]); err != nil {
-		return false
+		return netip.Addr{}, false
 	}
 	txid := append([]byte(nil), req[8:20]...)
 
@@ -497,7 +503,7 @@ func probeUDP(ctx context.Context, p C.Proxy) bool {
 		deadlineSupported = pc.SetDeadline(deadline) == nil
 	}
 	if _, err = pc.WriteTo(req, dst); err != nil {
-		return false
+		return netip.Addr{}, false
 	}
 	buf := make([]byte, 512)
 	readPacket := func() (int, net.Addr, error) {
@@ -529,12 +535,66 @@ func probeUDP(ctx context.Context, p C.Proxy) bool {
 	for {
 		n, src, err := readPacket()
 		if err != nil {
-			return false
+			return netip.Addr{}, false
 		}
 		if validSTUNBindingSuccess(buf[:n], txid) && validSTUNSource(src, dst) {
-			return true
+			mapped, _ := stunMappedAddress(buf[:n], txid)
+			return mapped, true
 		}
 	}
+}
+
+func stunMappedAddress(message, txid []byte) (netip.Addr, bool) {
+	if !validSTUNBindingSuccess(message, txid) {
+		return netip.Addr{}, false
+	}
+	for offset := 20; offset+4 <= len(message); {
+		attrType := binary.BigEndian.Uint16(message[offset : offset+2])
+		attrLen := int(binary.BigEndian.Uint16(message[offset+2 : offset+4]))
+		valueStart := offset + 4
+		valueEnd := valueStart + attrLen
+		if valueEnd > len(message) {
+			return netip.Addr{}, false
+		}
+		value := message[valueStart:valueEnd]
+
+		if (attrType == 0x0020 || attrType == 0x0001) && len(value) >= 8 {
+			family := value[1]
+			switch family {
+			case 0x01:
+				if len(value) < 8 {
+					break
+				}
+				var raw [4]byte
+				copy(raw[:], value[4:8])
+				if attrType == 0x0020 {
+					cookie := [4]byte{0x21, 0x12, 0xA4, 0x42}
+					for i := range raw {
+						raw[i] ^= cookie[i]
+					}
+				}
+				return netip.AddrFrom4(raw).Unmap(), true
+			case 0x02:
+				if len(value) < 20 || len(txid) != 12 {
+					break
+				}
+				var raw [16]byte
+				copy(raw[:], value[4:20])
+				if attrType == 0x0020 {
+					mask := [16]byte{0x21, 0x12, 0xA4, 0x42}
+					copy(mask[4:], txid)
+					for i := range raw {
+						raw[i] ^= mask[i]
+					}
+				}
+				return netip.AddrFrom16(raw), true
+			}
+		}
+
+		padded := (attrLen + 3) &^ 3
+		offset = valueStart + padded
+	}
+	return netip.Addr{}, false
 }
 
 func validSTUNSource(src net.Addr, expected *net.UDPAddr) bool {
