@@ -841,63 +841,87 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (pc C.PacketConn, err error) {
 	s.markTrafficActivity()
 
-	var finalErr error
+	tryListen := func(proxies []C.Proxy, pinned bool) (C.PacketConn, error) {
+		var finalErr error
+		limit := len(proxies)
+		if limit > maxSelected {
+			limit = maxSelected
+		}
 
-	proxies, _ := s.selectProxies(metadata, s.GetProxies(true))
+		for i := 0; i < limit; i++ {
+			proxy := proxies[i]
 
-	limit := len(proxies)
-	if limit > maxSelected {
-		limit = maxSelected
+			// A cached winner gets one chance before Smart reselects. A genuinely
+			// single-node group still retains the historical retry behaviour.
+			attempts := 1
+			if len(proxies) == 1 && !pinned {
+				attempts = maxRetries
+			}
+
+			for a := 0; a < attempts; a++ {
+				historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
+				var timeout time.Duration
+				if historyConnectTime > 0 {
+					timeout = time.Duration(float64(historyConnectTime)*connectThreshold) * time.Millisecond
+				}
+				if timeout > C.DefaultUDPTimeout || timeout <= 0 {
+					timeout = C.DefaultUDPTimeout
+				}
+				ctxDial, cancel := context.WithTimeout(ctx, timeout)
+				start := time.Now()
+				packetConn, listenErr := proxy.ListenPacketContext(ctxDial, metadata)
+				cancel()
+				connectTime := time.Since(start).Milliseconds()
+
+				if listenErr != nil {
+					if tunnel.ShouldStopRetry(listenErr) {
+						return nil, listenErr
+					}
+					finalErr = listenErr
+					s.submitConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, listenErr, false)
+					continue
+				}
+
+				s.adoptUnwrapWinner(metadata, proxy)
+				s.onDialSuccess()
+				return s.WrapPacketConnWithMetric(packetConn, proxy, metadata, connectTime), nil
+			}
+		}
+
+		if finalErr == nil {
+			finalErr = os.ErrDeadlineExceeded
+		}
+		return nil, finalErr
 	}
 
-	singleProxyRetry := (len(proxies) == 1)
+	all := s.GetProxies(true)
+	proxies, pinned := s.selectProxies(metadata, all)
+	pc, err = tryListen(proxies, pinned)
+	if err == nil || tunnel.ShouldStopRetry(err) {
+		return pc, err
+	}
 
-	for i := 0; i < limit; i++ {
-		proxy := proxies[i]
-		attempts := 1
-		if singleProxyRetry {
-			attempts = maxRetries
-		}
-
-		for a := 0; a < attempts; a++ {
-			historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
-			var timeout time.Duration
-			if historyConnectTime > 0 {
-				timeout = time.Duration(float64(historyConnectTime)*connectThreshold) * time.Millisecond
+	failedProxies := proxies
+	if pinned {
+		// UDP sessions cannot migrate an already-established flow between proxy
+		// exits, but a new session should not fail just because its cached winner
+		// died. Clear the stale pin and retry fresh candidates immediately.
+		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+		all = s.GetProxies(true)
+		fresh, _ := s.selectProxies(metadata, all)
+		if len(fresh) > 0 {
+			failedProxies = fresh
+			pc, retryErr := tryListen(fresh, false)
+			if retryErr == nil || tunnel.ShouldStopRetry(retryErr) {
+				return pc, retryErr
 			}
-			if timeout > C.DefaultUDPTimeout || timeout <= 0 {
-				timeout = C.DefaultUDPTimeout
-			}
-			ctxDial, cancel := context.WithTimeout(ctx, timeout)
-			start := time.Now()
-			pc, err = proxy.ListenPacketContext(ctxDial, metadata)
-			cancel()
-			connectTime := time.Since(start).Milliseconds()
-
-			if err != nil {
-				if tunnel.ShouldStopRetry(err) {
-					return nil, err
-				}
-				finalErr = err
-				s.submitConnectionStats(metadata.Clone(), proxy, connectTime, 0, 0, 0, 0, 0, 0, nil, err, false)
-				continue
-			}
-
-			s.adoptUnwrapWinner(metadata, proxy)
-			s.onDialSuccess()
-			return s.WrapPacketConnWithMetric(pc, proxy, metadata, connectTime), nil
-		}
-
-		if singleProxyRetry {
-			break
+			err = retryErr
 		}
 	}
 
 	s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
-
-	s.groupDialFailed(proxies, finalErr)
-
-	return nil, finalErr
+	s.groupDialFailed(failedProxies, err)
+	return nil, err
 }
 
 func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
