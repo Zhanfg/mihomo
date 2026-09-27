@@ -26,12 +26,6 @@ var presetSceneParams = [4]SceneParams{
 const (
 	WeightTypeModelCalibrationTCP = "model-cal:tcp"
 	WeightTypeModelCalibrationUDP = "model-cal:udp"
-
-	// Link feedback is stored in the existing bounded weight map. This keeps
-	// persistence backward-compatible and avoids another per-target cache.
-	WeightTypeLinkRTT    = "link:rtt-ms"
-	WeightTypeLinkRTTVar = "link:rttvar-ms"
-	WeightTypeLinkFactor = "link:factor"
 )
 
 // LinkQualityFactor is kept as a compatibility wrapper for existing Smart
