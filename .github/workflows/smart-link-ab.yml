@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - opt/smart-link-v2
+      - opt/smart-link-v2-stage2
     paths:
       - ".github/workflows/smart-link-ab.yml"
 
