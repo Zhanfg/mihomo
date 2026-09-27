@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"math/rand/v2"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,35 @@ type HealthCheckOption struct {
 }
 
 var healthCheckClockStart = time.Now()
+
+const androidGlobalHealthProbeLimit = 4
+
+var androidHealthProbeSem = make(chan struct{}, androidGlobalHealthProbeLimit)
+
+func healthCheckParallelism(android bool) int {
+	if android {
+		return 2
+	}
+	return 10
+}
+
+func acquireHealthProbe(ctx context.Context) bool {
+	if runtime.GOOS != "android" {
+		return true
+	}
+	select {
+	case androidHealthProbeSem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func releaseHealthProbe() {
+	if runtime.GOOS == "android" {
+		<-androidHealthProbeSem
+	}
+}
 
 type extraOption struct {
 	expectedStatus utils.IntRanges[uint16]
@@ -371,7 +401,7 @@ func (hc *HealthCheck) check() {
 		id := utils.NewUUIDV4().String()
 		log.Debugln("Start New Health Checking {%s}", id)
 		b := new(errgroup.Group)
-		b.SetLimit(10)
+		b.SetLimit(healthCheckParallelism(runtime.GOOS == "android"))
 
 		// execute default health check
 		option := &extraOption{filters: nil, expectedStatus: hc.expectedStatus}
@@ -434,6 +464,10 @@ func (hc *HealthCheck) execute(b *errgroup.Group, proxies []C.Proxy, url, uid st
 		b.Go(func() error {
 			ctx, cancel := context.WithTimeout(hc.ctx, hc.timeout)
 			defer cancel()
+			if !acquireHealthProbe(ctx) {
+				return ctx.Err()
+			}
+			defer releaseHealthProbe()
 			log.Debugln("Health Checking, proxy: %s, url: %s, id: {%s}", p.Name(), url, uid)
 			_, _ = p.URLTest(ctx, url, expectedStatus)
 			log.Debugln("Health Checked, proxy: %s, url: %s, alive: %t, delay: %d ms uid: {%s}", p.Name(), url, p.AliveForTestUrl(url), p.LastDelayForTestUrl(url), uid)
