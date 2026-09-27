@@ -1,0 +1,63 @@
+package adapter
+
+import (
+	"net/netip"
+	"testing"
+	"time"
+
+	"github.com/metacubex/mihomo/component/linkprofile"
+	"github.com/metacubex/mihomo/component/netstate"
+)
+
+func TestTunnelPathEvidenceExpiresOnNetworkEpoch(t *testing.T) {
+	p := stub("epoch-path")
+	netstate.Advance()
+
+	factor := ObserveTunnelPath(p, linkprofile.TunnelMetrics{
+		RTTMs: 900, RTTVarMs: 450, LossRate: 0.08,
+		Unacked: 30, Lost: 4, Cwnd: 10,
+	})
+	if factor >= 1 {
+		t.Fatalf("weak path factor=%v, want <1", factor)
+	}
+	if got := TunnelPathFactorForProxy(p); got != factor {
+		t.Fatalf("factor snapshot=%v want=%v", got, factor)
+	}
+
+	profile := PathProfileForProxy(p, false)
+	if !profile.TunnelFresh || profile.TunnelSamples != 1 {
+		t.Fatalf("profile=%+v", profile)
+	}
+
+	netstate.Advance()
+	if got := TunnelPathFactorForProxy(p); got != 1 {
+		t.Fatalf("stale epoch factor=%v, want neutral 1", got)
+	}
+	profile = PathProfileForProxy(p, false)
+	if profile.TunnelFresh {
+		t.Fatalf("old tunnel evidence survived network epoch: %+v", profile)
+	}
+}
+
+func TestPathProfileConfidenceRewardsCorroboratedEgress(t *testing.T) {
+	p := stub("attested-path")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.epoch = epoch
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.exitIP = netip.MustParseAddr("1.1.1.1")
+	state.ipv4.sources = 2
+	state.ipv4.consistent = true
+	state.ipv4.mu.Unlock()
+
+	profile := PathProfileForProxy(p, false)
+	if !profile.Egress.Fresh || profile.Egress.Sources != 2 || !profile.Egress.Consistent {
+		t.Fatalf("egress=%+v", profile.Egress)
+	}
+	if profile.Confidence < 0.5 {
+		t.Fatalf("confidence=%v, expected corroborated evidence", profile.Confidence)
+	}
+}
