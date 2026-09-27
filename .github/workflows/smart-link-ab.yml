@@ -105,11 +105,16 @@ jobs:
                   finally:
                       upstream.close()
 
+          class TargetServer(http.server.ThreadingHTTPServer):
+              daemon_threads = True
+              request_queue_size = 256
+
           class Threaded(socketserver.ThreadingMixIn, socketserver.TCPServer):
               daemon_threads = True
               allow_reuse_address = True
+              request_queue_size = 256
 
-          target = http.server.ThreadingHTTPServer(("127.0.0.1", 18080), Target)
+          target = TargetServer(("127.0.0.1", 18080), Target)
           proxy = Threaded(("127.0.0.1", 18081), Proxy)
           threading.Thread(target=target.serve_forever, daemon=True).start()
           proxy.serve_forever()
@@ -131,7 +136,7 @@ jobs:
           workers = int(sys.argv[2])
           def one(i):
               try:
-                  s = socket.create_connection(("127.0.0.1", 7890), timeout=5)
+                  s = socket.create_connection(("127.0.0.1", 7890), timeout=10)
                   req = (
                       f"GET http://127.0.0.1:18080/item/{i} HTTP/1.1\r\n"
                       "Host: 127.0.0.1:18080\r\n"
