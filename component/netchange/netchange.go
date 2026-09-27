@@ -60,10 +60,11 @@ type notifier struct {
 var defaultNotifier = &notifier{
 	settleDelay: networkSettleDelay(runtime.GOOS == "android"),
 	work: fanOut{
-	flushCache:      iface.FlushCache,
-	resetConnection: resolver.ResetConnection,
-	providers:       tunnel.Providers,
-}}
+		flushCache:      iface.FlushCache,
+		resetConnection: resolver.ResetConnection,
+		providers:       tunnel.Providers,
+	},
+}
 
 // Notify reports that the default interface changed. A flapping link
 // supersedes the running fan-out instead of stacking another one on top of it.
