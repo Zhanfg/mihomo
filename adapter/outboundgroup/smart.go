@@ -1384,7 +1384,7 @@ func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
 	if !knownFamily {
 		return false
 	}
-	known, ok := adapter.IPFamilyCapabilityKnown(p, ipv6)
+	known, ok := adapter.CachedIPFamilyCapabilityKnown(p, ipv6)
 	return known && !ok
 }
 
