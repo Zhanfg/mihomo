@@ -71,6 +71,8 @@ type capabilityEntry struct {
 	failures   uint8
 	exitIP     netip.Addr
 	country    string
+	asn        string
+	asnOrg     string
 	epoch      uint64
 	sources    uint8
 	consistent bool
@@ -350,6 +352,8 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		if exitIP.IsValid() {
 			if entry.exitIP != exitIP {
 				entry.country = ""
+				entry.asn = ""
+				entry.asnOrg = ""
 			}
 			entry.exitIP = exitIP
 		}
@@ -377,6 +381,8 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 			if kind == capabilityIPv4 || kind == capabilityIPv6 {
 				entry.exitIP = netip.Addr{}
 				entry.country = ""
+				entry.asn = ""
+				entry.asnOrg = ""
 			}
 			entry.mu.Unlock()
 		}
