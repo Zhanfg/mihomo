@@ -30,6 +30,7 @@ on:
       - "component/keepalive/**"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
+      - "tunnel/statistic/**"
 
 permissions:
   contents: write
@@ -93,6 +94,7 @@ jobs:
           set -euo pipefail
           CGO_ENABLED=0 go test ./component/linkprofile ./component/netstate ./component/netchange -count=1
           CGO_ENABLED=0 go test ./adapter/provider -run 'TestHealthCheckParallelismPolicy' -count=1
+          CGO_ENABLED=0 go test ./tunnel/statistic -count=1
 
       - name: MASQUE weak-network regression
         shell: bash

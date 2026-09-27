@@ -7,6 +7,9 @@ on:
       - opt/smart-link-v2
     paths:
       - ".github/workflows/smart-link-ab.yml"
+      - "adapter/outboundgroup/**"
+      - "component/smart/**"
+      - "tunnel/statistic/**"
 
 permissions:
   contents: read

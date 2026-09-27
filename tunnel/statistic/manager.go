@@ -2,6 +2,7 @@ package statistic
 
 import (
 	"os"
+	"sync"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -21,6 +22,7 @@ func init() {
 		downloadTotal: atomic.NewInt64(0),
 		pid:           int32(os.Getpid()),
 	}
+	DefaultManager.ensureRateWake()
 
 	go DefaultManager.handle()
 }
@@ -36,6 +38,14 @@ type Manager struct {
 	downloadTotal atomic.Int64
 	pid           int32
 	memory        uint64
+
+	// The old rate sampler woke the process once per second forever, including
+	// while the core was completely idle. rateWake is a single coalesced edge:
+	// the first byte after an idle period arms sampling; sustained traffic keeps
+	// the loop active without one signal per packet.
+	rateInit   sync.Once
+	rateWake   chan struct{}
+	rateActive atomic.Bool
 }
 
 func (m *Manager) Join(c Tracker) {
@@ -64,11 +74,38 @@ func (m *Manager) Range(f func(c Tracker) bool) {
 func (m *Manager) PushUploaded(size int64) {
 	m.uploadTemp.Add(size)
 	m.uploadTotal.Add(size)
+	if size != 0 {
+		m.wakeRateLoop()
+	}
 }
 
 func (m *Manager) PushDownloaded(size int64) {
 	m.downloadTemp.Add(size)
 	m.downloadTotal.Add(size)
+	if size != 0 {
+		m.wakeRateLoop()
+	}
+}
+
+func (m *Manager) ensureRateWake() chan struct{} {
+	m.rateInit.Do(func() {
+		m.rateWake = make(chan struct{}, 1)
+	})
+	return m.rateWake
+}
+
+func (m *Manager) wakeRateLoop() {
+	// One cheap load on the hot path while sampling is already armed. Only the
+	// idle->active transition pays a CAS and channel send.
+	if m.rateActive.Load() || !m.rateActive.CompareAndSwap(false, true) {
+		return
+	}
+	wake := m.ensureRateWake()
+	select {
+	case wake <- struct{}{}:
+	default:
+		// A queued wake already represents the same active edge.
+	}
 }
 
 func (m *Manager) Now() (up int64, down int64) {
@@ -116,11 +153,90 @@ func (m *Manager) ResetStatistic() {
 }
 
 func (m *Manager) handle() {
-	ticker := time.NewTicker(time.Second)
+	m.runRateLoop(time.Second, nil, nil)
+}
 
-	for range ticker.C {
-		m.uploadBlip.Store(m.uploadTemp.Swap(0))
-		m.downloadBlip.Store(m.downloadTemp.Swap(0))
+// runRateLoop preserves the public ~1 Hz traffic-rate semantics without a
+// permanent ticker. When idle it owns no armed timer and blocks only on the
+// first real byte (or stop in tests). After traffic ceases, one final interval
+// publishes zero and the loop parks again.
+//
+// The rateActive handoff is deliberately two-phase. We clear it before checking
+// the temp counters; any concurrent Push then either flips it back and sends a
+// wake, or our own recheck sees the bytes and flips it back. Therefore an
+// idle-transition race cannot strand unsampled traffic.
+func (m *Manager) runRateLoop(interval time.Duration, stop <-chan struct{}, onSample func(up, down int64)) {
+	if interval <= 0 {
+		interval = time.Second
+	}
+	wake := m.ensureRateWake()
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+
+	for {
+		if !m.rateActive.Load() {
+			select {
+			case <-stop:
+				return
+			case <-wake:
+			}
+			if !m.rateActive.Load() {
+				continue
+			}
+		} else {
+			// Drain an edge that raced with our idle->active handoff. The state
+			// bit, not channel depth, is authoritative.
+			select {
+			case <-wake:
+			default:
+			}
+		}
+
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(interval)
+
+		select {
+		case <-stop:
+			return
+		case <-timer.C:
+		}
+
+		up := m.uploadTemp.Swap(0)
+		down := m.downloadTemp.Swap(0)
+		m.uploadBlip.Store(up)
+		m.downloadBlip.Store(down)
+		if onSample != nil {
+			onSample(up, down)
+		}
+
+		if up != 0 || down != 0 {
+			continue
+		}
+
+		// No bytes in this interval: publish zero above, then attempt to park.
+		// A concurrent producer after Store(false) owns the wake edge.
+		m.rateActive.Store(false)
+		if m.uploadTemp.Load() != 0 || m.downloadTemp.Load() != 0 {
+			// If the producer has not performed its CAS yet, claim the active
+			// state ourselves and continue in-place. If it has, its signal is
+			// already queued and will be drained on the next iteration.
+			m.rateActive.CompareAndSwap(false, true)
+		}
 	}
 }
 
