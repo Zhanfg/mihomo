@@ -120,7 +120,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/inbound ./listener/sing_ebpf -count=1
+          # Keep this gate scoped to eBPF. Running the entire listener/inbound
+          # package also executes unrelated live VMess/V2Ray TLSMirror interop
+          # tests, whose external timing can randomly fail after every Smart
+          # and power regression has already passed.
+          CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/inbound -run '^TestEBPF' -count=1
+          CGO_ENABLED=0 go test -tags "with_gvisor with_ebpf" ./listener/sing_ebpf -count=1
 
       - name: Build Linux parser self-test core
         shell: bash
