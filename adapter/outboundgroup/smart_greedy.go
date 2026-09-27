@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/component/linkprofile"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -41,6 +42,16 @@ func adjustedCountryWeight(weight float64, fit smartCountryFit) float64 {
 	}
 }
 
+func saturatingDelayAdd(delay, penalty uint16) uint16 {
+	if penalty == 0 {
+		return delay
+	}
+	if uint32(delay)+uint32(penalty) > math.MaxUint16 {
+		return math.MaxUint16
+	}
+	return delay + penalty
+}
+
 func adjustedCountryDelay(delay uint16, fit smartCountryFit) uint16 {
 	var penalty uint16
 	switch fit {
@@ -49,13 +60,31 @@ func adjustedCountryDelay(delay uint16, fit smartCountryFit) uint16 {
 	case smartCountryUnknown:
 		penalty = countryUnknownDelayPenalty
 	}
-	if penalty == 0 {
+	return saturatingDelayAdd(delay, penalty)
+}
+
+// adjustedGreedyWeight combines slow historical evidence with bounded current
+// path stress. The live path can correct stale history, but at most by 14% so a
+// single transient sample cannot erase a node's accumulated record.
+func adjustedGreedyWeight(weight float64, fit smartCountryFit, assessment linkprofile.Assessment) float64 {
+	weight = adjustedCountryWeight(weight, fit)
+	if assessment.Condition == linkprofile.ConditionUnknown {
+		return weight
+	}
+	pathFactor := 1.0 - math.Min(0.14, math.Max(0, assessment.Stress)*0.14)
+	return weight * pathFactor
+}
+
+// adjustedGreedyDelay applies the same idea to delay-ranked fallback nodes.
+// Country and current path condition are additive bounded costs, so every
+// candidate remains reachable when it is materially faster or more reliable.
+func adjustedGreedyDelay(delay uint16, fit smartCountryFit, assessment linkprofile.Assessment) uint16 {
+	delay = adjustedCountryDelay(delay, fit)
+	if assessment.Condition == linkprofile.ConditionUnknown {
 		return delay
 	}
-	if uint32(delay)+uint32(penalty) > math.MaxUint16 {
-		return math.MaxUint16
-	}
-	return delay + penalty
+	pathPenalty := uint16(math.Round(math.Min(1, math.Max(0, assessment.Stress)) * 100))
+	return saturatingDelayAdd(delay, pathPenalty)
 }
 
 // countryGreedyFit returns hard eligibility plus the soft affinity fit.
