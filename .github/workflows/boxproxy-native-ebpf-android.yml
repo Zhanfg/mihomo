@@ -6,6 +6,7 @@ on:
     branches:
       - integration/boxproxy-native-ebpf
       - opt/smart-link-v2
+      - opt/smart-greedy-v3
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
