@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - opt/smart-link-v2
+      - opt/smart-greedy-v3
     paths:
       - ".github/workflows/smart-link-ab.yml"
       - "adapter/outboundgroup/**"
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   compare:
-    name: Integration vs Smart Link v2
+    name: Integration vs Smart candidate
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -33,7 +34,7 @@ jobs:
       - name: Checkout candidate
         uses: actions/checkout@v6
         with:
-          ref: opt/smart-link-v2
+          ref: ${{ github.ref_name }}
           path: candidate
 
       - name: Set up Go
