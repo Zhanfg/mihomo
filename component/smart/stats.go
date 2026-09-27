@@ -501,7 +501,10 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 	prefetchLimit := globalCacheParams.MaxTargets / 2
 	globalCacheParams.mutex.RUnlock()
 
-	activeTargets := s.GetActiveTargets(group, config, prefetchLimit)
+	activeTargets := s.takeDirtyTargets(group, config, prefetchLimit)
+	if len(activeTargets) == 0 {
+		return 0
+	}
 
 	nodeScores := make(map[string]float64, len(proxies))
 
@@ -614,80 +617,120 @@ func (s *Store) StoreNodeWeightRanking(group, config string, ranking NodeRank) {
 	})
 }
 
-// 获取目标的最佳代理
-func (s *Store) GetBestProxyForTarget(group, config, target string, isUDP bool) ([]string, []float64, error) {
-	if target == "" {
-		return nil, nil, errors.New("empty target")
-	}
+type nodeWeightMinHeap []NodeWithWeight
 
-	allStatsMap, err := s.GetAllStats(group, config)
-	if err != nil {
-		return nil, nil, err
+func (h nodeWeightMinHeap) Len() int { return len(h) }
+func (h nodeWeightMinHeap) Less(i, j int) bool {
+	if h[i].Weight != h[j].Weight {
+		return h[i].Weight < h[j].Weight
 	}
-
-	return s.bestProxyForTargetFrom(allStatsMap, group, config, target, isUDP)
+	// For equal weights, lexicographically larger names are worse because final
+	// ordering prefers smaller names.
+	return h[i].Node > h[j].Node
+}
+func (h nodeWeightMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *nodeWeightMinHeap) Push(x any)   { *h = append(*h, x.(NodeWithWeight)) }
+func (h *nodeWeightMinHeap) Pop() any {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
 }
 
-func (s *Store) bestProxyForTargetFrom(allStatsMap map[string]map[string][]byte, group, config, target string, isUDP bool) ([]string, []float64, error) {
-	now := time.Now().Unix()
-	minDecay := 0.4
-
-	getTimeDecay := func(lastUsedTime int64) float64 {
-		return GetTimeDecayWithCache(lastUsedTime, now, minDecay)
+func rankTargetStats(stats map[string][]byte, isUDP bool, limit int, now int64) []NodeWithWeight {
+	if len(stats) == 0 {
+		return nil
 	}
-
 	weightType := WeightTypeTCP
 	if isUDP {
 		weightType = WeightTypeUDP
 	}
 
-	nodesWithWeight := make(map[string]float64)
-
-	stats := allStatsMap[target]
-	if len(stats) == 0 {
-		stats, _ = s.GetStatsForTarget(group, config, target, "")
+	if limit <= 0 || limit > len(stats) {
+		limit = len(stats)
 	}
+	h := make(nodeWeightMinHeap, 0, limit)
+	heap.Init(&h)
 
 	for nodeName, data := range stats {
 		var record StatsRecord
-		if json.Unmarshal(data, &record) != nil {
+		if json.Unmarshal(data, &record) != nil || record.Weights == nil {
 			continue
 		}
-		var weight float64
-		if record.Weights != nil {
-			weight = record.Weights[weightType]
+		weight := record.Weights[weightType]
+		if weight <= 0 {
+			continue
 		}
-		if weight > 0 {
-			timeDecay := getTimeDecay(record.LastUsed)
-			nodesWithWeight[nodeName] = weight * timeDecay
+		weight *= GetTimeDecayWithCache(record.LastUsed, now, 0.4)
+		candidate := NodeWithWeight{Node: nodeName, Weight: weight}
+
+		if h.Len() < limit {
+			heap.Push(&h, candidate)
+			continue
+		}
+		worst := h[0]
+		if candidate.Weight > worst.Weight || (candidate.Weight == worst.Weight && candidate.Node < worst.Node) {
+			heap.Pop(&h)
+			heap.Push(&h, candidate)
 		}
 	}
 
-	if len(nodesWithWeight) == 0 {
+	result := make([]NodeWithWeight, h.Len())
+	for i := len(result) - 1; i >= 0; i-- {
+		result[i] = heap.Pop(&h).(NodeWithWeight)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Weight != result[j].Weight {
+			return result[i].Weight > result[j].Weight
+		}
+		return result[i].Node < result[j].Node
+	})
+	return result
+}
+
+func bestProxySlices(nodeList []NodeWithWeight) ([]string, []float64, error) {
+	if len(nodeList) == 0 {
 		return nil, nil, errors.New("no best node with enough weight")
 	}
-
-	nodeList := make([]NodeWithWeight, 0, len(nodesWithWeight))
-	for node, weight := range nodesWithWeight {
-		nodeList = append(nodeList, NodeWithWeight{node, weight})
-	}
-
-	sort.Slice(nodeList, func(i, j int) bool {
-		if nodeList[i].Weight != nodeList[j].Weight {
-			return nodeList[i].Weight > nodeList[j].Weight
-		}
-		return nodeList[i].Node < nodeList[j].Node
-	})
-
-	n := len(nodeList)
-	bestNodes := make([]string, n)
-	bestWeights := make([]float64, n)
+	bestNodes := make([]string, len(nodeList))
+	bestWeights := make([]float64, len(nodeList))
 	for i, nw := range nodeList {
 		bestNodes[i] = nw.Node
 		bestWeights[i] = nw.Weight
 	}
-
 	return bestNodes, bestWeights, nil
+}
+
+// GetBestProxyForTargetLimit is the hot-path selector. It reads only the
+// requested target and keeps a bounded top-K heap, so one connection does not
+// deserialize every target in the Smart database.
+func (s *Store) GetBestProxyForTargetLimit(group, config, target string, isUDP bool, limit int) ([]string, []float64, error) {
+	if target == "" {
+		return nil, nil, errors.New("empty target")
+	}
+	stats, err := s.GetStatsForTarget(group, config, target, "")
+	if err != nil {
+		return nil, nil, err
+	}
+	return bestProxySlices(rankTargetStats(stats, isUDP, limit, time.Now().Unix()))
+}
+
+// 获取目标的最佳代理
+func (s *Store) GetBestProxyForTarget(group, config, target string, isUDP bool) ([]string, []float64, error) {
+	return s.GetBestProxyForTargetLimit(group, config, target, isUDP, 0)
+}
+
+func (s *Store) bestProxyForTargetFrom(allStatsMap map[string]map[string][]byte, group, config, target string, isUDP bool) ([]string, []float64, error) {
+	stats := allStatsMap[target]
+	if len(stats) == 0 {
+		var err error
+		stats, err = s.GetStatsForTarget(group, config, target, "")
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return bestProxySlices(rankTargetStats(stats, isUDP, 0, time.Now().Unix()))
 }
 
 // 获取活跃域名
@@ -704,59 +747,7 @@ func (h *targetMinHeap) Pop() interface{} {
 }
 
 func (s *Store) GetActiveTargets(group, config string, limit int) []ActiveTarget {
-	allStats, err := s.GetAllStats(group, config)
-	if err != nil || len(allStats) == 0 {
-		return nil
-	}
-
-	h := &targetMinHeap{}
-	heap.Init(h)
-
-	for target, nodeStats := range allStats {
-		active := make(map[bool]int64)
-
-		for _, data := range nodeStats {
-			var record StatsRecord
-			if json.Unmarshal(data, &record) != nil {
-				continue
-			}
-			if record.Weights == nil {
-				continue
-			}
-
-			if w, ok := record.Weights[WeightTypeTCP]; ok && w > 0 {
-				if last, exists := active[false]; !exists || record.LastUsed > last {
-					active[false] = record.LastUsed
-				}
-			}
-			if w, ok := record.Weights[WeightTypeUDP]; ok && w > 0 {
-				if last, exists := active[true]; !exists || record.LastUsed > last {
-					active[true] = record.LastUsed
-				}
-			}
-		}
-
-		for isUDP, lastUsed := range active {
-			heap.Push(h, ActiveTarget{
-				Target:   target,
-				IsUDP:    isUDP,
-				LastUsed: lastUsed,
-			})
-			if h.Len() > limit {
-				heap.Pop(h)
-			}
-		}
-	}
-
-	sorted := make([]ActiveTarget, 0, h.Len())
-	for h.Len() > 0 {
-		sorted = append(sorted, heap.Pop(h).(ActiveTarget))
-	}
-	for i, j := 0, len(sorted)-1; i < j; i, j = i+1, j-1 {
-		sorted[i], sorted[j] = sorted[j], sorted[i]
-	}
-
-	return sorted
+	return s.snapshotActiveTargets(group, config, limit)
 }
 
 // RunPrefetch 最佳节点预计算
@@ -783,13 +774,9 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]bool) int 
 
 	items := make([]prefetchItem, 0, len(activeTargets))
 
-	hoistedStats, hoistedErr := s.GetAllStats(group, config)
-
+	const prefetchCandidateLimit = 16
 	bestFor := func(active ActiveTarget) ([]string, []float64, error) {
-		if hoistedErr == nil {
-			return s.bestProxyForTargetFrom(hoistedStats, group, config, active.Target, active.IsUDP)
-		}
-		return s.GetBestProxyForTarget(group, config, active.Target, active.IsUDP)
+		return s.GetBestProxyForTargetLimit(group, config, active.Target, active.IsUDP, prefetchCandidateLimit)
 	}
 
 	for _, active := range activeTargets {
