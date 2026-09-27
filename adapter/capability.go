@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/component/mmdb"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
@@ -62,14 +63,18 @@ const (
 )
 
 type capabilityEntry struct {
-	mu       sync.Mutex
-	known    bool
-	ok       bool
-	expire   time.Time
-	probing  bool
-	failures uint8
-	exitIP   netip.Addr
-	country  string
+	mu         sync.Mutex
+	known      bool
+	ok         bool
+	expire     time.Time
+	probing    bool
+	failures   uint8
+	exitIP     netip.Addr
+	country    string
+	epoch      uint64
+	sources    uint8
+	consistent bool
+	attest     bool
 }
 
 type capabilityState struct {
@@ -94,7 +99,7 @@ var (
 
 func capabilityProbeConcurrency() int {
 	if runtime.GOOS == "android" {
-		return 4
+		return 2
 	}
 	return 8
 }
@@ -201,10 +206,8 @@ const (
 	capNo      = -1
 )
 
-// stateOrProbe returns the cached verdict for this proxy, scheduling an async
-// probe when nothing usable is cached. A stale verdict keeps being reported
-// while the refresh runs.
-func (s *capabilityState) stateOrProbe(p C.Proxy, kind capabilityKind) int {
+// capabilityEntryFor returns one family/capability slot.
+func (s *capabilityState) capabilityEntryFor(kind capabilityKind) *capabilityEntry {
 	entry := &s.udp
 	switch kind {
 	case capabilityIPv4:
@@ -212,14 +215,10 @@ func (s *capabilityState) stateOrProbe(p C.Proxy, kind capabilityKind) int {
 	case capabilityIPv6:
 		entry = &s.ipv6
 	}
-	entry.mu.Lock()
-	fresh := entry.known && time.Now().Before(entry.expire)
-	known, ok := entry.known, entry.ok
-	if !fresh && !entry.probing {
-		entry.probing = true
-		go probeCapability(p, kind, entry)
-	}
-	entry.mu.Unlock()
+	return entry
+}
+
+func verdict(known, ok bool) int {
 	if !known {
 		return capUnknown
 	}
@@ -229,9 +228,79 @@ func (s *capabilityState) stateOrProbe(p C.Proxy, kind capabilityKind) int {
 	return capNo
 }
 
+// cachedState is intentionally probe-free. Soft ranking calls this for every
+// candidate, so opening sockets here would turn one selection into an all-node
+// radio wake-up storm.
+func (s *capabilityState) cachedState(kind capabilityKind) int {
+	entry := s.capabilityEntryFor(kind)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+	entry.mu.Lock()
+	fresh := entry.known && entry.epoch == epoch && now.Before(entry.expire)
+	known, ok := entry.known, entry.ok
+	entry.mu.Unlock()
+	if !fresh {
+		return capUnknown
+	}
+	return verdict(known, ok)
+}
+
+// stateOrProbe is reserved for hard requirements, diagnostics and the node that
+// is actually selected. A stale verdict remains usable while a background
+// refresh runs, preserving availability through handovers.
+func (s *capabilityState) stateOrProbe(p C.Proxy, kind capabilityKind) int {
+	entry := s.capabilityEntryFor(kind)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+	entry.mu.Lock()
+	fresh := entry.known && entry.epoch == epoch && now.Before(entry.expire)
+	known, ok := entry.known, entry.ok
+	if !fresh && !entry.probing {
+		entry.probing = true
+		go probeCapability(p, kind, entry)
+	}
+	entry.mu.Unlock()
+	return verdict(known, ok)
+}
+
+func (s *capabilityState) warm(p C.Proxy, kind capabilityKind, attest bool) {
+	entry := s.capabilityEntryFor(kind)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+	entry.mu.Lock()
+	if attest {
+		entry.attest = true
+	}
+	fresh := entry.known && entry.epoch == epoch && now.Before(entry.expire)
+	corroborated := !attest || (entry.sources >= 2 && entry.consistent)
+	if (!fresh || !corroborated) && !entry.probing {
+		entry.probing = true
+		go probeCapability(p, kind, entry)
+	}
+	entry.mu.Unlock()
+}
+
+// WarmProxyPath verifies only the node that won real traffic. Soft preferences
+// no longer probe every candidate. The egress family is corroborated by two
+// independent endpoints when possible; UDP is measured only for UDP traffic.
+func WarmProxyPath(p C.Proxy, isUDP, familyKnown, ipv6 bool) {
+	if p == nil {
+		return
+	}
+	state := capabilityStateForProxy(p)
+	if familyKnown {
+		kind := capabilityIPv4
+		if ipv6 {
+			kind = capabilityIPv6
+		}
+		state.warm(p, kind, true)
+	}
+	if isUDP {
+		state.warm(p, capabilityUDP, false)
+	}
+}
+
 func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
-	// Do not queue one blocked goroutine per provider node. A later call will
-	// retry after capacity is available, while this probe remains unknown.
 	select {
 	case capabilityProbeSem <- struct{}{}:
 		defer func() { <-capabilityProbeSem }()
@@ -241,23 +310,32 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		entry.mu.Unlock()
 		return
 	}
+
+	entry.mu.Lock()
+	attest := entry.attest
+	entry.attest = false
+	entry.mu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), capabilityProbeTimeout)
 	defer cancel()
 
 	var (
-		ok     bool
-		exitIP netip.Addr
+		ok         bool
+		exitIP     netip.Addr
+		sources    uint8
+		consistent = true
 	)
 	switch kind {
 	case capabilityUDP:
 		ok = probeUDP(ctx, p)
 	case capabilityIPv4:
-		exitIP, ok = probeIPFamily(ctx, p, capabilityIPv4URLs[:], false)
+		exitIP, sources, consistent, ok = probeIPFamilyEvidence(ctx, p, capabilityIPv4URLs[:], false, attest)
 	case capabilityIPv6:
-		exitIP, ok = probeIPFamily(ctx, p, capabilityIPv6URLs[:], true)
+		exitIP, sources, consistent, ok = probeIPFamilyEvidence(ctx, p, capabilityIPv6URLs[:], true, attest)
 	}
 
 	now := time.Now()
+	epoch := netstate.CurrentEpoch()
 	entry.mu.Lock()
 	if ok {
 		entry.known = true
@@ -265,6 +343,9 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		entry.failures = 0
 		entry.expire = now.Add(capabilityOKTTL)
 		entry.probing = false
+		entry.epoch = epoch
+		entry.sources = sources
+		entry.consistent = consistent
 		if exitIP.IsValid() {
 			if entry.exitIP != exitIP {
 				entry.country = ""
@@ -276,11 +357,9 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 		if entry.failures < 0xff {
 			entry.failures++
 		}
-		// Family telemetry is advisory unless the configuration explicitly
-		// says require-ipv4/require-ipv6. A single failed public-IP probe is
-		// commonly just radio handover, captive portal, DNS jitter or endpoint
-		// trouble. Never turn a previously working family into capNo on one
-		// sample, and keep a first-ever failure unknown until it is confirmed.
+		entry.epoch = epoch
+		entry.sources = 0
+		entry.consistent = false
 		if (kind == capabilityIPv4 || kind == capabilityIPv6) && entry.failures < capabilityFailConfirm {
 			if !(entry.known && entry.ok) {
 				entry.known = false
@@ -309,13 +388,18 @@ func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
 	case capabilityIPv6:
 		kindName = "ipv6"
 	}
-	log.Debugln("[Capability] %s %s=%v", p.Name(), kindName, ok)
+	log.Debugln("[Capability] %s %s=%v sources=%d consistent=%v", p.Name(), kindName, ok, sources, consistent)
 }
 
-func probeIPFamily(ctx context.Context, p C.Proxy, urls []string, wantIPv6 bool) (netip.Addr, bool) {
+func probeIPFamilyEvidence(ctx context.Context, p C.Proxy, urls []string, wantIPv6, corroborate bool) (netip.Addr, uint8, bool, bool) {
 	if p == nil || len(urls) == 0 {
-		return netip.Addr{}, false
+		return netip.Addr{}, 0, false, false
 	}
+
+	var (
+		first   netip.Addr
+		sources uint8
+	)
 	for _, rawURL := range urls {
 		if ctx.Err() != nil {
 			break
@@ -326,18 +410,45 @@ func probeIPFamily(ctx context.Context, p C.Proxy, urls []string, wantIPv6 bool)
 		}); supported {
 			ip, err := prober.ExitIPProbe(attemptCtx, rawURL)
 			cancel()
-			if err == nil && ip.IsValid() && ip.Is6() == wantIPv6 {
-				return ip.Unmap(), true
+			if err != nil || !ip.IsValid() || ip.Is6() != wantIPv6 {
+				continue
+			}
+			ip = ip.Unmap()
+			sources++
+			if !first.IsValid() {
+				first = ip
+				if !corroborate {
+					return first, sources, true, true
+				}
+				continue
+			}
+			if ip != first {
+				return first, sources, false, true
+			}
+			if corroborate && sources >= 2 {
+				return first, sources, true, true
 			}
 			continue
 		}
+
+		// Older proxy adapters may support only status testing. This proves the
+		// address family works, but it is not exit-identity evidence.
 		_, ok, _ := p.StatusTest(attemptCtx, rawURL)
 		cancel()
 		if ok {
-			return netip.Addr{}, true
+			return netip.Addr{}, 0, false, true
 		}
 	}
-	return netip.Addr{}, false
+
+	if first.IsValid() {
+		return first, sources, sources >= 2, true
+	}
+	return netip.Addr{}, 0, false, false
+}
+
+func probeIPFamily(ctx context.Context, p C.Proxy, urls []string, wantIPv6 bool) (netip.Addr, bool) {
+	ip, _, _, ok := probeIPFamilyEvidence(ctx, p, urls, wantIPv6, false)
+	return ip, ok
 }
 
 // probeUDP sends a STUN binding request through the proxy and waits for any
@@ -607,13 +718,13 @@ func CapabilityPenaltyExtended(p C.Proxy, preferUDP, preferIPv4, preferIPv6 bool
 	state := capabilityStateForProxy(p)
 	penalty := 0
 	if preferUDP {
-		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityUDP))
+		penalty += capabilityPenaltyFor(state.cachedState(capabilityUDP))
 	}
 	if preferIPv4 {
-		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityIPv4))
+		penalty += capabilityPenaltyFor(state.cachedState(capabilityIPv4))
 	}
 	if preferIPv6 {
-		penalty += capabilityPenaltyFor(state.stateOrProbe(p, capabilityIPv6))
+		penalty += capabilityPenaltyFor(state.cachedState(capabilityIPv6))
 	}
 	if penalty > 0xFFFF {
 		return 0xFFFF
@@ -636,10 +747,10 @@ func CapabilityDemoted(p C.Proxy, preferUDP, preferIPv6 bool) bool {
 		return false
 	}
 	state := capabilityStateForProxy(p)
-	if preferUDP && state.stateOrProbe(p, capabilityUDP) == capNo {
+	if preferUDP && state.cachedState(capabilityUDP) == capNo {
 		return true
 	}
-	return preferIPv6 && state.stateOrProbe(p, capabilityIPv6) == capNo
+	return preferIPv6 && state.cachedState(capabilityIPv6) == capNo
 }
 
 func capabilityPenaltyFor(verdict int) int {
