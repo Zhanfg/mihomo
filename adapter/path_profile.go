@@ -40,10 +40,11 @@ type EgressPathProfile struct {
 type ProxyPathProfile struct {
 	Epoch        uint64
 	Local        netstate.LocalProfile
-	Tunnel       linkprofile.TunnelMetrics
-	TunnelFresh  bool
-	TunnelFactor float64
-	TunnelSamples uint32
+	Tunnel           linkprofile.TunnelMetrics
+	TunnelFresh      bool
+	TunnelFactor     float64
+	TunnelSamples    uint32
+	TunnelAssessment linkprofile.Assessment
 	Egress       EgressPathProfile
 	UDPKnown        bool
 	UDPAvailable    bool
@@ -98,6 +99,18 @@ func tunnelPathSnapshot(state *capabilityState, now time.Time, epoch uint64) (li
 		return linkprofile.TunnelMetrics{}, 1, 0, false
 	}
 	return state.path.tunnel, state.path.factor, state.path.samples, true
+}
+
+func TunnelPathAssessmentForProxy(p C.Proxy) linkprofile.Assessment {
+	if p == nil {
+		return linkprofile.Assess(linkprofile.TunnelMetrics{}, 0)
+	}
+	state := capabilityStateForProxy(p)
+	metrics, _, samples, fresh := tunnelPathSnapshot(state, time.Now(), netstate.CurrentEpoch())
+	if !fresh {
+		return linkprofile.Assess(linkprofile.TunnelMetrics{}, 0)
+	}
+	return linkprofile.Assess(metrics, samples)
 }
 
 func TunnelPathFactorForProxy(p C.Proxy) float64 {
@@ -156,6 +169,10 @@ func PathProfileForProxy(p C.Proxy, ipv6 bool) ProxyPathProfile {
 	now := time.Now()
 	profile.Tunnel, profile.TunnelFactor, profile.TunnelSamples, profile.TunnelFresh =
 		tunnelPathSnapshot(state, now, epoch)
+	profile.TunnelAssessment = linkprofile.Assess(profile.Tunnel, profile.TunnelSamples)
+	if !profile.TunnelFresh {
+		profile.TunnelAssessment = linkprofile.Assess(linkprofile.TunnelMetrics{}, 0)
+	}
 
 	entry := &state.ipv4
 	if ipv6 {
