@@ -501,9 +501,9 @@ func (s *Store) GetNodeWeightRanking(group, config, testUrl string, proxies []C.
 	prefetchLimit := globalCacheParams.MaxTargets / 2
 	globalCacheParams.mutex.RUnlock()
 
-	activeTargets := s.takeDirtyTargets(group, config, prefetchLimit)
+	activeTargets := s.GetActiveTargets(group, config, prefetchLimit)
 	if len(activeTargets) == 0 {
-		return 0
+		return NodeRank{}, nil
 	}
 
 	nodeScores := make(map[string]float64, len(proxies))
@@ -763,7 +763,10 @@ func (s *Store) RunPrefetch(group, config string, proxyMap map[string]bool) int 
 	prefetchLimit := globalCacheParams.MaxTargets / 2
 	globalCacheParams.mutex.RUnlock()
 
-	activeTargets := s.GetActiveTargets(group, config, prefetchLimit)
+	activeTargets := s.takeDirtyTargets(group, config, prefetchLimit)
+	if len(activeTargets) == 0 {
+		return 0
+	}
 
 	type prefetchItem struct {
 		target      string
