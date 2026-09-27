@@ -1305,7 +1305,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	}
 
 	if s.selected != "" {
-		desiredCountry, strictCountry := s.desiredCountry()
+		desiredCountry, strictCountry := s.desiredCountry(metadata, proxies)
 		for _, p := range proxies {
 			if p.Name() == s.selected && s.ipFamilyEligible(metadata, p) &&
 				s.countryEligible(metadata, p, desiredCountry, strictCountry) {
