@@ -531,3 +531,50 @@ func TestCachedIPFamilyCapabilityKnownRejectsPreviousEpoch(t *testing.T) {
 		t.Fatal("previous-network family verdict must not survive the epoch transition")
 	}
 }
+
+
+func TestCapabilityOnlySuccessClearsOldEgressIdentity(t *testing.T) {
+	p := &capabilityProbeProxy{}
+	entry := &capabilityEntry{
+		known:   true,
+		ok:      true,
+		exitIP:  netip.MustParseAddr("203.0.113.10"),
+		country: "US",
+		asn:     "AS64500",
+		asnOrg:  "old",
+	}
+	probeCapability(p, capabilityIPv4, entry)
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.known || !entry.ok {
+		t.Fatal("capability-only success should still prove IPv4 availability")
+	}
+	if entry.exitIP.IsValid() || entry.country != "" || entry.asn != "" || entry.asnOrg != "" {
+		t.Fatalf("old identity survived capability-only success: ip=%v country=%q asn=%q org=%q",
+			entry.exitIP, entry.country, entry.asn, entry.asnOrg)
+	}
+}
+
+func TestTransientFamilyFailureKeepsCapabilityButClearsIdentity(t *testing.T) {
+	p := &capabilityProbeProxy{fail: true}
+	entry := &capabilityEntry{
+		known:   true,
+		ok:      true,
+		exitIP:  netip.MustParseAddr("198.51.100.8"),
+		country: "JP",
+		asn:     "AS64501",
+		asnOrg:  "old",
+	}
+	probeCapability(p, capabilityIPv4, entry)
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.known || !entry.ok {
+		t.Fatal("first family failure should preserve the previous availability verdict")
+	}
+	if entry.exitIP.IsValid() || entry.country != "" || entry.asn != "" || entry.asnOrg != "" {
+		t.Fatalf("failed fresh probe must invalidate egress identity: ip=%v country=%q asn=%q org=%q",
+			entry.exitIP, entry.country, entry.asn, entry.asnOrg)
+	}
+}
