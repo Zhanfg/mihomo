@@ -20,6 +20,7 @@ on:
       - "listener/**"
       - "common/ebpf/**"
       - "adapter/outboundgroup/**"
+      - "adapter/provider/**"
       - "adapter/outbound/masque.go"
       - "adapter/outbound/masque_weaknet_test.go"
       - "component/smart/**"
@@ -91,6 +92,7 @@ jobs:
         run: |
           set -euo pipefail
           CGO_ENABLED=0 go test ./component/linkprofile ./component/netstate ./component/netchange -count=1
+          CGO_ENABLED=0 go test ./adapter/provider -run 'TestHealthCheckParallelismPolicy' -count=1
 
       - name: MASQUE weak-network regression
         shell: bash
