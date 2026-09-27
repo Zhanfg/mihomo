@@ -1492,7 +1492,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
-		if proxiesName, weights, err := s.store.GetBestProxyForTarget(s.Name(), s.configName, metadata.SmartTarget, isUDP); err == nil && len(proxiesName) > 0 {
+		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimit(s.Name(), s.configName, metadata.SmartTarget, isUDP, maxSelected); err == nil && len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
 		return nil, nil
@@ -2350,8 +2350,10 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	failedBlock := s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode, 0)
 
 	newWeight := updateEMAFloat(oldWeight, adjWeight)
-	atomicRecord.Set("lastUsed", time.Now().Unix())
+	lastUsed := time.Now().Unix()
+	atomicRecord.Set("lastUsed", lastUsed)
 	atomicRecord.SetWeight(weightType, newWeight)
+	s.store.TouchActiveTarget(s.Name(), s.configName, target, isUDP, lastUsed)
 	statsSnapshot := atomicRecord.CreateStatsSnapshot(cacheKey)
 	// Queued under the lock: the queue keeps the last write per key, so two
 	// closes on this node racing to append would otherwise let the older
