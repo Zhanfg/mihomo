@@ -27,6 +27,7 @@ import (
 	"github.com/metacubex/mihomo/common/singleflight"
 	"github.com/metacubex/mihomo/common/xsync"
 	"github.com/metacubex/mihomo/component/geodata"
+	"github.com/metacubex/mihomo/component/linkprofile"
 	"github.com/metacubex/mihomo/component/mmdb"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -2254,20 +2255,16 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		atomicRecord.Add("cumulSent", int64(tcpStats.TotalSent()))
 		atomicRecord.Add("cumulRetrans", int64(tcpStats.TotalRetrans()))
 		lossRate = tcpStats.LossRate()
-
-		rttMs := float64(tcpStats.RTTUsec) / 1000.0
-		rttVarMs := float64(tcpStats.RTTVarUsec) / 1000.0
-		if rttMs > 0 {
-			rttMs = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkRTT), rttMs)
-			atomicRecord.SetWeight(smart.WeightTypeLinkRTT, rttMs)
-		}
-		if rttVarMs > 0 {
-			rttVarMs = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkRTTVar), rttVarMs)
-			atomicRecord.SetWeight(smart.WeightTypeLinkRTTVar, rttVarMs)
-		}
-		currentFactor := smart.LinkQualityFactor(rttMs, rttVarMs, lossRate, tcpStats.Unacked, tcpStats.Lost, tcpStats.Cwnd)
-		linkFactor = updateEMAFloat(atomicRecord.GetWeight(smart.WeightTypeLinkFactor), currentFactor)
-		atomicRecord.SetWeight(smart.WeightTypeLinkFactor, linkFactor)
+		linkFactor = adapter.ObserveTunnelPath(proxy, linkprofile.TunnelMetrics{
+			RTTMs:    float64(tcpStats.RTTUsec) / 1000.0,
+			RTTVarMs: float64(tcpStats.RTTVarUsec) / 1000.0,
+			LossRate: lossRate,
+			Unacked:  tcpStats.Unacked,
+			Lost:     tcpStats.Lost,
+			Cwnd:     tcpStats.Cwnd,
+		})
+	} else {
+		linkFactor = adapter.TunnelPathFactorForProxy(proxy)
 	} else if previousFactor := atomicRecord.GetWeight(smart.WeightTypeLinkFactor); previousFactor > 0 {
 		// Missing TCP_INFO on a wrapped transport should not freeze an old weak
 		// verdict forever. Recover it gradually toward neutral.
