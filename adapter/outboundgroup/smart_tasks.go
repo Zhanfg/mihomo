@@ -222,6 +222,205 @@ func runSmartTaskSchedule(
 	}
 }
 
+// runSmartActivityTaskSchedule is the per-group mobile-friendly scheduler.
+// While real traffic is recent it preserves the existing deadlines and overlap
+// rules. Once the activity window expires it disarms its timer entirely and
+// waits on a coalesced traffic signal (or power/context changes), so an idle
+// Smart group creates zero periodic group-maintenance wakeups.
+//
+// Tasks that became overdue while parked are settled after resume rather than
+// all firing on the application's first packet.
+func runSmartActivityTaskSchedule(
+	ctx context.Context,
+	tasks []smartScheduledTask,
+	isRunning func() bool,
+	recentlyActive func(time.Time) bool,
+	activity <-chan struct{},
+	readyPoll time.Duration,
+	jitter func() time.Duration,
+) {
+	if len(tasks) == 0 {
+		return
+	}
+	if readyPoll <= 0 {
+		readyPoll = smartTaskReadyPollInterval
+	}
+
+	readyTimer := time.NewTimer(readyPoll)
+	defer readyTimer.Stop()
+	for !isRunning() {
+		paused, changed := power.BackgroundState()
+		if paused {
+			readyTimer.Stop()
+			select {
+			case <-ctx.Done():
+				return
+			case <-changed:
+				readyTimer.Reset(readyPoll)
+			}
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+		case <-activity:
+		case <-readyTimer.C:
+			readyTimer.Reset(readyPoll)
+		}
+	}
+
+	now := time.Now()
+	spread := jitter()
+	states := make([]smartScheduledTaskState, len(tasks))
+	for i, task := range tasks {
+		period := task.interval
+		if period <= 0 {
+			period = time.Nanosecond
+		}
+		states[i] = smartScheduledTaskState{
+			smartScheduledTask: task,
+			next:               now.Add(task.initialDelay + spread),
+			period:             period,
+		}
+	}
+
+	done := make(chan int, len(states))
+	var taskWG sync.WaitGroup
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		taskWG.Wait()
+	}()
+
+	parked := !recentlyActive(now)
+	wasPaused := false
+	settleOverdue := func(now time.Time) {
+		for i := range states {
+			state := &states[i]
+			if state.finished || state.next.After(now) {
+				continue
+			}
+			state.next = now.Add(resumeDelayFor(state.period) + spread)
+		}
+	}
+
+	for {
+		paused, changed := power.BackgroundState()
+		now = time.Now()
+		active := recentlyActive(now)
+
+		if paused || !active {
+			parked = true
+			if paused {
+				wasPaused = true
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case idx := <-done:
+				states[idx].running = false
+			case <-changed:
+			case <-activity:
+				// markTrafficActivity stores the timestamp before sending this
+				// signal. Re-evaluate at the top and settle overdue work once.
+			}
+			continue
+		}
+
+		if parked || wasPaused {
+			settleOverdue(now)
+			parked = false
+			wasPaused = false
+		}
+
+		var earliest time.Time
+		unfinished := 0
+		for i := range states {
+			if states[i].finished {
+				continue
+			}
+			unfinished++
+			if earliest.IsZero() || states[i].next.Before(earliest) {
+				earliest = states[i].next
+			}
+		}
+		if unfinished == 0 {
+			return
+		}
+
+		wait := time.Until(earliest)
+		if wait < 0 {
+			wait = 0
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(wait)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-changed:
+			continue
+		case <-activity:
+			// Activity only extends the active window. Existing deadlines are
+			// retained, so high traffic does not reset maintenance forever.
+			continue
+		case idx := <-done:
+			states[idx].running = false
+			continue
+		case now = <-timer.C:
+		}
+
+		if paused, _ := power.BackgroundState(); paused || !recentlyActive(time.Now()) {
+			continue
+		}
+		for i := range states {
+			state := &states[i]
+			if state.finished || state.next.After(now) {
+				continue
+			}
+			missed := now.Sub(state.next)/state.period + 1
+			state.next = state.next.Add(missed * state.period)
+			if state.running || !isRunning() {
+				continue
+			}
+
+			state.running = true
+			if state.runOnce {
+				state.finished = true
+			}
+			taskWG.Add(1)
+			go func(idx int, task smartScheduledTask) {
+				defer taskWG.Done()
+				task.run()
+				if task.runOnce {
+					log.Debugln("[Smart] Task [%s] completed", task.name)
+				}
+				done <- idx
+			}(i, state.smartScheduledTask)
+		}
+	}
+}
+
 func smartTaskJitter() time.Duration {
 	return time.Duration(rand.Float64() * 30 * float64(time.Second))
 }
@@ -432,6 +631,14 @@ func (s *Smart) startGroupTasks() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		runSmartTaskSchedule(s.ctx, tasks, func() bool { return tunnel.Status() == tunnel.Running }, smartTaskReadyPollInterval, smartTaskJitter)
+		runSmartActivityTaskSchedule(
+			s.ctx,
+			tasks,
+			func() bool { return tunnel.Status() == tunnel.Running },
+			s.maintenanceRecentlyActive,
+			s.maintenanceWake,
+			smartTaskReadyPollInterval,
+			smartTaskJitter,
+		)
 	}()
 }
