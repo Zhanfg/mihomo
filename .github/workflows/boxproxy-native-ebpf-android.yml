@@ -22,7 +22,7 @@ on:
       - "hub/executor/concurrent_load_*.go"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: boxproxy-native-ebpf-android
@@ -179,3 +179,35 @@ jobs:
             .github/fixtures/mobile-core-opt.yaml
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish rolling Android Smart eBPF prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="Smart-eBPF-Android"
+          SRC="$(ls -1 mihomo-a64-smart-ebpf-*.gz | head -n 1)"
+          STABLE="mihomo-android-arm64-smart-ebpf.gz"
+          cp "$SRC" "$STABLE"
+          sha256sum "$STABLE" > SHA256SUMS.release
+          cp SHA256SUMS.release SHA256SUMS
+          {
+            echo
+            echo "rolling_release_tag=$TAG"
+            echo "rolling_release_asset=$STABLE"
+          } >> BUILD_INFO.txt
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+          fi
+
+          gh release create "$TAG" \
+            "$STABLE" \
+            "SHA256SUMS" \
+            "BUILD_INFO.txt" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Smart eBPF Android (rolling)" \
+            --notes "Rolling Android arm64 build from integration/boxproxy-native-ebpf. Source: $GITHUB_SHA. Validated by BoxProxy schema, Smart, IP-family, DNS and Android build gates." \
+            --prerelease
