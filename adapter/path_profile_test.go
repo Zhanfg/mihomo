@@ -84,3 +84,59 @@ func TestUnavailableUDPDoesNotExposeOldMapping(t *testing.T) {
 		t.Fatalf("failed UDP probe exposed stale mapping %v", profile.UDPEgressIP)
 	}
 }
+
+
+func TestEgressProfileHidesPreviousEpochIdentity(t *testing.T) {
+	p := stub("stale-egress-profile")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.epoch = epoch
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.exitIP = netip.MustParseAddr("192.0.2.55")
+	state.ipv4.country = "US"
+	state.ipv4.asn = "AS64510"
+	state.ipv4.asnOrg = "example"
+	state.ipv4.sources = 2
+	state.ipv4.consistent = true
+	state.ipv4.mu.Unlock()
+
+	fresh := PathProfileForProxy(p, false)
+	if !fresh.Egress.Known || !fresh.Egress.Fresh || !fresh.Egress.IP.IsValid() {
+		t.Fatalf("fresh egress identity missing: %+v", fresh.Egress)
+	}
+
+	netstate.Advance()
+	stale := PathProfileForProxy(p, false)
+	if stale.Egress.Known || stale.Egress.Fresh || stale.Egress.IP.IsValid() {
+		t.Fatalf("previous-epoch identity leaked into current profile: %+v", stale.Egress)
+	}
+	if stale.Egress.Country != "" || stale.Egress.ASN != "" || stale.Egress.ASNOrg != "" ||
+		stale.Egress.Sources != 0 || stale.Egress.Consistent || stale.Egress.Divergent {
+		t.Fatalf("stale identity metadata leaked: %+v", stale.Egress)
+	}
+}
+
+func TestExpiredEgressIdentityIsUnknown(t *testing.T) {
+	p := stub("expired-egress-profile")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.expire = time.Now().Add(-time.Second)
+	state.ipv4.exitIP = netip.MustParseAddr("198.51.100.90")
+	state.ipv4.country = "DE"
+	state.ipv4.sources = 2
+	state.ipv4.consistent = true
+	state.ipv4.mu.Unlock()
+
+	profile := PathProfileForProxy(p, false)
+	if profile.Egress.Known || profile.Egress.IP.IsValid() || profile.Egress.Sources != 0 {
+		t.Fatalf("expired egress evidence should be unknown: %+v", profile.Egress)
+	}
+}
