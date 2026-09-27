@@ -793,15 +793,13 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 
 	country := ""
 	if s.countryAffinity && s.country == "" && knownFamily {
-		// The actual winner is allowed to warm active evidence. Soft candidate
-		// ranking remains probe-free; this selected node is the one place where
-		// establishing measured egress identity is worth the radio/socket cost.
-		if known, measured := adapter.ExitCountryForProxy(p, ipv6); known {
+		// WarmProxyPath above already starts verification for the family that
+		// actually carried this winning flow. Do not speculatively probe the
+		// sibling family: a later A/AAAA sibling will verify itself when it has
+		// real traffic. Reuse only completed current-family evidence here.
+		if known, measured := adapter.CachedExitCountryForProxy(p, ipv6); known {
 			country = strings.ToUpper(measured)
 		}
-		// Warm the sibling family in the background/cached capability layer so a
-		// later A/AAAA sibling flow can keep the same service in one country.
-		adapter.ExitCountryForProxy(p, !ipv6)
 	}
 
 	// A new winner steers the dials that come after it, and nothing else. This
