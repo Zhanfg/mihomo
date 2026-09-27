@@ -41,23 +41,37 @@ func TestStabilizeSmartOrderRejectsUnusableCurrent(t *testing.T) {
 }
 
 func TestSmartDialBatchBoundsForWeakLink(t *testing.T) {
-	cases := []struct {
-		iteration int
-		begin     int
-		end       int
-	}{
-		{0, 0, 2},
-		{1, 2, 5},
-		{2, 5, 8},
-		{3, 8, 10},
-		{4, 0, 0},
+	width := smartParallelism()
+	if width <= 0 {
+		t.Fatalf("invalid smart parallelism %d", width)
 	}
 
-	for _, tc := range cases {
-		begin, end := smartDialBatchBoundsForLink(10, tc.iteration, false, true)
-		if begin != tc.begin || end != tc.end {
-			t.Fatalf("iteration=%d got=(%d,%d) want=(%d,%d)", tc.iteration, begin, end, tc.begin, tc.end)
+	// Weak-link iteration 0 always races only two candidates. Later iterations
+	// use the platform budget: Android=3, desktop/Linux=5 today.
+	begin, end := smartDialBatchBoundsForLink(10, 0, false, true)
+	if begin != 0 || end != 2 {
+		t.Fatalf("iteration=0 got=(%d,%d) want=(0,2)", begin, end)
+	}
+
+	iteration := 1
+	expectedBegin := 2
+	for expectedBegin < 10 {
+		expectedEnd := expectedBegin + width
+		if expectedEnd > 10 {
+			expectedEnd = 10
 		}
+		begin, end = smartDialBatchBoundsForLink(10, iteration, false, true)
+		if begin != expectedBegin || end != expectedEnd {
+			t.Fatalf("iteration=%d width=%d got=(%d,%d) want=(%d,%d)",
+				iteration, width, begin, end, expectedBegin, expectedEnd)
+		}
+		expectedBegin = expectedEnd
+		iteration++
+	}
+
+	begin, end = smartDialBatchBoundsForLink(10, iteration, false, true)
+	if begin != 0 || end != 0 {
+		t.Fatalf("exhausted iteration=%d got=(%d,%d), want=(0,0)", iteration, begin, end)
 	}
 }
 
