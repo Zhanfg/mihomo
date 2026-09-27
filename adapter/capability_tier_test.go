@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/netstate"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -64,7 +65,7 @@ func seed(name string, udp, ipv6 *bool) {
 			e.known, e.probing = false, true // 标记探测中，防止测试触发真实探测
 			return
 		}
-		e.known, e.ok, e.expire, e.probing = true, *v, time.Now().Add(time.Hour), false
+		e.known, e.ok, e.expire, e.probing, e.epoch = true, *v, time.Now().Add(time.Hour), false, netstate.CurrentEpoch()
 	}
 	for _, st := range states {
 		set(&st.udp, udp)
