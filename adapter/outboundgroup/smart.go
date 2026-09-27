@@ -1444,7 +1444,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		}
 
 		_, fit := countryFit(proxy)
-		effectiveWeight := adjustedCountryWeight(w, fit)
+		effectiveWeight := adjustedGreedyWeight(w, fit, adapter.TunnelPathAssessmentForProxy(proxy))
 		insertAt := len(selectedWeights)
 		for j := range selectedWeights {
 			if effectiveWeight > selectedWeights[j] {
@@ -1516,7 +1516,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 				delay = adapter.AddAutoIPFamilyPenalty(delay, p, true)
 			}
 			_, fit := countryFit(p)
-			delay = adjustedCountryDelay(delay, fit)
+			delay = adjustedGreedyDelay(delay, fit, adapter.TunnelPathAssessmentForProxy(p))
 			candidate := rankedCandidate{proxy: p, delay: delay, index: index}
 			if hasPriority {
 				candidate.factor = s.getPriorityFactor(p.Name())
