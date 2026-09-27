@@ -81,6 +81,7 @@ type capabilityState struct {
 	udp  capabilityEntry
 	ipv4 capabilityEntry
 	ipv6 capabilityEntry
+	path pathRuntime
 	// lastUsed lets the opportunistic cache sweep remove identities that are
 	// no longer present after a provider refresh. TTLs invalidate verdicts but
 	// otherwise do not reclaim the sync.Map key itself.
