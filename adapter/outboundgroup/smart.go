@@ -29,6 +29,7 @@ import (
 	"github.com/metacubex/mihomo/component/geodata"
 	"github.com/metacubex/mihomo/component/linkprofile"
 	"github.com/metacubex/mihomo/component/mmdb"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/profile/cachefile"
 	"github.com/metacubex/mihomo/component/resolver"
 	"github.com/metacubex/mihomo/component/smart"
@@ -331,6 +332,7 @@ type Smart struct {
 
 	lastTrafficActivity atomic.Int64
 	lastWinner          atomic.TypedValue[smartWinnerState]
+	lastEndToEnd        atomic.TypedValue[smartEndToEndState]
 	recoveryCursor      atomic.Uint64
 	recoveryMu          sync.Mutex
 	recoveryBackoff     map[string]hostRecoveryState
@@ -367,6 +369,24 @@ type smartWinnerState struct {
 	FamilyKnown bool
 	IPv6        bool
 	UDP         bool
+}
+
+type smartEndToEndState struct {
+	Epoch              uint64
+	ObservedAt         int64
+	Target             string
+	Node               string
+	UDP                bool
+	Failed             bool
+	ConnectTimeMS      int64
+	FirstResponseMS    int64
+	LossRate           float64
+	UploadBytes        int64
+	DownloadBytes      int64
+	MaxUploadBytesPS   int64
+	MaxDownloadBytesPS int64
+	DurationMS         int64
+	SampleScale        int64
 }
 
 type hostRecoveryState struct {
@@ -1128,6 +1148,28 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		}
 	}
 
+	var endToEnd any
+	if snapshot, ok := s.lastEndToEnd.LoadOk(); ok {
+		endToEnd = map[string]any{
+			"epoch":              snapshot.Epoch,
+			"freshNetwork":       snapshot.Epoch == netstate.CurrentEpoch(),
+			"observedAt":         snapshot.ObservedAt,
+			"target":             snapshot.Target,
+			"node":               snapshot.Node,
+			"udp":                snapshot.UDP,
+			"failed":             snapshot.Failed,
+			"connectTimeMs":      snapshot.ConnectTimeMS,
+			"firstResponseMs":    snapshot.FirstResponseMS,
+			"lossRate":           snapshot.LossRate,
+			"uploadBytes":        snapshot.UploadBytes,
+			"downloadBytes":      snapshot.DownloadBytes,
+			"maxUploadBytesPS":   snapshot.MaxUploadBytesPS,
+			"maxDownloadBytesPS": snapshot.MaxDownloadBytesPS,
+			"durationMs":         snapshot.DurationMS,
+			"sampleScale":        snapshot.SampleScale,
+		}
+	}
+
 	return json.Marshal(map[string]any{
 		"type":            s.Type().String(),
 		"now":             s.Now(),
@@ -1153,6 +1195,7 @@ func (s *Smart) MarshalJSON() ([]byte, error) {
 		"countryAffinity": s.countryAffinity,
 		"affinityCountry": s.currentAffinityCountry(),
 		"pathProfile":     pathProfile,
+		"endToEnd":        endToEnd,
 	})
 }
 
@@ -2472,6 +2515,27 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	if sampleScale == 0 {
 		return true
 	}
+	lossRate := 0.0
+	if tcpStats != nil {
+		lossRate = tcpStats.LossRate()
+	}
+	s.lastEndToEnd.Store(smartEndToEndState{
+		Epoch:              netstate.CurrentEpoch(),
+		ObservedAt:         time.Now().UnixMilli(),
+		Target:             metadata.SmartTarget,
+		Node:               proxy.Name(),
+		UDP:                metadata.NetWork == C.UDP,
+		Failed:             err != nil,
+		ConnectTimeMS:      connectTime,
+		FirstResponseMS:    latency,
+		LossRate:           lossRate,
+		UploadBytes:        uploadTotal,
+		DownloadBytes:      downloadTotal,
+		MaxUploadBytesPS:   maxUploadRate,
+		MaxDownloadBytesPS: maxDownloadRate,
+		DurationMS:         connectionDuration,
+		SampleScale:        sampleScale,
+	})
 	if !s.beginBackgroundWork() {
 		return false
 	}
