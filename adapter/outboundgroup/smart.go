@@ -2332,6 +2332,20 @@ func (s *Smart) admitConnectionStats(metadata *C.Metadata, err error, now int64)
 	return !s.suppressStats.Load(), tripped
 }
 
+func observeTCPPath(proxy C.Proxy, stats *tcpstats.Stats) float64 {
+	if proxy == nil || stats == nil {
+		return 1
+	}
+	return adapter.ObserveTunnelPath(proxy, linkprofile.TunnelMetrics{
+		RTTMs:    float64(stats.RTTUsec) / 1000.0,
+		RTTVarMs: float64(stats.RTTVarUsec) / 1000.0,
+		LossRate: stats.LossRate(),
+		Unacked:  stats.Unacked,
+		Lost:     stats.Lost,
+		Cwnd:     stats.Cwnd,
+	})
+}
+
 func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error, sampleScale int64) {
@@ -2431,14 +2445,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		atomicRecord.Add("cumulSent", int64(tcpStats.TotalSent()))
 		atomicRecord.Add("cumulRetrans", int64(tcpStats.TotalRetrans()))
 		lossRate = tcpStats.LossRate()
-		linkFactor = adapter.ObserveTunnelPath(proxy, linkprofile.TunnelMetrics{
-			RTTMs:    float64(tcpStats.RTTUsec) / 1000.0,
-			RTTVarMs: float64(tcpStats.RTTVarUsec) / 1000.0,
-			LossRate: lossRate,
-			Unacked:  tcpStats.Unacked,
-			Lost:     tcpStats.Lost,
-			Cwnd:     tcpStats.Cwnd,
-		})
+		linkFactor = observeTCPPath(proxy, tcpStats)
 	} else {
 		linkFactor = adapter.TunnelPathFactorForProxy(proxy)
 	}
@@ -2566,6 +2573,15 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	connectionDuration int64, tcpStats *tcpstats.Stats, err error, markCloseFailure bool,
 ) bool {
 	sampleScale := s.sampleScale(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, connectionDuration, tcpStats, err)
+	return s.submitConnectionStatsScaled(metadata, proxy,
+		connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+		connectionDuration, tcpStats, err, markCloseFailure, sampleScale)
+}
+
+func (s *Smart) submitConnectionStatsScaled(metadata *C.Metadata, proxy C.Proxy,
+	connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+	connectionDuration int64, tcpStats *tcpstats.Stats, err error, markCloseFailure bool, sampleScale int64,
+) bool {
 	if sampleScale == 0 {
 		return true
 	}
@@ -2596,10 +2612,6 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	job := func() {
 		defer s.finishBackgroundWork()
-		// The degraded marker means this group closed the connection itself, so
-		// nothing about the close is the node's doing. checkNodeQuality honours
-		// it; this path did not, and a connection whose first read had already
-		// failed before the sweep reached it was blamed with code 3 anyway.
 		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
 			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
 		}
@@ -2651,11 +2663,6 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 			readErr := firstReadErr.Load()
 			writeErr := firstWriteErr.Load()
 
-			var tcpStats *tcpstats.Stats
-			if trackerConn, ok := tracker.(net.Conn); ok {
-				tcpStats = tcpstats.GetTCPStats(trackerConn)
-			}
-
 			var closeErr error
 			if readErr != nil {
 				if readErr == io.EOF {
@@ -2667,7 +2674,33 @@ func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata
 				}
 			}
 
-			s.submitConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr, true)
+			plan := s.closeSamplePlan(metadata, proxy, connectTime, latency,
+				uploadTotal, downloadTotal, connectionDuration, closeErr)
+
+			var tcpStats *tcpstats.Stats
+			if plan.observeLink {
+				if trackerConn, ok := tracker.(net.Conn); ok {
+					tcpStats = tcpstats.GetTCPStats(trackerConn)
+				}
+			}
+
+			// A scheduled lightweight audit that uncovers loss/jitter is promoted
+			// immediately to a full Smart sample. Stable audit-only closes update
+			// only the transient phone->node path profile and never enter the heavy
+			// model/JSON/persistence queue.
+			if informativeTCPStats(tcpStats) {
+				plan.statsScale = 1
+			}
+			if plan.statsScale == 0 {
+				if tcpStats != nil {
+					observeTCPPath(proxy, tcpStats)
+				}
+				return
+			}
+
+			s.submitConnectionStatsScaled(metadata, proxy,
+				connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+				connectionDuration, tcpStats, closeErr, true, plan.statsScale)
 			return
 		}
 	})
