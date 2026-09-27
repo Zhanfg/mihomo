@@ -7,7 +7,9 @@ package netchange
 
 import (
 	"context"
+	"runtime"
 	"sync"
+	"time"
 
 	"github.com/metacubex/mihomo/common/batch"
 	"github.com/metacubex/mihomo/component/iface"
@@ -18,9 +20,23 @@ import (
 	"github.com/metacubex/mihomo/tunnel"
 )
 
-// A provider health check already fans out over its own proxies, so this only
-// bounds how many providers compete for the freshly switched link at once.
-const providerConcurrency = 4
+// A provider health check already fans out over its own proxies. Android uses
+// one provider at a time: after a radio handover the expensive work is the
+// provider's own per-node fan-out, so stacking several providers only creates a
+// CPU/socket/radio burst without making Smart's selected-node recovery faster.
+func providerConcurrency() int {
+	if runtime.GOOS == "android" {
+		return 1
+	}
+	return 4
+}
+
+func networkSettleDelay(android bool) time.Duration {
+	if android {
+		return 8 * time.Second
+	}
+	return 0
+}
 
 // fanOut are the stages of a network change, kept as fields instead of direct
 // calls so tests can drive the sequencing without a real resolver or providers.
@@ -31,16 +47,19 @@ type fanOut struct {
 }
 
 type notifier struct {
-	access sync.Mutex
-	cancel context.CancelFunc // supersedes the fan-out started last
-	work   fanOut
+	access      sync.Mutex
+	cancel      context.CancelFunc // supersedes the fan-out started last
+	work        fanOut
+	settleDelay time.Duration
 	// runAccess serialises the fan-out bodies. A superseded run can still be
 	// inside a provider check when its replacement starts, and two resets
 	// racing each other would rebuild connections on half-torn-down state.
 	runAccess sync.Mutex
 }
 
-var defaultNotifier = &notifier{work: fanOut{
+var defaultNotifier = &notifier{
+	settleDelay: networkSettleDelay(runtime.GOOS == "android"),
+	work: fanOut{
 	flushCache:      iface.FlushCache,
 	resetConnection: resolver.ResetConnection,
 	providers:       tunnel.Providers,
@@ -75,6 +94,18 @@ func (n *notifier) notify() <-chan struct{} {
 }
 
 func (n *notifier) run(ctx context.Context, work fanOut) {
+	if n.settleDelay > 0 {
+		timer := time.NewTimer(n.settleDelay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return
+		case <-timer.C:
+		}
+	}
+
 	n.runAccess.Lock()
 	defer n.runAccess.Unlock()
 	if ctx.Err() != nil {
@@ -104,7 +135,7 @@ func recheckProviders(ctx context.Context, source func() map[string]P.ProxyProvi
 		return
 	}
 	log.Debugln("[NetChange] re-checking %d providers after default interface changed", len(providers))
-	b, _ := batch.New[struct{}](ctx, batch.WithConcurrencyNum[struct{}](providerConcurrency))
+	b, _ := batch.New[struct{}](ctx, batch.WithConcurrencyNum[struct{}](providerConcurrency()))
 	for name, provider := range providers {
 		b.Go(name, func() (struct{}, error) {
 			// HealthCheck blocks for the whole probe timeout and takes no
