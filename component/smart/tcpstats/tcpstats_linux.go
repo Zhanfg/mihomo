@@ -24,5 +24,11 @@ func readTCPStats(rawConn syscall.RawConn) *Stats {
 	return &Stats{
 		SegsOut:     uint64(tcpInfo.Segs_out),
 		RetransSegs: uint64(tcpInfo.Total_retrans),
+		RTTUsec:     tcpInfo.Rtt,
+		RTTVarUsec:  tcpInfo.Rttvar,
+		RTOUsec:     tcpInfo.Rto,
+		Unacked:     tcpInfo.Unacked,
+		Lost:        tcpInfo.Lost,
+		Cwnd:        tcpInfo.Snd_cwnd,
 	}
 }
