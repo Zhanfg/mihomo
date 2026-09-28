@@ -97,6 +97,9 @@ func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
 // learned while RAM stays O(existing records).
 func AdaptModelPrediction(modelWeight, observedWeight, oldCalibration float64, samples int64) (weight, calibration float64) {
 	weight, calibration, _ = AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibration, 0, samples)
+	// Preserve the historical wrapper's tighter calibration contract for
+	// callers that have not opted into reliability-aware adaptation.
+	calibration = math.Max(0.65, math.Min(1.35, calibration))
 	return weight, calibration
 }
 
