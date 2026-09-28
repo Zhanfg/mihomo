@@ -28,6 +28,8 @@ const (
 	WeightTypeModelCalibrationUDP = "model-cal:udp"
 	WeightTypeModelErrorTCP       = "model-err:tcp"
 	WeightTypeModelErrorUDP       = "model-err:udp"
+	WeightTypeModelPriorTCP       = "model-prior:tcp"
+	WeightTypeModelPriorUDP       = "model-prior:udp"
 )
 
 // LinkQualityFactor is kept as a compatibility wrapper for existing Smart
@@ -57,6 +59,66 @@ func ModelErrorWeightType(isUDP bool) string {
 		return WeightTypeModelErrorUDP
 	}
 	return WeightTypeModelErrorTCP
+}
+
+
+func ModelPriorWeightType(isUDP bool) string {
+	if isUDP {
+		return WeightTypeModelPriorUDP
+	}
+	return WeightTypeModelPriorTCP
+}
+
+// CalibratedModelPrior stores only a bounded version of the expensive model's
+// latest opinion. Bounding it against the same sample's heuristic observation
+// prevents one malformed/out-of-distribution tree prediction from becoming a
+// long-lived local prior.
+func CalibratedModelPrior(modelWeight, calibration, observedWeight float64) float64 {
+	if modelWeight <= 0 || observedWeight <= 0 ||
+		math.IsNaN(modelWeight) || math.IsInf(modelWeight, 0) ||
+		math.IsNaN(calibration) || math.IsInf(calibration, 0) ||
+		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) {
+		return 0
+	}
+	if calibration <= 0 {
+		calibration = 1
+	}
+	prior := modelWeight * calibration
+	lower := observedWeight * 0.60
+	upper := observedWeight * 1.40
+	return math.Max(lower, math.Min(upper, prior))
+}
+
+// ReuseModelPrior cheaply carries the last calibrated global-model opinion
+// across samples where a full tree traversal was deliberately skipped (or the
+// lazily loaded ensemble is temporarily absent). The current heuristic remains
+// dominant; persistent model error exponentially lowers the prior's vote.
+//
+// An anomalous current sample never consumes a stale prior. Failures and fresh
+// loss need fresh evidence, not inertia.
+func ReuseModelPrior(observedWeight, prior, modelError float64, samples int64, anomalous bool) (float64, bool) {
+	if anomalous || observedWeight <= 0 || prior <= 0 ||
+		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) ||
+		math.IsNaN(prior) || math.IsInf(prior, 0) ||
+		math.IsNaN(modelError) || math.IsInf(modelError, 0) {
+		return observedWeight, false
+	}
+	if modelError < 0 {
+		modelError = 0
+	}
+	if modelError >= 0.45 {
+		return observedWeight, false
+	}
+
+	evidence := math.Min(1, math.Log1p(float64(max(int64(0), samples)))/math.Log(257))
+	reliability := math.Exp(-2.5 * modelError)
+	priorShare := (0.10 + 0.15*evidence) * reliability
+	priorShare = math.Max(0.03, math.Min(0.25, priorShare))
+
+	// Re-clamp at reuse time because the current heuristic may have moved since
+	// the model was last evaluated.
+	prior = math.Max(observedWeight*0.60, math.Min(observedWeight*1.40, prior))
+	return observedWeight*(1-priorShare) + prior*priorShare, true
 }
 
 // ShouldInvokeModel is the inference gate for the heavy global ensemble.
