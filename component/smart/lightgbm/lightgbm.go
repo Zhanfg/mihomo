@@ -539,24 +539,36 @@ func (m *WeightModel) loadModel(path string) error {
 }
 
 func ReloadModel() {
-	if smartModel != nil {
-		success, err, _ := reloadModel.Do("reload", func() (bool, error) {
-			modelPath := C.Path.SmartModel()
-			if _, err := os.Stat(modelPath); err == nil {
-				if err := smartModel.loadModel(modelPath); err != nil {
-					return false, err
-				} else {
-					return true, nil
-				}
-			}
-			return false, nil
-		})
+	if smartModel == nil {
+		return
+	}
 
-		if err != nil {
-			log.Errorln("[Smart] Model reload failed: %v", err)
-		} else if success {
-			log.Debugln("[Smart] Model reload completed successfully")
+	// Auto-update should not defeat lazy residency. If the ensemble has never
+	// been needed in this process, keep the freshly downloaded file on disk and
+	// let the first eligible prediction load it later.
+	smartModel.mutex.RLock()
+	loaded := smartModel.model != nil
+	smartModel.mutex.RUnlock()
+	if !loaded {
+		log.Debugln("[Smart] Model updated on disk; deferred reload because ensemble is not resident")
+		return
+	}
+
+	success, err, _ := reloadModel.Do("reload", func() (bool, error) {
+		modelPath := C.Path.SmartModel()
+		if _, err := os.Stat(modelPath); err == nil {
+			if err := smartModel.loadModel(modelPath); err != nil {
+				return false, err
+			}
+			return true, nil
 		}
+		return false, nil
+	})
+
+	if err != nil {
+		log.Errorln("[Smart] Model reload failed: %v", err)
+	} else if success {
+		log.Debugln("[Smart] Model reload completed successfully")
 	}
 }
 
