@@ -1691,19 +1691,23 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		// normal Smart selection and let empty-fallback define the outcome.
 	}
 
+	selectionLimit := s.currentGreedyBudget(proxies)
+
 	// use prefetch cache or compute in real time
 	computeFreshNodes := func(isUDP bool) ([]string, []float64) {
 		if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
-		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimit(s.Name(), s.configName, metadata.SmartTarget, isUDP, maxSelected); err == nil && len(proxiesName) > 0 {
+		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimit(s.Name(), s.configName, metadata.SmartTarget, isUDP, selectionLimit); err == nil && len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
 		return nil, nil
 	}
 
 	computeFreshSingleFlight := func(isUDP bool) ([]string, []float64) {
-		sfKey := fmt.Sprintf("%s|%v", metadata.SmartTarget, isUDP)
+		// The budget is part of the key: a healthy K=5 computation must not be
+		// shared with a concurrent handover/failure request that requires K=10.
+		sfKey := fmt.Sprintf("%s|%v|%d", metadata.SmartTarget, isUDP, selectionLimit)
 		res, _, _ := s.freshNodesGroup.Do(sfKey, func() (nodeResult, error) {
 			names, weights := computeFreshNodes(isUDP)
 			return nodeResult{names: names, weights: weights}, nil
@@ -1798,7 +1802,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		pinned = false
 	}
 
-	return s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, maxSelected, isUDP), pinned
+	return s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, selectionLimit, isUDP), pinned
 }
 
 func (s *Smart) InitSmart() {
