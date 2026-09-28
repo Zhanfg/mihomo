@@ -107,3 +107,52 @@ func TestTrainingSampleRateHonorsConfiguredCeiling(t *testing.T) {
 	stable := &ModelInput{Success: 300}
 	require.Equal(t, 0.025, TrainingSampleRate(stable, 0.03, 0.2))
 }
+
+
+func TestCalibratedModelPriorIsBounded(t *testing.T) {
+	require.Equal(t, 1.4, CalibratedModelPrior(10, 1, 1))
+	require.Equal(t, 0.6, CalibratedModelPrior(0.01, 1, 1))
+	require.Equal(t, 1.2, CalibratedModelPrior(1, 1.2, 1))
+	require.Zero(t, CalibratedModelPrior(math.NaN(), 1, 1))
+	require.Zero(t, CalibratedModelPrior(1, 1, 0))
+}
+
+func TestReuseModelPriorKeepsHeuristicDominant(t *testing.T) {
+	weight, used := ReuseModelPrior(1.0, 1.4, 0.02, 512, false)
+	require.True(t, used)
+	require.Greater(t, weight, 1.0)
+	require.Less(t, weight, 1.10, "cached prior should stay a low-weight expert")
+}
+
+func TestReuseModelPriorTrustFallsWithError(t *testing.T) {
+	lowErr, usedLow := ReuseModelPrior(1.0, 1.4, 0.02, 512, false)
+	highErr, usedHigh := ReuseModelPrior(1.0, 1.4, 0.35, 512, false)
+	require.True(t, usedLow)
+	require.True(t, usedHigh)
+	require.Greater(t, lowErr, highErr)
+	require.GreaterOrEqual(t, highErr, 1.0)
+}
+
+func TestReuseModelPriorRejectsAnomaliesAndUntrustedPrior(t *testing.T) {
+	weight, used := ReuseModelPrior(1.0, 1.4, 0.02, 512, true)
+	require.False(t, used)
+	require.Equal(t, 1.0, weight)
+
+	weight, used = ReuseModelPrior(1.0, 1.4, 0.50, 512, false)
+	require.False(t, used)
+	require.Equal(t, 1.0, weight)
+}
+
+func TestModelPriorWeightType(t *testing.T) {
+	require.Equal(t, WeightTypeModelPriorTCP, ModelPriorWeightType(false))
+	require.Equal(t, WeightTypeModelPriorUDP, ModelPriorWeightType(true))
+}
+
+func BenchmarkReuseModelPrior(b *testing.B) {
+	b.ReportAllocs()
+	var sink float64
+	for i := 0; i < b.N; i++ {
+		sink, _ = ReuseModelPrior(1.0, 1.08, 0.03, 512+int64(i&31), false)
+	}
+	_ = sink
+}
