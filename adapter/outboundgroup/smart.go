@@ -2781,13 +2781,18 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		// most of the vote, and anomalous samples reject stale model inertia.
 		if !ModelPredicted {
 			cachedPrior := atomicRecord.GetWeight(priorKey)
+			anomalous := input.ConnectionFailed || input.LossRate >= 0.01
 			calculatedWeight, modelPriorUsed = smart.ReuseModelPrior(
 				observedWeight,
 				cachedPrior,
 				oldModelError,
 				input.Success+input.Failure,
-				input.ConnectionFailed || input.LossRate >= 0.01,
+				anomalous,
 			)
+			if modelPriorUsed && !anomalous {
+				modelError = smart.ObserveModelPriorResidual(cachedPrior, observedWeight, oldModelError)
+				atomicRecord.SetWeight(errKey, modelError)
+			}
 		}
 	}
 
