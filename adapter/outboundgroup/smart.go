@@ -1521,14 +1521,17 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	capabilitySnapshots := make(map[string]adapter.CachedCapabilitySnapshot)
 	countryFits := make(map[string]countryFitResult)
 
-	snapshotFor := func(p C.Proxy) (string, adapter.CachedCapabilitySnapshot) {
-		identity := adapter.ProxyIdentity(p)
+	snapshotForIdentity := func(identity string) adapter.CachedCapabilitySnapshot {
 		if snapshot, ok := capabilitySnapshots[identity]; ok {
-			return identity, snapshot
+			return snapshot
 		}
 		snapshot := adapter.CachedCapabilitySnapshotForIdentity(identity)
 		capabilitySnapshots[identity] = snapshot
-		return identity, snapshot
+		return snapshot
+	}
+	snapshotFor := func(p C.Proxy) (string, adapter.CachedCapabilitySnapshot) {
+		identity := adapter.ProxyIdentity(p)
+		return identity, snapshotForIdentity(identity)
 	}
 
 	countryFit := func(p C.Proxy) (bool, smartCountryFit) {
@@ -1544,7 +1547,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		if strictCountry {
 			result.eligible, result.fit = s.countryGreedyFit(metadata, p, desiredCountry, true)
 		} else {
-			_, snapshot := snapshotFor(p)
+			snapshot := snapshotForIdentity(identity)
 			result.eligible = true
 			result.fit = countryGreedyFitFromSnapshot(metadata, snapshot, desiredCountry)
 		}
