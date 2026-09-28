@@ -1762,6 +1762,12 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 			commonModeWeak := s.isCommonModeWeakPath(metadata, candidateProxies)
 			stabilizeSmartOrder(names, weights, previous[0], switchMarginForPath(assessment, commonModeWeak))
 		}
+		if len(names) > selectionLimit {
+			names = names[:selectionLimit]
+			if len(weights) > selectionLimit {
+				weights = weights[:selectionLimit]
+			}
+		}
 		resultProxies := make([]C.Proxy, 0, len(names))
 		for _, name := range names {
 			if p, ok := proxyByName[name]; ok {
@@ -1776,6 +1782,9 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	trySelector := func(isUDP bool) ([]string, []float64, bool) {
 		// check the unwrap cache
 		if proxiesName, expired := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget); len(proxiesName) > 0 {
+			if len(proxiesName) > selectionLimit {
+				proxiesName = proxiesName[:selectionLimit]
+			}
 			if expired && s.beginBackgroundWork() {
 				go func() {
 					defer s.finishBackgroundWork()
