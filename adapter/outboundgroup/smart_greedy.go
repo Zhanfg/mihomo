@@ -7,6 +7,7 @@ import (
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/component/linkprofile"
+	"github.com/metacubex/mihomo/component/netstate"
 	C "github.com/metacubex/mihomo/constant"
 )
 
@@ -166,4 +167,33 @@ func greedySelectionBudget(assessment linkprofile.Assessment, epochChanged, rece
 	default:
 		return greedyNormalBudget
 	}
+}
+
+
+func (s *Smart) currentGreedyBudget(all []C.Proxy) int {
+	assessment := linkprofile.Assessment{Condition: linkprofile.ConditionUnknown}
+	if winner, ok := s.lastWinner.LoadOk(); ok && winner.Name != "" {
+		if p := s.proxyIndexFor(all)[winner.Name]; p != nil {
+			assessment = adapter.TunnelPathAssessmentForProxy(p)
+		}
+	}
+
+	currentEpoch := netstate.CurrentEpoch()
+	epochChanged := false
+	recentFailure := false
+	if snapshot, ok := s.lastEndToEnd.LoadOk(); ok {
+		epochChanged = snapshot.Epoch != 0 && snapshot.Epoch != currentEpoch
+		if !epochChanged && snapshot.Failed && snapshot.ObservedAt > 0 {
+			recentFailure = time.Since(time.UnixMilli(snapshot.ObservedAt)) <= greedyFailureBoostAfter
+		}
+	}
+
+	budget := greedySelectionBudget(assessment, epochChanged, recentFailure)
+	if len(all) > 0 && budget > len(all) {
+		budget = len(all)
+	}
+	if budget < 1 {
+		budget = 1
+	}
+	return budget
 }
