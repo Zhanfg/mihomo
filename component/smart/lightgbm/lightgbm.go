@@ -643,7 +643,7 @@ func GetModelDownloadURL() string {
 	return "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin"
 }
 
-func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor float64) (float64, bool) {
+func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor float64) (weight float64, predicted bool) {
 	if m == nil {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
@@ -684,15 +684,14 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	var prediction float64
 	defer func() {
 		if r := recover(); r != nil {
 			log.Errorln("[Smart] Model prediction panic: %v", r)
-			prediction, _ = smart.CalculateWeight(input, priorityFactor)
+			weight, predicted = smart.CalculateWeight(input, priorityFactor)
 		}
 	}()
 
-	prediction = model.PredictSingle(features, 0)
+	prediction := model.PredictSingle(features, 0)
 	if math.IsNaN(prediction) || math.IsInf(prediction, 0) || prediction <= 0 {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
