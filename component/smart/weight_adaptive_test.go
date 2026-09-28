@@ -78,3 +78,23 @@ func TestTrainingSampleRatePrioritizesInformativeRows(t *testing.T) {
 	lossy := &ModelInput{Success: 300, LossRate: 0.02}
 	require.Equal(t, 1.0, TrainingSampleRate(lossy, 0.03, 1.0))
 }
+
+
+func BenchmarkShouldInvokeModelStable(b *testing.B) {
+	input := &ModelInput{Success: 512}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		input.Success = 512 + int64(i%13)
+		_ = ShouldInvokeModel(input, 0.03)
+	}
+}
+
+func BenchmarkAdaptModelPredictionWithReliability(b *testing.B) {
+	b.ReportAllocs()
+	calibration, modelError := 1.0, 0.05
+	for i := 0; i < b.N; i++ {
+		_, calibration, modelError = AdaptModelPredictionWithReliability(
+			1.05, 1.02, calibration, modelError, 256+int64(i&63),
+		)
+	}
+}
