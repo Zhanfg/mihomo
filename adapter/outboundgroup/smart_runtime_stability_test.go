@@ -119,3 +119,26 @@ func BenchmarkSmartStatsEventQueue(b *testing.B) {
 		_ = <-queue
 	}
 }
+
+
+func BenchmarkCaptureSmartStatsMetadata(b *testing.B) {
+	metadata := &C.Metadata{
+		NetWork:        C.TCP,
+		DstIP:          netip.MustParseAddr("1.1.1.1"),
+		DstGeoIP:       []string{"US"},
+		DstIPASN:       "AS13335 Cloudflare",
+		DstPort:        443,
+		Host:           "example.com",
+		UUID:           "bench",
+		SmartTarget:    "example.com",
+		WildcardTarget: "example.com",
+		Process:        "large-process-name-that-must-not-be-retained",
+		ProcessPath:    "/data/user/0/example/files/something",
+	}
+	b.ReportAllocs()
+	var sink smartStatsMetadata
+	for i := 0; i < b.N; i++ {
+		sink = captureSmartStatsMetadata(metadata)
+	}
+	_ = sink
+}
