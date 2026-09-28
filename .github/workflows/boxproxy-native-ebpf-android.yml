@@ -10,6 +10,7 @@ on:
       - opt/smart-greedy-v4
       - opt/smart-learning-v5
       - opt/smart-runtime-v6
+      - opt/smart-learning-v7
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
