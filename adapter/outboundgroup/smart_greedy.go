@@ -3,6 +3,7 @@ package outboundgroup
 import (
 	"math"
 	"strings"
+	"time"
 
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/component/linkprofile"
@@ -139,4 +140,30 @@ func (s *Smart) countryGreedyFit(metadata *C.Metadata, p C.Proxy, desired string
 func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string, strict bool) bool {
 	eligible, _ := s.countryGreedyFit(metadata, p, desired, strict)
 	return eligible
+}
+
+
+const (
+	greedyHealthyBudget     = 5
+	greedyNormalBudget      = 7
+	greedyRecoveryBudget    = maxSelected
+	greedyFailureBoostAfter = 30 * time.Second
+)
+
+// greedySelectionBudget keeps the candidate set small in the steady state and
+// immediately restores the full recovery budget when evidence says the path is
+// changing or failing. This changes only how many alternatives Smart retains;
+// hard eligibility and ranking semantics remain unchanged.
+func greedySelectionBudget(assessment linkprofile.Assessment, epochChanged, recentFailure bool) int {
+	if epochChanged || recentFailure {
+		return greedyRecoveryBudget
+	}
+	switch assessment.Condition {
+	case linkprofile.ConditionWeak, linkprofile.ConditionUnstable:
+		return greedyRecoveryBudget
+	case linkprofile.ConditionHealthy:
+		return greedyHealthyBudget
+	default:
+		return greedyNormalBudget
+	}
 }
