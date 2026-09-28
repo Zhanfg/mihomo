@@ -1494,12 +1494,12 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		return stableDelayLess(a.delay, a.index, b.delay, b.index, s.tolerance)
 	}
 
-	// topCandidates uses lazy two-stage greedy selection. The full provider is
-	// scanned with only cheap, cache-local costs; live tunnel assessment is
-	// read for a tiny shortlist. That keeps expensive transient-state lookups
-	// O(K) instead of O(N) while retaining enough alternatives for a stressed
-	// path to be displaced. K is bounded by maxSelected.
-	topCandidates := func(limit int, accept func(C.Proxy) bool) []C.Proxy {
+	// rankCandidates performs one provider scan with a relaxation tier.
+	// Lower tiers are stricter. If a stricter candidate appears after looser
+	// ones, the looser shortlist is discarded immediately. This preserves the
+	// old "try strict set, then relax only if empty" semantics without rescanning
+	// the provider up to four times.
+	rankCandidates := func(limit int, classify func(C.Proxy) (tier int, ok bool)) []C.Proxy {
 		if limit <= 0 {
 			return nil
 		}
@@ -1537,11 +1537,18 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 			fit      smartCountryFit
 		}
 		shortlist := make([]shortlistCandidate, 0, shortLimit)
+		bestTier := int(^uint(0) >> 1)
 
 		for index, p := range all {
-			if !accept(p) {
+			tier, ok := classify(p)
+			if !ok || tier > bestTier {
 				continue
 			}
+			if tier < bestTier {
+				bestTier = tier
+				shortlist = shortlist[:0]
+			}
+
 			rawDelay := adapter.AddCapabilityPenaltyExtended(
 				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
 			if autoIPv4 {
@@ -1598,6 +1605,38 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		return result
 	}
 
+	topCandidates := func(limit int, accept func(C.Proxy) bool) []C.Proxy {
+		return rankCandidates(limit, func(p C.Proxy) (int, bool) {
+			return 0, accept(p)
+		})
+	}
+
+	fallbackCandidates := func(limit int) []C.Proxy {
+		return rankCandidates(limit, func(p C.Proxy) (int, bool) {
+			if !familyEligible(p) {
+				return 0, false
+			}
+			name := p.Name()
+			alive := p.AliveForTestUrl(s.testUrl)
+
+			// Tier 0: exact historical strict fallback.
+			if (wtFailNodes[name] == 0 || (wtBlocked && wtFailNodes[name] != 1)) &&
+				alive && (!isUDP || p.SupportUDP()) {
+				return 0, true
+			}
+			// Tier 1: preserve availability by relaxing host and UDP state.
+			if alive {
+				return 1, true
+			}
+			// Tier 2: allow unhealthy nodes except an explicit manual block.
+			if wtFailNodes[name] != smart.BlockManual {
+				return 2, true
+			}
+			// Tier 3: final historical family-only fallback.
+			return 3, true
+		})
+	}
+
 	need := minCount - len(selected)
 	if need > 0 {
 		topUp := topCandidates(need, func(p C.Proxy) bool {
@@ -1611,31 +1650,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	}
 
 	if len(selected) == 0 {
-		// Preserve the historical availability fallbacks, but each relaxation
-		// now selects only the K candidates it can return instead of cloning and
-		// sorting the entire provider.
-		selected = topCandidates(minCount, func(p C.Proxy) bool {
-			return (wtFailNodes[p.Name()] == 0 || (wtBlocked && wtFailNodes[p.Name()] != 1)) &&
-				p.AliveForTestUrl(s.testUrl) && (!isUDP || p.SupportUDP()) && familyEligible(p)
-		})
-
-		if len(selected) == 0 {
-			selected = topCandidates(minCount, func(p C.Proxy) bool {
-				return p.AliveForTestUrl(s.testUrl) && familyEligible(p)
-			})
-		}
-
-		if len(selected) == 0 {
-			selected = topCandidates(minCount, func(p C.Proxy) bool {
-				return wtFailNodes[p.Name()] != smart.BlockManual && familyEligible(p)
-			})
-		}
-
-		if len(selected) == 0 {
-			selected = topCandidates(minCount, func(p C.Proxy) bool {
-				return familyEligible(p)
-			})
-		}
+		selected = fallbackCandidates(minCount)
 	}
 
 	if len(selected) == 0 && (s.requireIPv4 || s.requireIPv6 || strictCountry) {
