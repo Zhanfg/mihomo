@@ -283,26 +283,65 @@ func (s *capabilityState) warm(p C.Proxy, kind capabilityKind, attest bool) {
 	entry.mu.Unlock()
 }
 
-// WarmProxyPath verifies only the node that won real traffic. Soft preferences
-// no longer probe every candidate. The egress family is corroborated by two
-// independent endpoints when possible; UDP is measured only for UDP traffic.
-func WarmProxyPath(p C.Proxy, isUDP, familyKnown, ipv6 bool) {
+// ObserveProxyPathSuccess records what real traffic has already proven. A
+// successful flow is stronger capability evidence than a synthetic probe, so
+// ordinary Smart traffic should not wake the radio again merely to rediscover
+// that the selected node can carry this family/transport. Active egress
+// attestation remains opt-in for country/identity features.
+func ObserveProxyPathSuccess(p C.Proxy, isUDP, familyKnown, ipv6, attestEgress bool) {
 	if p == nil || (!familyKnown && !isUDP) {
-		// No address-family or UDP evidence can be improved for this flow.
-		// Avoid allocating/touching capability identity state on the hot path.
 		return
 	}
 	state := capabilityStateForProxy(p)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+
+	markPositive := func(entry *capabilityEntry) {
+		entry.mu.Lock()
+		if entry.epoch != epoch {
+			entry.exitIP = netip.Addr{}
+			entry.country = ""
+			entry.asn = ""
+			entry.asnOrg = ""
+			entry.sources = 0
+			entry.consistent = false
+		}
+		entry.known = true
+		entry.ok = true
+		entry.failures = 0
+		entry.epoch = epoch
+		entry.expire = now.Add(capabilityOKTTL)
+		entry.probing = false
+		entry.mu.Unlock()
+	}
+
 	if familyKnown {
+		entry := &state.ipv4
 		kind := capabilityIPv4
 		if ipv6 {
+			entry = &state.ipv6
 			kind = capabilityIPv6
 		}
-		state.warm(p, kind, true)
+		markPositive(entry)
+		if attestEgress {
+			// warm(..., attest=true) notices that capability is fresh but
+			// identity is not corroborated, and performs only the attestation
+			// that country/egress features actually need.
+			state.warm(p, kind, true)
+		}
 	}
 	if isUDP {
-		state.warm(p, capabilityUDP, false)
+		// Socket/session establishment is enough for Smart's UDP availability
+		// ranking. STUN egress identity is diagnostic data and is not worth an
+		// extra radio wake on every UDP winner.
+		markPositive(&state.udp)
 	}
+}
+
+// WarmProxyPath preserves the previous public behavior for callers that
+// explicitly request active path attestation.
+func WarmProxyPath(p C.Proxy, isUDP, familyKnown, ipv6 bool) {
+	ObserveProxyPathSuccess(p, isUDP, familyKnown, ipv6, true)
 }
 
 func probeCapability(p C.Proxy, kind capabilityKind, entry *capabilityEntry) {
