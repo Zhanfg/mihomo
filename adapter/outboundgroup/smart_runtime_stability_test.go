@@ -3,35 +3,24 @@ package outboundgroup
 import (
 	"errors"
 	"net/netip"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	C "github.com/metacubex/mihomo/constant"
 )
 
-func TestSmartStatsQueueSaturationDoesNotBlock(t *testing.T) {
-	queue := make(chan func(), 1)
-	if !tryEnqueueSmartStats(queue, func() {}) {
-		t.Fatal("first enqueue should fit")
-	}
-
-	start := time.Now()
-	if tryEnqueueSmartStats(queue, func() {}) {
-		t.Fatal("full queue must drop telemetry instead of blocking")
-	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("saturated enqueue blocked data path for %s", elapsed)
-	}
-}
-
 func TestSmartStatsWorkerRecoversTelemetryPanic(t *testing.T) {
-	var ran atomic.Bool
-	runSmartStatsJob(func() { panic("telemetry boom") })
-	runSmartStatsJob(func() { ran.Store(true) })
-	if !ran.Load() {
-		t.Fatal("worker must continue after recovering a telemetry panic")
+	owner := &Smart{}
+	if !owner.beginBackgroundWork() {
+		t.Fatal("failed to reserve background work")
 	}
+
+	// A nil proxy forces recordConnectionStats to panic. The typed worker must
+	// recover it, while event.run's defer balances the background-work token.
+	runSmartStatsEvent(smartStatsEvent{owner: owner})
+
+	// A second harmless event proves control returned normally after recovery.
+	runSmartStatsEvent(smartStatsEvent{})
 }
 
 
@@ -85,13 +74,24 @@ func TestSmartStatsEventQueueSaturationDoesNotBlock(t *testing.T) {
 }
 
 func BenchmarkSmartStatsClosureQueue(b *testing.B) {
+	// Keep the historical closure baseline local to the benchmark only. The
+	// production API no longer exposes a chan-func enqueue path.
 	queue := make(chan func(), 1)
 	var sink int64
+	tryEnqueue := func(job func()) bool {
+		select {
+		case queue <- job:
+			return true
+		default:
+			return false
+		}
+	}
+
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		value := int64(i)
 		job := func() { sink = value }
-		if !tryEnqueueSmartStats(queue, job) {
+		if !tryEnqueue(job) {
 			b.Fatal("enqueue failed")
 		}
 		(<-queue)()
