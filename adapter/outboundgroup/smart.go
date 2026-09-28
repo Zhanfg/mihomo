@@ -232,18 +232,6 @@ func smartStatsQueueCapacity() int {
 	return statsQueueSize
 }
 
-func runSmartStatsJob(job func()) {
-	if job == nil {
-		return
-	}
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			log.Errorln("[Smart] statistics worker recovered panic: %v", recovered)
-		}
-	}()
-	job()
-}
-
 func runSmartStatsEvent(event smartStatsEvent) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -274,15 +262,6 @@ func startSmartStatsWorkers() {
 // close until a full stats queue drains can make the core look hung under
 // bursts or slow flash I/O. The queue remains bounded for RAM control and the
 // dropped samples are acceptable because Smart learns from a rolling history.
-func tryEnqueueSmartStats(queue chan func(), job func()) bool {
-	select {
-	case queue <- job:
-		return true
-	default:
-		return false
-	}
-}
-
 func tryEnqueueSmartStatsEvent(queue chan smartStatsEvent, event smartStatsEvent) bool {
 	select {
 	case queue <- event:
