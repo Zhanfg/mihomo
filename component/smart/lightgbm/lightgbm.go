@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vernesong/leaves"
@@ -25,6 +26,12 @@ import (
 
 const (
 	MaxFeatureSize = 30
+
+	// The parsed ensemble is much larger than the tiny online residual state.
+	// Keep it resident while it is actually serving predictions, then release
+	// it after one idle window. The timer is one-shot/activity-aware rather than
+	// a permanent ticker, so an unused model creates no periodic wakeups.
+	modelIdleTTL = 30 * time.Minute
 )
 
 var (
@@ -428,11 +435,13 @@ func init() {
 }
 
 type WeightModel struct {
-	model             *leaves.Ensemble
-	transforms        *FeatureTransforms
+	model              *leaves.Ensemble
+	transforms         *FeatureTransforms
 	featuresCompatible bool
-	lastUpdate        time.Time
-	mutex             sync.RWMutex
+	lastUpdate         time.Time
+	lastUse            atomic.Int64
+	idleTimer          *time.Timer
+	mutex              sync.RWMutex
 }
 
 func GetModel() *WeightModel {
@@ -531,11 +540,56 @@ func (m *WeightModel) loadModel(path string) error {
 		}
 	}
 
+	now := time.Now()
 	m.transforms = transforms
 	m.featuresCompatible = compatible
 	m.model = model
-	m.lastUpdate = time.Now()
+	m.lastUpdate = now
+	m.lastUse.Store(now.UnixNano())
+	if m.idleTimer == nil {
+		m.idleTimer = time.AfterFunc(modelIdleTTL, m.expireIdleModel)
+	}
 	return nil
+}
+
+func (m *WeightModel) releaseIfIdleLocked(now time.Time) (released bool, next time.Duration) {
+	if m.model == nil {
+		m.idleTimer = nil
+		return false, 0
+	}
+	lastNS := m.lastUse.Load()
+	if lastNS <= 0 {
+		lastNS = m.lastUpdate.UnixNano()
+	}
+	idleFor := now.Sub(time.Unix(0, lastNS))
+	if idleFor < modelIdleTTL {
+		return false, modelIdleTTL - idleFor
+	}
+
+	m.model = nil
+	m.transforms = nil
+	m.featuresCompatible = false
+	m.idleTimer = nil
+	return true, 0
+}
+
+func (m *WeightModel) expireIdleModel() {
+	if m == nil {
+		return
+	}
+	now := time.Now()
+	m.mutex.Lock()
+	// The callback owns the one-shot timer that just fired.
+	m.idleTimer = nil
+	released, next := m.releaseIfIdleLocked(now)
+	if !released && next > 0 && m.model != nil {
+		m.idleTimer = time.AfterFunc(next, m.expireIdleModel)
+	}
+	m.mutex.Unlock()
+
+	if released {
+		log.Debugln("[Smart] Released idle LightGBM ensemble; online residual state remains resident")
+	}
 }
 
 func ReloadModel() {
@@ -649,6 +703,9 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 	model := m.model
 	transforms := m.transforms
 	compatible := m.featuresCompatible
+	if model != nil {
+		m.lastUse.Store(time.Now().UnixNano())
+	}
 	m.mutex.RUnlock()
 
 	if model == nil {
