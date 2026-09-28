@@ -762,12 +762,21 @@ func snapshotCapabilityEntry(entry *capabilityEntry, now time.Time, epoch uint64
 // many nodes. One ProxyIdentity/sync.Map lookup replaces several independent
 // capability/country helpers for the same candidate.
 func CachedCapabilitySnapshotForProxy(p C.Proxy) CachedCapabilitySnapshot {
-	var out CachedCapabilitySnapshot
 	if p == nil {
+		return CachedCapabilitySnapshot{}
+	}
+	return CachedCapabilitySnapshotForIdentity(ProxyIdentity(p))
+}
+
+// CachedCapabilitySnapshotForIdentity is the no-rehash variant for ranking
+// loops that already need ProxyIdentity as their de-duplication key.
+func CachedCapabilitySnapshotForIdentity(identity string) CachedCapabilitySnapshot {
+	var out CachedCapabilitySnapshot
+	if identity == "" {
 		return out
 	}
-	out.Identity = ProxyIdentity(p)
-	state := capabilityStateFor(out.Identity)
+	out.Identity = identity
+	state := capabilityStateFor(identity)
 	now := time.Now()
 	epoch := netstate.CurrentEpoch()
 
