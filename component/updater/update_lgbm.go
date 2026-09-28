@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -96,8 +95,10 @@ func UpdateLgbmModel() (err error) {
 }
 
 func updateLgbmModel() error {
-	defer runtime.GC()
-
+	// Do not force a stop-the-world GC after a model refresh. The temporary
+	// download/validation buffers become ordinary garbage and Go can reclaim
+	// them with normal heap pacing instead of creating a predictable CPU/power
+	// spike immediately after network I/O.
 	return UpdateLgbmModel()
 }
 
