@@ -2,9 +2,12 @@ package outboundgroup
 
 import (
 	"math"
+	"net/netip"
 	"testing"
 
+	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/component/linkprofile"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func TestAdjustedCountryWeightIsElastic(t *testing.T) {
@@ -85,5 +88,47 @@ func TestGreedySelectionBudget(t *testing.T) {
 				t.Fatalf("budget=%d want=%d", got, tc.want)
 			}
 		})
+	}
+}
+
+
+func TestCountryGreedyFitFromSnapshot(t *testing.T) {
+	snapshot := adapter.CachedCapabilitySnapshot{
+		IPv4Known:     true,
+		IPv4Available: true,
+		IPv4Country:   "US",
+		IPv6Known:     true,
+		IPv6Available: true,
+		IPv6Country:   "JP",
+	}
+
+	v4 := &C.Metadata{DstIP: netip.MustParseAddr("1.1.1.1")}
+	if fit := countryGreedyFitFromSnapshot(v4, snapshot, "US"); fit != smartCountryMatch {
+		t.Fatalf("IPv4 fit=%v, want match", fit)
+	}
+	if fit := countryGreedyFitFromSnapshot(v4, snapshot, "JP"); fit != smartCountryMismatch {
+		t.Fatalf("IPv4 fit=%v, want mismatch", fit)
+	}
+
+	v6 := &C.Metadata{DstIP: netip.MustParseAddr("2001:db8::1")}
+	if fit := countryGreedyFitFromSnapshot(v6, snapshot, "JP"); fit != smartCountryMatch {
+		t.Fatalf("IPv6 fit=%v, want match", fit)
+	}
+
+	unknownFamily := &C.Metadata{Host: "example.com"}
+	if fit := countryGreedyFitFromSnapshot(unknownFamily, snapshot, "US"); fit != smartCountryMatch {
+		t.Fatalf("family-unknown fit=%v, want either-family match", fit)
+	}
+}
+
+func TestAutoIPFamilyMismatchFromSnapshot(t *testing.T) {
+	v6 := &C.Metadata{DstIP: netip.MustParseAddr("2001:db8::1")}
+	missing := adapter.CachedCapabilitySnapshot{IPv6Known: true, IPv6Available: false}
+	if !autoIPFamilyMismatchFromSnapshot(v6, missing) {
+		t.Fatal("confirmed IPv6 mismatch was not detected")
+	}
+	unknown := adapter.CachedCapabilitySnapshot{}
+	if autoIPFamilyMismatchFromSnapshot(v6, unknown) {
+		t.Fatal("unknown IPv6 capability must preserve availability")
 	}
 }
