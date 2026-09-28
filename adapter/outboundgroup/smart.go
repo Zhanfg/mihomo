@@ -2358,10 +2358,12 @@ func (s *Smart) logConnectionStats(err error, record *smart.StatsRecord, metadat
 
 // data collection
 func (s *Smart) collectConnectionData(input *smart.ModelInput, metadata *C.Metadata,
-	baseWeight float64, proxyName string, ModelPredicted bool) {
+	baseWeight float64, proxyName string, ModelPredicted bool, modelError float64) {
 
-	// sample rate control
-	if s.sampleRate < 1.0 && rand.Float64() > s.sampleRate {
+	// The configured sample rate is a ceiling. Stable mature traffic is
+	// downsampled further; failures/loss/model disagreement keep full priority.
+	effectiveRate := smart.TrainingSampleRate(input, modelError, s.sampleRate)
+	if effectiveRate <= 0 || (effectiveRate < 1.0 && rand.Float64() > effectiveRate) {
 		return
 	}
 
@@ -2582,9 +2584,11 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
 	calculatedWeight = observedWeight
 	ModelPredicted = false
+	modelError := 0.0
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
+		modelError = oldModelError
 		if smart.ShouldInvokeModel(input, oldModelError) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
@@ -2600,6 +2604,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				)
 				atomicRecord.SetWeight(calKey, newCalibration)
 				atomicRecord.SetWeight(errKey, newModelError)
+				modelError = newModelError
 				ModelPredicted = true
 			}
 		}
@@ -2653,7 +2658,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				}
 			}
 		}
-		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted)
+		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted, modelError)
 	}
 
 	if debugEnabled {
