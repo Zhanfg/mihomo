@@ -194,3 +194,10 @@ func BenchmarkObserveModelPriorResidual(b *testing.B) {
 	}
 	_ = err
 }
+
+
+func TestObserveModelPriorResidualSingleDriftIsBounded(t *testing.T) {
+	err := ObserveModelPriorResidual(1.4, 1.0, 0)
+	require.Greater(t, err, 0.0)
+	require.Less(t, err, 0.10, "one stable-sample disagreement must not immediately declare the global model unreliable")
+}
