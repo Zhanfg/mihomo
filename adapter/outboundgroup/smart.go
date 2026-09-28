@@ -1400,15 +1400,54 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 	// selected for the same target before an A/AAAA family change.
 	_, _, autoIPv4, autoIPv6 := s.ipFamilyPolicy(metadata)
 	desiredCountry, strictCountry := s.desiredCountry(metadata, all)
+
+	type countryFitResult struct {
+		eligible bool
+		fit      smartCountryFit
+	}
+	capabilitySnapshots := make(map[string]adapter.CachedCapabilitySnapshot)
+	countryFits := make(map[string]countryFitResult)
+
+	snapshotFor := func(p C.Proxy) (string, adapter.CachedCapabilitySnapshot) {
+		identity := adapter.ProxyIdentity(p)
+		if snapshot, ok := capabilitySnapshots[identity]; ok {
+			return identity, snapshot
+		}
+		snapshot := adapter.CachedCapabilitySnapshotForIdentity(identity)
+		capabilitySnapshots[identity] = snapshot
+		return identity, snapshot
+	}
+
 	countryFit := func(p C.Proxy) (bool, smartCountryFit) {
-		return s.countryGreedyFit(metadata, p, desiredCountry, strictCountry)
+		if desiredCountry == "" || p == nil {
+			return true, smartCountryMatch
+		}
+		identity := adapter.ProxyIdentity(p)
+		if cached, ok := countryFits[identity]; ok {
+			return cached.eligible, cached.fit
+		}
+
+		var result countryFitResult
+		if strictCountry {
+			result.eligible, result.fit = s.countryGreedyFit(metadata, p, desiredCountry, true)
+		} else {
+			_, snapshot := snapshotFor(p)
+			result.eligible = true
+			result.fit = countryGreedyFitFromSnapshot(metadata, snapshot, desiredCountry)
+		}
+		countryFits[identity] = result
+		return result.eligible, result.fit
 	}
 	familyEligible := func(p C.Proxy) bool {
 		eligible, _ := countryFit(p)
 		return s.ipFamilyEligible(metadata, p) && eligible
 	}
 	autoFamilyMismatch := func(p C.Proxy) bool {
-		return s.autoIPFamilyMismatch(metadata, p)
+		if p == nil || !s.autoIPFamily {
+			return false
+		}
+		_, snapshot := snapshotFor(p)
+		return autoIPFamilyMismatchFromSnapshot(metadata, snapshot)
 	}
 
 	var proxyByName map[string]C.Proxy
@@ -1549,12 +1588,16 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 				shortlist = shortlist[:0]
 			}
 
-			rawDelay := adapter.AddCapabilityPenaltyExtended(
-				p.LastDelayForTestUrl(s.testUrl), p, s.preferUDP, s.preferIPv4, s.preferIPv6)
-			if autoIPv4 {
-				rawDelay = adapter.AddAutoIPFamilyPenalty(rawDelay, p, false)
-			} else if autoIPv6 {
-				rawDelay = adapter.AddAutoIPFamilyPenalty(rawDelay, p, true)
+			rawDelay := p.LastDelayForTestUrl(s.testUrl)
+			if s.preferUDP || s.preferIPv4 || s.preferIPv6 || autoIPv4 || autoIPv6 {
+				_, snapshot := snapshotFor(p)
+				rawDelay = adapter.AddCapabilityPenaltyFromSnapshot(
+					rawDelay, snapshot, s.preferUDP, s.preferIPv4, s.preferIPv6)
+				if autoIPv4 {
+					rawDelay = adapter.AddAutoIPFamilyPenaltyFromSnapshot(rawDelay, snapshot, false)
+				} else if autoIPv6 {
+					rawDelay = adapter.AddAutoIPFamilyPenaltyFromSnapshot(rawDelay, snapshot, true)
+				}
 			}
 			_, fit := countryFit(p)
 			candidate := shortlistCandidate{
