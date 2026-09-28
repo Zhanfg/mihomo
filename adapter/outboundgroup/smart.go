@@ -2567,28 +2567,33 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	)
 	input.ConnectionFailed = err != nil
 
+	// The heuristic is the always-on online learner. The global LightGBM
+	// ensemble is an occasional expert: stable mature records do not pay for a
+	// full tree traversal on every sampled close.
+	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
+	calculatedWeight = observedWeight
+	ModelPredicted = false
 	if s.useLightGBM && s.weightModel != nil {
-		calculatedWeight, ModelPredicted = s.weightModel.PredictWeight(input, priorityFactor)
-		if ModelPredicted {
-			// The shipped LightGBM model is global; calibrate it online with this
-			// target/node pair's real outcomes. The calibration lives in the
-			// existing Smart record, so it survives restarts without another
-			// resident model or a second database.
-			if observedWeight, ok := smart.CalculateWeight(input, priorityFactor); ok || observedWeight > 0 {
+		errKey := smart.ModelErrorWeightType(isUDP)
+		oldModelError := atomicRecord.GetWeight(errKey)
+		if smart.ShouldInvokeModel(input, oldModelError) {
+			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
+			if predicted && observedWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
-				var newCalibration float64
-				calculatedWeight, newCalibration = smart.AdaptModelPrediction(
-					calculatedWeight,
+				var newCalibration, newModelError float64
+				calculatedWeight, newCalibration, newModelError = smart.AdaptModelPredictionWithReliability(
+					modelWeight,
 					observedWeight,
 					oldCalibration,
+					oldModelError,
 					input.Success+input.Failure,
 				)
 				atomicRecord.SetWeight(calKey, newCalibration)
+				atomicRecord.SetWeight(errKey, newModelError)
+				ModelPredicted = true
 			}
 		}
-	} else {
-		calculatedWeight, ModelPredicted = smart.CalculateWeight(input, priorityFactor)
 	}
 
 	if calculatedWeight > 0 && linkFactor > 0 {
