@@ -26,6 +26,8 @@ var presetSceneParams = [4]SceneParams{
 const (
 	WeightTypeModelCalibrationTCP = "model-cal:tcp"
 	WeightTypeModelCalibrationUDP = "model-cal:udp"
+	WeightTypeModelErrorTCP       = "model-err:tcp"
+	WeightTypeModelErrorUDP       = "model-err:udp"
 )
 
 // LinkQualityFactor is kept as a compatibility wrapper for existing Smart
@@ -49,40 +51,107 @@ func ModelCalibrationWeightType(isUDP bool) string {
 	return WeightTypeModelCalibrationTCP
 }
 
+
+func ModelErrorWeightType(isUDP bool) string {
+	if isUDP {
+		return WeightTypeModelErrorUDP
+	}
+	return WeightTypeModelErrorTCP
+}
+
+// ShouldInvokeModel is the inference gate for the heavy global ensemble.
+// Failures and fresh loss always get a full prediction. Mature, stable records
+// are checked only at prime-numbered evidence intervals so weighted sampling
+// strides (commonly powers of two) cannot phase-lock into "always infer".
+func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
+	if input == nil {
+		return false
+	}
+	total := input.Success + input.Failure
+	if total < DefaultMinSampleCount {
+		return false
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 {
+		return true
+	}
+	if total < 16 {
+		return true
+	}
+
+	stride := int64(7)
+	switch {
+	case modelError >= 0.20:
+		stride = 3
+	case total < 64:
+		stride = 3
+	case modelError > 0 && modelError < 0.06 && total >= 256:
+		stride = 13
+	}
+	return total%stride == 0
+}
+
 // AdaptModelPrediction turns the static LightGBM score into a small online
 // ensemble. The model remains the primary signal; the traditional scorer acts
 // as a continuously observed residual target. A bounded EWMA calibration is
 // persisted with the normal Smart stats, so restarts retain what the core
 // learned while RAM stays O(existing records).
 func AdaptModelPrediction(modelWeight, observedWeight, oldCalibration float64, samples int64) (weight, calibration float64) {
+	weight, calibration, _ = AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibration, 0, samples)
+	return weight, calibration
+}
+
+// AdaptModelPredictionWithReliability is a tiny persistent online residual
+// learner. It learns both a multiplicative bias and the model's recent error.
+// The latter controls model share, so a globally useful model can gracefully
+// defer to local evidence for one target/node pair without another resident
+// model or retraining job.
+func AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibration, oldError float64, samples int64) (weight, calibration, modelError float64) {
 	if math.IsNaN(modelWeight) || math.IsInf(modelWeight, 0) || modelWeight <= 0 ||
 		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) || observedWeight <= 0 {
 		if oldCalibration <= 0 {
 			oldCalibration = 1
 		}
-		return modelWeight, oldCalibration
+		if oldError < 0 || math.IsNaN(oldError) || math.IsInf(oldError, 0) {
+			oldError = 0
+		}
+		return modelWeight, oldCalibration, oldError
 	}
 	if oldCalibration <= 0 || math.IsNaN(oldCalibration) || math.IsInf(oldCalibration, 0) {
 		oldCalibration = 1
 	}
+	if oldError < 0 || math.IsNaN(oldError) || math.IsInf(oldError, 0) {
+		oldError = 0
+	}
 
-	target := observedWeight / modelWeight
-	target = math.Max(0.60, math.Min(1.40, target))
+	ratio := observedWeight / modelWeight
+	target := math.Max(0.55, math.Min(1.45, ratio))
+	instantError := math.Abs(math.Log(ratio))
+	instantError = math.Min(1.0, instantError)
 
-	// Learn slowly at first, then a little faster once the target/node pair has
-	// enough evidence. The cap prevents one bad session from rewriting the
-	// loaded model's behavior.
+	errorAlpha := 0.12
+	if oldError == 0 {
+		modelError = instantError
+	} else {
+		modelError = oldError*(1-errorAlpha) + instantError*errorAlpha
+	}
+	modelError = math.Max(0, math.Min(1, modelError))
+
 	evidence := math.Min(1, math.Log1p(float64(max(int64(0), samples)))/math.Log(65))
-	alpha := 0.08 + 0.10*evidence
+	alpha := 0.06 + 0.12*evidence + math.Min(0.08, instantError*0.10)
 	calibration = oldCalibration*(1-alpha) + target*alpha
-	calibration = math.Max(0.65, math.Min(1.35, calibration))
+	calibration = math.Max(0.60, math.Min(1.40, calibration))
 
-	// The global model keeps most of the vote. The local heuristic contributes
-	// more while evidence is sparse, then becomes a smaller stabilizing term.
-	modelShare := 0.60 + 0.25*evidence
+	// Persistent model error lowers trust; the current disagreement adds a
+	// short-term brake so one obviously wrong prediction cannot dominate until
+	// the EWMA catches up.
+	reliability := math.Exp(-2.2 * modelError)
+	currentReliability := math.Exp(-1.2 * instantError)
+	modelShare := (0.55 + 0.30*evidence) * reliability * currentReliability
+	modelShare = math.Max(0.15, math.Min(0.85, modelShare))
+
 	adaptedModel := modelWeight * calibration
 	weight = adaptedModel*modelShare + observedWeight*(1-modelShare)
-	return weight, calibration
+	return weight, calibration, modelError
 }
 
 type (
