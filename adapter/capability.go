@@ -311,7 +311,10 @@ func ObserveProxyPathSuccess(p C.Proxy, isUDP, familyKnown, ipv6, attestEgress b
 		entry.failures = 0
 		entry.epoch = epoch
 		entry.expire = now.Add(capabilityOKTTL)
-		entry.probing = false
+		// Preserve an already-running probe. Clearing probing here would allow
+		// the same winner to launch a duplicate attestation before the in-flight
+		// probe returns. A real-flow success updates the verdict, not the
+		// lifecycle ownership of another goroutine.
 		entry.mu.Unlock()
 	}
 
