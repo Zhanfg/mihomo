@@ -2517,7 +2517,7 @@ func (s *Smart) logConnectionStats(err error, record *smart.StatsRecord, metadat
 
 // data collection
 func (s *Smart) collectConnectionData(input *smart.ModelInput, metadata *C.Metadata,
-	baseWeight float64, proxyName string, ModelPredicted bool, modelError float64) {
+	baseWeight float64, proxyName string, ModelPredicted, modelPriorUsed bool, modelError float64) {
 
 	// The configured sample rate is a ceiling. Stable mature traffic is
 	// downsampled further; failures/loss/model disagreement keep full priority.
@@ -2529,9 +2529,11 @@ func (s *Smart) collectConnectionData(input *smart.ModelInput, metadata *C.Metad
 	input.GroupName = s.Name()
 	input.NodeName = proxyName
 	weightSource := "Traditional"
-
-	if ModelPredicted {
+	switch {
+	case ModelPredicted:
 		weightSource = "LightGBM"
+	case modelPriorUsed:
+		weightSource = "LightGBM-Prior"
 	}
 
 	lightgbm.GetCollector().AddSample(input, metadata, baseWeight, weightSource)
@@ -2743,11 +2745,14 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
 	calculatedWeight = observedWeight
 	ModelPredicted = false
+	modelPriorUsed := false
 	modelError := 0.0
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
+		priorKey := smart.ModelPriorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
+
 		if smart.ShouldInvokeModel(input, oldModelError) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
@@ -2763,9 +2768,26 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				)
 				atomicRecord.SetWeight(calKey, newCalibration)
 				atomicRecord.SetWeight(errKey, newModelError)
+				if prior := smart.CalibratedModelPrior(modelWeight, newCalibration, observedWeight); prior > 0 {
+					atomicRecord.SetWeight(priorKey, prior)
+				}
 				modelError = newModelError
 				ModelPredicted = true
 			}
+		}
+
+		// A lazy/unloaded model or an intentionally skipped inference can still
+		// reuse the last bounded calibrated prior. The current heuristic keeps
+		// most of the vote, and anomalous samples reject stale model inertia.
+		if !ModelPredicted {
+			cachedPrior := atomicRecord.GetWeight(priorKey)
+			calculatedWeight, modelPriorUsed = smart.ReuseModelPrior(
+				observedWeight,
+				cachedPrior,
+				oldModelError,
+				input.Success+input.Failure,
+				input.ConnectionFailed || input.LossRate >= 0.01,
+			)
 		}
 	}
 
@@ -2817,7 +2839,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				}
 			}
 		}
-		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted, modelError)
+		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted, modelPriorUsed, modelError)
 	}
 
 	if debugEnabled {
