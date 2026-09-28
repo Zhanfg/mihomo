@@ -144,6 +144,48 @@ func (s *Smart) countryEligible(metadata *C.Metadata, p C.Proxy, desired string,
 }
 
 
+func countryGreedyFitFromSnapshot(metadata *C.Metadata, snapshot adapter.CachedCapabilitySnapshot, desired string) smartCountryFit {
+	if desired == "" {
+		return smartCountryMatch
+	}
+
+	if knownFamily, ipv6 := metadataIPFamily(metadata); knownFamily {
+		country := snapshot.IPv4Country
+		if ipv6 {
+			country = snapshot.IPv6Country
+		}
+		if country == "" {
+			return smartCountryUnknown
+		}
+		if strings.EqualFold(country, desired) {
+			return smartCountryMatch
+		}
+		return smartCountryMismatch
+	}
+
+	country4, country6 := snapshot.IPv4Country, snapshot.IPv6Country
+	if (country4 != "" && strings.EqualFold(country4, desired)) ||
+		(country6 != "" && strings.EqualFold(country6, desired)) {
+		return smartCountryMatch
+	}
+	if country4 != "" && country6 != "" {
+		return smartCountryMismatch
+	}
+	return smartCountryUnknown
+}
+
+func autoIPFamilyMismatchFromSnapshot(metadata *C.Metadata, snapshot adapter.CachedCapabilitySnapshot) bool {
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return false
+	}
+	if ipv6 {
+		return snapshot.IPv6Known && !snapshot.IPv6Available
+	}
+	return snapshot.IPv4Known && !snapshot.IPv4Available
+}
+
+
 const (
 	greedyHealthyBudget     = 5
 	greedyNormalBudget      = 7
