@@ -98,3 +98,12 @@ func BenchmarkAdaptModelPredictionWithReliability(b *testing.B) {
 		)
 	}
 }
+
+
+func TestTrainingSampleRateHonorsConfiguredCeiling(t *testing.T) {
+	failed := &ModelInput{Success: 40, ConnectionFailed: true}
+	require.Equal(t, 0.2, TrainingSampleRate(failed, 0.30, 0.2))
+
+	stable := &ModelInput{Success: 300}
+	require.Equal(t, 0.025, TrainingSampleRate(stable, 0.03, 0.2))
+}
