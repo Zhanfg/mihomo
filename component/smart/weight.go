@@ -121,6 +121,33 @@ func ReuseModelPrior(observedWeight, prior, modelError float64, samples int64, a
 	return observedWeight*(1-priorShare) + prior*priorShare, true
 }
 
+
+// ObserveModelPriorResidual turns skipped-inference samples into a tiny feedback
+// loop. It does not pretend the cached prior is a fresh model prediction; it
+// merely tracks how far that prior has drifted from the always-current
+// heuristic. Growing disagreement raises modelError, which in turn makes
+// ShouldInvokeModel refresh the full ensemble more frequently.
+func ObserveModelPriorResidual(prior, observedWeight, oldError float64) float64 {
+	if oldError < 0 || math.IsNaN(oldError) || math.IsInf(oldError, 0) {
+		oldError = 0
+	}
+	if prior <= 0 || observedWeight <= 0 ||
+		math.IsNaN(prior) || math.IsInf(prior, 0) ||
+		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) {
+		return oldError
+	}
+
+	// Compare within the same safety envelope used for reuse; otherwise one
+	// ancient extreme value could manufacture a false emergency.
+	prior = math.Max(observedWeight*0.60, math.Min(observedWeight*1.40, prior))
+	instantError := math.Min(1, math.Abs(math.Log(observedWeight/prior)))
+	if oldError == 0 {
+		return instantError * 0.25
+	}
+	alpha := 0.06 + math.Min(0.06, instantError*0.10)
+	return math.Max(0, math.Min(1, oldError*(1-alpha)+instantError*alpha))
+}
+
 // ShouldInvokeModel is the inference gate for the heavy global ensemble.
 // Failures and fresh loss always get a full prediction. Mature, stable records
 // are checked only at prime-numbered evidence intervals so weighted sampling
