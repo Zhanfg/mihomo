@@ -680,3 +680,88 @@ func TestObserveProxyPathSuccessAvoidsSyntheticProbeByDefault(t *testing.T) {
 		t.Fatal("ordinary successful flow must not schedule redundant synthetic probes")
 	}
 }
+
+
+func TestCachedCapabilitySnapshotMatchesLegacyViews(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("snapshot-view")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+	expire := time.Now().Add(time.Hour)
+
+	state.udp.mu.Lock()
+	state.udp.known, state.udp.ok, state.udp.epoch, state.udp.expire = true, true, epoch, expire
+	state.udp.mu.Unlock()
+	state.ipv4.mu.Lock()
+	state.ipv4.known, state.ipv4.ok, state.ipv4.epoch, state.ipv4.expire = true, true, epoch, expire
+	state.ipv4.country = "US"
+	state.ipv4.mu.Unlock()
+	state.ipv6.mu.Lock()
+	state.ipv6.known, state.ipv6.ok, state.ipv6.epoch, state.ipv6.expire = true, false, epoch, expire
+	state.ipv6.mu.Unlock()
+
+	snapshot := CachedCapabilitySnapshotForProxy(p)
+	if !snapshot.UDPKnown || !snapshot.UDPAvailable {
+		t.Fatal("snapshot lost UDP capability")
+	}
+	if !snapshot.IPv4Known || !snapshot.IPv4Available || snapshot.IPv4Country != "US" {
+		t.Fatalf("snapshot IPv4=%+v", snapshot)
+	}
+	if !snapshot.IPv6Known || snapshot.IPv6Available || snapshot.IPv6Country != "" {
+		t.Fatalf("snapshot IPv6=%+v", snapshot)
+	}
+
+	legacy := AddCapabilityPenaltyExtended(100, p, true, true, true)
+	fromSnapshot := AddCapabilityPenaltyFromSnapshot(100, snapshot, true, true, true)
+	if legacy != fromSnapshot {
+		t.Fatalf("penalty mismatch legacy=%d snapshot=%d", legacy, fromSnapshot)
+	}
+	if got := AddAutoIPFamilyPenaltyFromSnapshot(100, snapshot, true); got != AddAutoIPFamilyPenalty(100, p, true) {
+		t.Fatalf("auto-family penalty mismatch: %d", got)
+	}
+}
+
+func BenchmarkCapabilitySnapshotReuse(b *testing.B) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("snapshot-bench")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+	expire := time.Now().Add(time.Hour)
+
+	state.udp.mu.Lock()
+	state.udp.known, state.udp.ok, state.udp.epoch, state.udp.expire = true, true, epoch, expire
+	state.udp.mu.Unlock()
+	for _, entry := range []*capabilityEntry{&state.ipv4, &state.ipv6} {
+		entry.mu.Lock()
+		entry.known, entry.ok, entry.epoch, entry.expire = true, true, epoch, expire
+		entry.country = "US"
+		entry.mu.Unlock()
+	}
+
+	b.Run("legacy-multi-read", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink uint16
+		for i := 0; i < b.N; i++ {
+			delay := AddCapabilityPenaltyExtended(100, p, true, true, true)
+			delay = AddAutoIPFamilyPenalty(delay, p, false)
+			_, _ = CachedExitCountryForProxy(p, false)
+			_, _ = CachedExitCountryForProxy(p, true)
+			sink = delay
+		}
+		_ = sink
+	})
+
+	b.Run("single-snapshot", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink uint16
+		for i := 0; i < b.N; i++ {
+			snapshot := CachedCapabilitySnapshotForProxy(p)
+			delay := AddCapabilityPenaltyFromSnapshot(100, snapshot, true, true, true)
+			delay = AddAutoIPFamilyPenaltyFromSnapshot(delay, snapshot, false)
+			_ = snapshot.IPv4Country
+			_ = snapshot.IPv6Country
+			sink = delay
+		}
+		_ = sink
+	})
+}
