@@ -409,6 +409,24 @@ func getDefaultFeatureOrder() map[int]string {
 	}
 }
 
+// ApplyTransformsInPlace is the prediction hot-path variant. Transforms are
+// validated when the model is loaded, so inference can mutate its private
+// feature buffer directly instead of allocating and copying another vector.
+func (ft *FeatureTransforms) ApplyTransformsInPlace(features []float64) bool {
+	if ft == nil || !ft.TransformsEnabled || len(ft.Transforms) == 0 {
+		return true
+	}
+	for _, transform := range ft.Transforms {
+		for _, idx := range transform.FeatureIndices {
+			if idx < 0 || idx >= len(features) {
+				return false
+			}
+		}
+		ft.applyTransformInPlace(features, transform)
+	}
+	return true
+}
+
 func (ft *FeatureTransforms) ApplyTransforms(features []float64) []float64 {
 	if ft == nil || !ft.TransformsEnabled || len(ft.Transforms) == 0 {
 		return features
