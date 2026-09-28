@@ -63,3 +63,18 @@ func TestModelErrorWeightType(t *testing.T) {
 	require.Equal(t, WeightTypeModelErrorTCP, ModelErrorWeightType(false))
 	require.Equal(t, WeightTypeModelErrorUDP, ModelErrorWeightType(true))
 }
+
+
+func TestTrainingSampleRatePrioritizesInformativeRows(t *testing.T) {
+	stable := &ModelInput{Success: 300}
+	require.Equal(t, 0.125, TrainingSampleRate(stable, 0.03, 1.0))
+
+	normal := &ModelInput{Success: 80}
+	require.Equal(t, 0.25, TrainingSampleRate(normal, 0.10, 1.0))
+
+	failed := &ModelInput{Success: 300, ConnectionFailed: true}
+	require.Equal(t, 1.0, TrainingSampleRate(failed, 0.03, 1.0))
+
+	lossy := &ModelInput{Success: 300, LossRate: 0.02}
+	require.Equal(t, 1.0, TrainingSampleRate(lossy, 0.03, 1.0))
+}
