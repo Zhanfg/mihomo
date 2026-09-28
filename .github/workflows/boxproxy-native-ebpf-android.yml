@@ -104,7 +104,7 @@ jobs:
             -bench '^BenchmarkSmartStats(Closure|Event)Queue$' -benchmem \
             | tee SMART_STATS_EVENT_BENCH.txt
           CGO_ENABLED=0 go test ./component/smart -run '^$' \
-            -bench '^BenchmarkReuseModelPrior$' -benchmem \
+            -bench '^Benchmark(ReuseModelPrior|ObserveModelPriorResidual)$' -benchmem \
             | tee SMART_MODEL_PRIOR_BENCH.txt
 
       - name: Current Smart model smoke
