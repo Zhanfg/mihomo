@@ -4,7 +4,9 @@ import (
 	"math"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/vernesong/leaves"
 	"github.com/metacubex/mihomo/component/smart"
 )
 
@@ -89,5 +91,48 @@ func TestReloadModelKeepsUnusedModelLazy(t *testing.T) {
 	smartModel.mutex.RUnlock()
 	if loaded {
 		t.Fatal("reload made an unused model resident")
+	}
+}
+
+
+func TestIdleModelReleaseKeepsOnlyResidualState(t *testing.T) {
+	now := time.Now()
+	m := &WeightModel{
+		model:              &leaves.Ensemble{},
+		transforms:         &FeatureTransforms{},
+		featuresCompatible: true,
+	}
+	m.lastUse.Store(now.Add(-modelIdleTTL - time.Second).UnixNano())
+
+	m.mutex.Lock()
+	released, next := m.releaseIfIdleLocked(now)
+	modelNil := m.model == nil
+	transformsNil := m.transforms == nil
+	compatible := m.featuresCompatible
+	m.mutex.Unlock()
+
+	if !released || next != 0 {
+		t.Fatalf("idle model release = (%v,%v), want (true,0)", released, next)
+	}
+	if !modelNil || !transformsNil || compatible {
+		t.Fatal("idle release retained parsed ensemble state")
+	}
+}
+
+func TestActiveModelLeaseStaysResident(t *testing.T) {
+	now := time.Now()
+	m := &WeightModel{model: &leaves.Ensemble{}}
+	m.lastUse.Store(now.Add(-time.Minute).UnixNano())
+
+	m.mutex.Lock()
+	released, next := m.releaseIfIdleLocked(now)
+	stillLoaded := m.model != nil
+	m.mutex.Unlock()
+
+	if released || !stillLoaded {
+		t.Fatal("active model was released before idle TTL")
+	}
+	if next <= 0 || next > modelIdleTTL {
+		t.Fatalf("unexpected next idle check: %v", next)
 	}
 }
