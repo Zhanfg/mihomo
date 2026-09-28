@@ -787,7 +787,7 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	knownFamily, ipv6 := metadataIPFamily(metadata)
 	isUDP := metadata != nil && metadata.NetWork == C.UDP
 	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
-	adapter.WarmProxyPath(p, isUDP, knownFamily, ipv6)
+	adapter.ObserveProxyPathSuccess(p, isUDP, knownFamily, ipv6, s.country != "" || s.countryAffinity)
 
 	target := metadata.SmartTarget
 	existing, _, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, target)
