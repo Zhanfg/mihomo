@@ -436,32 +436,12 @@ type WeightModel struct {
 }
 
 func GetModel() *WeightModel {
+	// Keep model enablement cheap. The ensemble is loaded only when a target has
+	// enough evidence to request its first prediction; until then Smart's
+	// heuristic scorer is both faster and sufficient.
 	modelOnce.Do(func() {
-		m := &WeightModel{}
-		smartModel = m
-
-		modelPath := C.Path.SmartModel()
-		if _, err := os.Stat(modelPath); err == nil {
-			if err := m.loadModel(modelPath); err == nil {
-				log.Infoln("[Smart] Model file loaded successfully")
-				return
-			} else {
-				log.Warnln("[Smart] Model.bin invalid, scheduling background refresh: %v", err)
-				_ = os.Remove(modelPath)
-			}
-		}
-
-		ensureModelAsync(m)
+		smartModel = &WeightModel{}
 	})
-
-	if smartModel != nil {
-		smartModel.mutex.RLock()
-		ready := smartModel.model != nil
-		smartModel.mutex.RUnlock()
-		if !ready {
-			ensureModelAsync(smartModel)
-		}
-	}
 	return smartModel
 }
 
