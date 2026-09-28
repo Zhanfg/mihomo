@@ -727,6 +727,111 @@ func CachedIPFamilyCapabilityKnown(p C.Proxy, ipv6 bool) (known, ok bool) {
 	}
 }
 
+// CachedCapabilitySnapshot coalesces the cache lookup, epoch/time read and
+// entry locks used by Smart's multi-candidate ranking pass. It is deliberately
+// probe-free: strict requirements continue to use the active APIs below.
+type CachedCapabilitySnapshot struct {
+	Identity string
+
+	UDPKnown     bool
+	UDPAvailable bool
+
+	IPv4Known     bool
+	IPv4Available bool
+	IPv4Country   string
+
+	IPv6Known     bool
+	IPv6Available bool
+	IPv6Country   string
+}
+
+func snapshotCapabilityEntry(entry *capabilityEntry, now time.Time, epoch uint64, withCountry bool) (known, ok bool, country string) {
+	entry.mu.Lock()
+	fresh := entry.known && entry.epoch == epoch && now.Before(entry.expire)
+	if fresh {
+		known, ok = true, entry.ok
+		if withCountry && ok {
+			country = entry.country
+		}
+	}
+	entry.mu.Unlock()
+	return
+}
+
+// CachedCapabilitySnapshotForProxy is intended for one ranking decision over
+// many nodes. One ProxyIdentity/sync.Map lookup replaces several independent
+// capability/country helpers for the same candidate.
+func CachedCapabilitySnapshotForProxy(p C.Proxy) CachedCapabilitySnapshot {
+	var out CachedCapabilitySnapshot
+	if p == nil {
+		return out
+	}
+	out.Identity = ProxyIdentity(p)
+	state := capabilityStateFor(out.Identity)
+	now := time.Now()
+	epoch := netstate.CurrentEpoch()
+
+	out.UDPKnown, out.UDPAvailable, _ = snapshotCapabilityEntry(&state.udp, now, epoch, false)
+	out.IPv4Known, out.IPv4Available, out.IPv4Country = snapshotCapabilityEntry(&state.ipv4, now, epoch, true)
+	out.IPv6Known, out.IPv6Available, out.IPv6Country = snapshotCapabilityEntry(&state.ipv6, now, epoch, true)
+	return out
+}
+
+func snapshotVerdict(known, ok bool) int {
+	if !known {
+		return capUnknown
+	}
+	if ok {
+		return capYes
+	}
+	return capNo
+}
+
+func CapabilityPenaltyFromSnapshot(s CachedCapabilitySnapshot, preferUDP, preferIPv4, preferIPv6 bool) uint16 {
+	penalty := 0
+	if preferUDP {
+		penalty += capabilityPenaltyFor(snapshotVerdict(s.UDPKnown, s.UDPAvailable))
+	}
+	if preferIPv4 {
+		penalty += capabilityPenaltyFor(snapshotVerdict(s.IPv4Known, s.IPv4Available))
+	}
+	if preferIPv6 {
+		penalty += capabilityPenaltyFor(snapshotVerdict(s.IPv6Known, s.IPv6Available))
+	}
+	if penalty > 0xFFFF {
+		return 0xFFFF
+	}
+	return uint16(penalty)
+}
+
+func AddCapabilityPenaltyFromSnapshot(delay uint16, s CachedCapabilitySnapshot, preferUDP, preferIPv4, preferIPv6 bool) uint16 {
+	penalty := CapabilityPenaltyFromSnapshot(s, preferUDP, preferIPv4, preferIPv6)
+	if uint32(delay)+uint32(penalty) > 0xFFFF {
+		return 0xFFFF
+	}
+	return delay + penalty
+}
+
+func AddAutoIPFamilyPenaltyFromSnapshot(delay uint16, s CachedCapabilitySnapshot, ipv6 bool) uint16 {
+	known, ok := s.IPv4Known, s.IPv4Available
+	if ipv6 {
+		known, ok = s.IPv6Known, s.IPv6Available
+	}
+	var penalty uint16
+	switch snapshotVerdict(known, ok) {
+	case capNo:
+		penalty = autoFamilyMissingPenalty
+	case capUnknown:
+		penalty = autoFamilyUnknownPenalty
+	default:
+		return delay
+	}
+	if uint32(delay)+uint32(penalty) > 0xFFFF {
+		return 0xFFFF
+	}
+	return delay + penalty
+}
+
 // IPFamilyCapabilityKnown reports the current cached family verdict and also
 // schedules a refresh when it is absent/stale. It is mainly intended for
 // diagnostics and group policy code.
