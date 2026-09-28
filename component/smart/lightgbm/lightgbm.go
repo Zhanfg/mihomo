@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,6 +32,10 @@ var (
 	reloadModel  = singleflight.Group[bool]{StoreResult: false}
 	modelOnce    sync.Once
 	lgbmUrl      string
+
+	modelLoadMu    sync.Mutex
+	modelLoading   bool
+	modelNextRetry time.Time
 
 	domainRegex = regexp.MustCompile(`([a-zA-Z0-9-]+)(\.[a-zA-Z0-9-]+)+$`)
 
@@ -423,58 +428,94 @@ func init() {
 }
 
 type WeightModel struct {
-	model      *leaves.Ensemble
-	transforms *FeatureTransforms
-	lastUpdate time.Time
-	mutex      sync.RWMutex
+	model             *leaves.Ensemble
+	transforms        *FeatureTransforms
+	featuresCompatible bool
+	lastUpdate        time.Time
+	mutex             sync.RWMutex
 }
 
 func GetModel() *WeightModel {
-    modelOnce.Do(func() {
-        m := &WeightModel{}
-        modelPath := C.Path.SmartModel()
+	modelOnce.Do(func() {
+		m := &WeightModel{}
+		smartModel = m
 
-        if _, err := os.Stat(modelPath); err == nil {
-            if err := m.loadModel(modelPath); err != nil {
-                log.Warnln("[Smart] Model.bin invalid, remove and download: %v", err)
-                if rmErr := os.Remove(modelPath); rmErr != nil {
-                    log.Errorln("[Smart] Failed to remove invalid Model.bin: %v", rmErr)
-                    return
-                }
+		modelPath := C.Path.SmartModel()
+		if _, err := os.Stat(modelPath); err == nil {
+			if err := m.loadModel(modelPath); err == nil {
+				log.Infoln("[Smart] Model file loaded successfully")
+				return
+			} else {
+				log.Warnln("[Smart] Model.bin invalid, scheduling background refresh: %v", err)
+				_ = os.Remove(modelPath)
+			}
+		}
 
-                if downloadErr := downloadModel(modelPath); downloadErr != nil {
-                    log.Errorln("[Smart] Failed to download Model.bin: %v", downloadErr)
-                    return
-                }
+		ensureModelAsync(m)
+	})
 
-                if reloadErr := m.loadModel(modelPath); reloadErr != nil {
-                    log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", reloadErr)
-                    return
-                }
+	if smartModel != nil {
+		smartModel.mutex.RLock()
+		ready := smartModel.model != nil
+		smartModel.mutex.RUnlock()
+		if !ready {
+			ensureModelAsync(smartModel)
+		}
+	}
+	return smartModel
+}
 
-                log.Infoln("[Smart] Model.bin downloaded and loaded successfully")
-            } else {
-                log.Infoln("[Smart] Model file loaded successfully")
-            }
-        } else {
-            log.Infoln("[Smart] Can't find Model.bin, start download")
-            if downloadErr := downloadModel(modelPath); downloadErr != nil {
-                log.Errorln("[Smart] Can't download Model.bin: %v", downloadErr)
-                return
-            }
+const modelRetryAfter = 5 * time.Minute
 
-            if loadErr := m.loadModel(modelPath); loadErr != nil {
-                log.Errorln("[Smart] Failed to load downloaded Model.bin: %v", loadErr)
-                return
-            }
+// ensureModelAsync keeps network I/O off the config-parse/data path. A failed
+// mobile boot is retried later, but repeated predictions cannot stampede the
+// model endpoint because attempts are globally throttled.
+func ensureModelAsync(m *WeightModel) {
+	if m == nil {
+		return
+	}
+	now := time.Now()
+	modelLoadMu.Lock()
+	if modelLoading || (!modelNextRetry.IsZero() && now.Before(modelNextRetry)) {
+		modelLoadMu.Unlock()
+		return
+	}
+	modelLoading = true
+	modelNextRetry = now.Add(modelRetryAfter)
+	modelLoadMu.Unlock()
 
-            log.Infoln("[Smart] Download Model.bin finish")
-        }
+	go func() {
+		defer func() {
+			modelLoadMu.Lock()
+			modelLoading = false
+			modelLoadMu.Unlock()
+		}()
 
-        smartModel = m
-    })
+		modelPath := C.Path.SmartModel()
+		if _, err := os.Stat(modelPath); err == nil {
+			if err := m.loadModel(modelPath); err == nil {
+				modelLoadMu.Lock()
+				modelNextRetry = time.Time{}
+				modelLoadMu.Unlock()
+				return
+			}
+			_ = os.Remove(modelPath)
+		}
 
-    return smartModel
+		if err := downloadModel(modelPath); err != nil {
+			log.Warnln("[Smart] Background model download failed: %v", err)
+			return
+		}
+		if err := m.loadModel(modelPath); err != nil {
+			log.Warnln("[Smart] Background model load failed: %v", err)
+			_ = os.Remove(modelPath)
+			return
+		}
+		modelLoadMu.Lock()
+		modelNextRetry = time.Time{}
+		modelLoadMu.Unlock()
+		log.Infoln("[Smart] Model.bin downloaded and loaded in background")
+	}()
 }
 
 func (m *WeightModel) loadModel(path string) error {
@@ -486,7 +527,8 @@ func (m *WeightModel) loadModel(path string) error {
 		return fmt.Errorf("failed to load binary model: %v", err)
 	}
 
-	// 加载transforms参数
+	// Load and validate transforms once. Compatibility belongs to model-load
+	// time, not the per-prediction hot path.
 	transforms, err := LoadTransformsFromModel(path)
 	if err != nil {
 		log.Warnln("[Smart] Failed to load transforms parameters: %v, using default config", err)
@@ -495,18 +537,22 @@ func (m *WeightModel) loadModel(path string) error {
 			FeatureOrder:      getDefaultFeatureOrder(),
 			Transforms:        []TransformParams{},
 		}
-	} else {
-		if transforms.TransformsEnabled {
-			if err := transforms.ValidateTransforms(MaxFeatureSize); err != nil {
-				log.Warnln("[Smart] ValidateTransforms failed: %v", err)
-				transforms.TransformsEnabled = false
-			} else {
-				transforms.DebugTransforms()
-			}
+	}
+	compatible := true
+	if transforms.TransformsEnabled {
+		if err := transforms.ValidateTransforms(MaxFeatureSize); err != nil {
+			log.Warnln("[Smart] ValidateTransforms failed: %v", err)
+			transforms.TransformsEnabled = false
+		} else if !transforms.IsCompatibleWith(getDefaultFeatureOrder()) {
+			log.Warnln("[Smart] Model feature order is incompatible with this core; using heuristic scorer")
+			compatible = false
+		} else {
+			transforms.DebugTransforms()
 		}
 	}
 
 	m.transforms = transforms
+	m.featuresCompatible = compatible
 	m.model = model
 	m.lastUpdate = time.Now()
 	return nil
@@ -543,28 +589,54 @@ func LgbmUrl() string {
 }
 
 func downloadModel(path string) (err error) {
-	modelUrl := LgbmUrl()
-	if modelUrl == "" {
-		modelUrl = GetModelDownloadURL()
+	modelURL := LgbmUrl()
+	if modelURL == "" {
+		modelURL = GetModelDownloadURL()
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*90)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	resp, err := mihomoHttp.HttpRequest(ctx, modelUrl, http.MethodGet, nil, nil)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o644)
+	resp, err := mihomoHttp.HttpRequest(ctx, modelURL, http.MethodGet, nil, nil)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("model download returned HTTP %d", resp.StatusCode)
+	}
 
-	return err
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmpPath := path + ".tmp"
+	_ = os.Remove(tmpPath)
+	defer os.Remove(tmpPath)
+
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err = io.Copy(f, resp.Body); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+
+	if err = os.Rename(tmpPath, path); err == nil {
+		return nil
+	}
+	// Windows cannot replace an existing destination with Rename. Only remove
+	// the old file after the new one has been completely written and synced.
+	if removeErr := os.Remove(path); removeErr != nil && !os.IsNotExist(removeErr) {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 func GetModelDownloadURL() string {
@@ -584,30 +656,35 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 	m.mutex.RLock()
 	model := m.model
 	transforms := m.transforms
+	compatible := m.featuresCompatible
 	m.mutex.RUnlock()
 
 	if model == nil {
+		ensureModelAsync(m)
+		return smart.CalculateWeight(input, priorityFactor)
+	}
+	if !compatible {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	// 准备原始特征
-	features := prepareFeatures(input)
+	bufAny := transformPool.Get()
+	buf, ok := bufAny.([]float64)
+	if !ok || cap(buf) < MaxFeatureSize {
+		buf = make([]float64, MaxFeatureSize)
+	} else {
+		buf = buf[:MaxFeatureSize]
+	}
+	defer transformPool.Put(buf)
+
+	features := prepareFeaturesInto(input, buf[:0])
 	if len(features) == 0 {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-
-	// 检测模型特征与当前版本是否兼容
-	if transforms != nil && !transforms.IsCompatibleWith(getDefaultFeatureOrder()) {
+	if transforms != nil && transforms.TransformsEnabled && !transforms.ApplyTransformsInPlace(features) {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	// 应用特征变换
-	if transforms != nil && transforms.TransformsEnabled {
-		features = transforms.ApplyTransforms(features)
-	}
-
 	var prediction float64
-
 	defer func() {
 		if r := recover(); r != nil {
 			log.Errorln("[Smart] Model prediction panic: %v", r)
@@ -616,11 +693,9 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 	}()
 
 	prediction = model.PredictSingle(features, 0)
-
-	if math.IsNaN(prediction) || prediction <= 0 {
+	if math.IsNaN(prediction) || math.IsInf(prediction, 0) || prediction <= 0 {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-
 	return prediction * priorityFactor, true
 }
 
@@ -645,7 +720,15 @@ func hashStringToFloat(s string, buckets int) float64 {
 }
 
 func prepareFeatures(input *smart.ModelInput) []float64 {
-	features := make([]float64, 0, MaxFeatureSize)
+	return prepareFeaturesInto(input, nil)
+}
+
+func prepareFeaturesInto(input *smart.ModelInput, features []float64) []float64 {
+	if cap(features) < MaxFeatureSize {
+		features = make([]float64, 0, MaxFeatureSize)
+	} else {
+		features = features[:0]
+	}
 
 	// 1. 最后使用时间间隔
 	uploadMB := input.UploadTotal
