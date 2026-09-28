@@ -75,3 +75,19 @@ func BenchmarkCurrentModelPredict(b *testing.B) {
 		}
 	}
 }
+
+
+func TestReloadModelKeepsUnusedModelLazy(t *testing.T) {
+	previous := smartModel
+	smartModel = &WeightModel{}
+	t.Cleanup(func() { smartModel = previous })
+
+	ReloadModel()
+
+	smartModel.mutex.RLock()
+	loaded := smartModel.model != nil
+	smartModel.mutex.RUnlock()
+	if loaded {
+		t.Fatal("reload made an unused model resident")
+	}
+}
