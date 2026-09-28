@@ -90,6 +90,32 @@ func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
 	return total%stride == 0
 }
 
+
+// TrainingSampleRate treats the configured rate as a ceiling, then spends it
+// where samples carry information. Failures/loss and model disagreement are
+// retained densely; mature stable traffic is downsampled because thousands of
+// near-identical healthy rows improve neither retraining nor diagnosis.
+func TrainingSampleRate(input *ModelInput, modelError, configured float64) float64 {
+	if input == nil || configured <= 0 {
+		return 0
+	}
+	if configured > 1 {
+		configured = 1
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 || modelError >= 0.20 {
+		return configured
+	}
+	total := input.Success + input.Failure
+	switch {
+	case total < 32:
+		return configured
+	case modelError > 0 && modelError < 0.06 && total >= 256:
+		return configured * 0.125
+	default:
+		return configured * 0.25
+	}
+}
+
 // AdaptModelPrediction turns the static LightGBM score into a small online
 // ensemble. The model remains the primary signal; the traditional scorer acts
 // as a continuously observed residual target. A bounded EWMA calibration is
