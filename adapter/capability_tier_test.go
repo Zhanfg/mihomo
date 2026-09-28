@@ -628,3 +628,55 @@ func TestTransientFamilyFailureKeepsCapabilityButClearsIdentity(t *testing.T) {
 			entry.exitIP, entry.country, entry.asn, entry.asnOrg)
 	}
 }
+
+
+func TestObserveProxyPathSuccessPreservesInflightProbe(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("real-flow-proof")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.probing = true
+	state.ipv4.mu.Unlock()
+
+	ObserveProxyPathSuccess(p, false, true, false, false)
+
+	state.ipv4.mu.Lock()
+	known, ok := state.ipv4.known, state.ipv4.ok
+	probing := state.ipv4.probing
+	epoch := state.ipv4.epoch
+	expire := state.ipv4.expire
+	state.ipv4.mu.Unlock()
+
+	if !known || !ok {
+		t.Fatal("real successful flow must mark the address family available")
+	}
+	if !probing {
+		t.Fatal("real-flow proof must not steal ownership from an in-flight probe")
+	}
+	if epoch != netstate.CurrentEpoch() || !expire.After(time.Now()) {
+		t.Fatal("real-flow proof did not refresh current-epoch capability TTL")
+	}
+}
+
+func TestObserveProxyPathSuccessAvoidsSyntheticProbeByDefault(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("passive-proof")
+	state := capabilityStateForProxy(p)
+
+	ObserveProxyPathSuccess(p, true, true, true, false)
+
+	state.ipv6.mu.Lock()
+	familyKnown, familyOK, familyProbing := state.ipv6.known, state.ipv6.ok, state.ipv6.probing
+	state.ipv6.mu.Unlock()
+	state.udp.mu.Lock()
+	udpKnown, udpOK, udpProbing := state.udp.known, state.udp.ok, state.udp.probing
+	state.udp.mu.Unlock()
+
+	if !familyKnown || !familyOK || !udpKnown || !udpOK {
+		t.Fatal("real flow should prove family and UDP capability")
+	}
+	if familyProbing || udpProbing {
+		t.Fatal("ordinary successful flow must not schedule redundant synthetic probes")
+	}
+}
