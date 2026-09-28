@@ -60,3 +60,30 @@ func TestAdjustedGreedyCostUsesBoundedLiveStress(t *testing.T) {
 		t.Fatal("greedy cost accidentally hard-excluded candidate")
 	}
 }
+
+
+func TestGreedySelectionBudget(t *testing.T) {
+	tests := []struct {
+		name          string
+		condition     linkprofile.Condition
+		epochChanged  bool
+		recentFailure bool
+		want          int
+	}{
+		{"healthy", linkprofile.ConditionHealthy, false, false, greedyHealthyBudget},
+		{"constrained", linkprofile.ConditionConstrained, false, false, greedyNormalBudget},
+		{"unknown", linkprofile.ConditionUnknown, false, false, greedyNormalBudget},
+		{"weak", linkprofile.ConditionWeak, false, false, greedyRecoveryBudget},
+		{"unstable", linkprofile.ConditionUnstable, false, false, greedyRecoveryBudget},
+		{"handover", linkprofile.ConditionHealthy, true, false, greedyRecoveryBudget},
+		{"recent failure", linkprofile.ConditionHealthy, false, true, greedyRecoveryBudget},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := greedySelectionBudget(linkprofile.Assessment{Condition: tc.condition}, tc.epochChanged, tc.recentFailure)
+			if got != tc.want {
+				t.Fatalf("budget=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
