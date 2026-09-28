@@ -156,3 +156,41 @@ func BenchmarkReuseModelPrior(b *testing.B) {
 	}
 	_ = sink
 }
+
+
+func TestObserveModelPriorResidualRaisesRefreshPressure(t *testing.T) {
+	err := 0.02
+	for i := 0; i < 24; i++ {
+		err = ObserveModelPriorResidual(1.4, 1.0, err)
+	}
+	require.Greater(t, err, 0.20, "persistent prior drift should eventually increase model refresh cadence")
+
+	input := &ModelInput{Success: 66}
+	require.True(t, ShouldInvokeModel(input, err), "high learned error should use 1/3 refresh cadence")
+}
+
+func TestObserveModelPriorResidualRecoversWhenAligned(t *testing.T) {
+	err := 0.30
+	for i := 0; i < 40; i++ {
+		err = ObserveModelPriorResidual(1.0, 1.0, err)
+	}
+	require.Less(t, err, 0.10)
+}
+
+func TestAnomalyForcesFreshModelAndRejectsCachedPrior(t *testing.T) {
+	input := &ModelInput{Success: 300, ConnectionFailed: true}
+	require.True(t, ShouldInvokeModel(input, 0.01))
+
+	weight, used := ReuseModelPrior(1.0, 1.2, 0.01, 300, true)
+	require.False(t, used)
+	require.Equal(t, 1.0, weight)
+}
+
+func BenchmarkObserveModelPriorResidual(b *testing.B) {
+	b.ReportAllocs()
+	err := 0.03
+	for i := 0; i < b.N; i++ {
+		err = ObserveModelPriorResidual(1.08, 1.0, err)
+	}
+	_ = err
+}
