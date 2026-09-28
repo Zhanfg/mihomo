@@ -114,9 +114,99 @@ const (
 	countryDBRetryAfter = 5 * time.Minute
 )
 
+type smartStatsMetadata struct {
+	network        C.NetWork
+	dstIP          netip.Addr
+	dstGeoIP       []string
+	dstIPASN       string
+	dstPort        uint16
+	host           string
+	uuid           string
+	smartBlock     string
+	smartTarget    string
+	wildcardTarget string
+}
+
+func captureSmartStatsMetadata(metadata *C.Metadata) smartStatsMetadata {
+	if metadata == nil {
+		return smartStatsMetadata{}
+	}
+	return smartStatsMetadata{
+		network:        metadata.NetWork,
+		dstIP:          metadata.DstIP,
+		dstGeoIP:       metadata.DstGeoIP,
+		dstIPASN:       metadata.DstIPASN,
+		dstPort:        metadata.DstPort,
+		host:           metadata.Host,
+		uuid:           metadata.UUID,
+		smartBlock:     metadata.SmartBlock,
+		smartTarget:    metadata.SmartTarget,
+		wildcardTarget: metadata.WildcardTarget,
+	}
+}
+
+func (m smartStatsMetadata) materialize() C.Metadata {
+	return C.Metadata{
+		NetWork:        m.network,
+		DstIP:          m.dstIP,
+		DstGeoIP:       m.dstGeoIP,
+		DstIPASN:       m.dstIPASN,
+		DstPort:        m.dstPort,
+		Host:           m.host,
+		UUID:           m.uuid,
+		SmartBlock:     m.smartBlock,
+		SmartTarget:    m.smartTarget,
+		WildcardTarget: m.wildcardTarget,
+	}
+}
+
+type smartStatsEvent struct {
+	owner *Smart
+	meta  smartStatsMetadata
+	proxy C.Proxy
+
+	connectTime       int64
+	latency           int64
+	uploadTotal       int64
+	downloadTotal     int64
+	maxUploadRate     int64
+	maxDownloadRate   int64
+	connectionDuration int64
+	sampleScale       int64
+
+	tcpStats          tcpstats.Stats
+	hasTCPStats       bool
+	err               error
+	markCloseFailure  bool
+}
+
+func (event smartStatsEvent) run() {
+	if event.owner == nil {
+		return
+	}
+	defer event.owner.finishBackgroundWork()
+
+	metadata := event.meta.materialize()
+	if event.markCloseFailure && event.err != nil && metadata.SmartBlock != "degraded" {
+		event.owner.markNodeFailure(&metadata, event.proxy.Name(), true, true, smart.BlockDialFailure, 0)
+	}
+
+	var stats *tcpstats.Stats
+	if event.hasTCPStats {
+		stats = &event.tcpStats
+	}
+	event.owner.recordConnectionStats(
+		&metadata, event.proxy,
+		event.connectTime, event.latency,
+		event.uploadTotal, event.downloadTotal,
+		event.maxUploadRate, event.maxDownloadRate,
+		event.connectionDuration, stats, event.err, event.sampleScale,
+	)
+}
+
 var (
 	smartStatsOnce      sync.Once
-	smartStatsQueue     chan func()
+	smartStatsQueue     chan smartStatsEvent
 	smartStatsDropped   atomic.Int64
 	smartStatsDropLogAt atomic.Int64
 )
@@ -154,12 +244,26 @@ func runSmartStatsJob(job func()) {
 	job()
 }
 
+func runSmartStatsEvent(event smartStatsEvent) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Errorln("[Smart] statistics worker recovered panic: %v", recovered)
+			if event.owner != nil {
+				// event.run normally owns this Done. A panic before its defer is
+				// installed is impossible, but keep the ownership explicit here
+				// by letting event.run install it first.
+			}
+		}
+	}()
+	event.run()
+}
+
 func startSmartStatsWorkers() {
-	smartStatsQueue = make(chan func(), smartStatsQueueCapacity())
+	smartStatsQueue = make(chan smartStatsEvent, smartStatsQueueCapacity())
 	for i := 0; i < smartWorkerCount(); i++ {
 		go func() {
-			for job := range smartStatsQueue {
-				runSmartStatsJob(job)
+			for event := range smartStatsQueue {
+				runSmartStatsEvent(event)
 			}
 		}()
 	}
@@ -179,12 +283,21 @@ func tryEnqueueSmartStats(queue chan func(), job func()) bool {
 	}
 }
 
-func enqueueSmartStats(ctx context.Context, job func()) bool {
+func tryEnqueueSmartStatsEvent(queue chan smartStatsEvent, event smartStatsEvent) bool {
+	select {
+	case queue <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func enqueueSmartStatsEvent(ctx context.Context, event smartStatsEvent) bool {
 	smartStatsOnce.Do(startSmartStatsWorkers)
 	if ctx != nil && ctx.Err() != nil {
 		return false
 	}
-	if tryEnqueueSmartStats(smartStatsQueue, job) {
+	if tryEnqueueSmartStatsEvent(smartStatsQueue, event) {
 		return true
 	}
 	dropped := smartStatsDropped.Add(1)
@@ -2743,18 +2856,26 @@ func (s *Smart) submitConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		return false
 	}
 
-	job := func() {
-		defer s.finishBackgroundWork()
-		// The degraded marker means this group closed the connection itself, so
-		// nothing about the close is the node's doing. checkNodeQuality honours
-		// it; this path did not, and a connection whose first read had already
-		// failed before the sweep reached it was blamed with code 3 anyway.
-		if markCloseFailure && err != nil && metadata.SmartBlock != "degraded" {
-			s.markNodeFailure(metadata, proxy.Name(), true, true, smart.BlockDialFailure, 0)
-		}
-		s.recordConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, err, sampleScale)
+	event := smartStatsEvent{
+		owner:              s,
+		meta:               captureSmartStatsMetadata(metadata),
+		proxy:              proxy,
+		connectTime:        connectTime,
+		latency:            latency,
+		uploadTotal:        uploadTotal,
+		downloadTotal:      downloadTotal,
+		maxUploadRate:      maxUploadRate,
+		maxDownloadRate:    maxDownloadRate,
+		connectionDuration: connectionDuration,
+		sampleScale:        sampleScale,
+		err:                err,
+		markCloseFailure:   markCloseFailure,
 	}
-	if !enqueueSmartStats(s.ctx, job) {
+	if tcpStats != nil {
+		event.tcpStats = *tcpStats
+		event.hasTCPStats = true
+	}
+	if !enqueueSmartStatsEvent(s.ctx, event) {
 		s.finishBackgroundWork()
 		return false
 	}
