@@ -1926,18 +1926,25 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	}
 
 	trySelector := func(isUDP bool) ([]string, []float64, bool) {
-		// check the unwrap cache
+		// A cached winner becomes a hard fast-path only after the local learner
+		// has enough current-network evidence. Cold or drifting pins are merely
+		// hints: re-enter ranking so early concurrency cannot freeze a lucky
+		// but suboptimal winner for the whole unwrap TTL.
 		if proxiesName, expired := s.store.GetUnwrapResult(s.Name(), s.configName, metadata.SmartTarget); len(proxiesName) > 0 {
-			if len(proxiesName) > selectionLimit {
-				proxiesName = proxiesName[:selectionLimit]
+			if s.store.UnwrapPinTrusted(
+				s.Name(), s.configName, metadata.SmartTarget, proxiesName[0], isUDP, netstate.CurrentEpoch(),
+			) {
+				if len(proxiesName) > selectionLimit {
+					proxiesName = proxiesName[:selectionLimit]
+				}
+				if expired && s.beginBackgroundWork() {
+					go func() {
+						defer s.finishBackgroundWork()
+						refreshUnwrapCache(isUDP)
+					}()
+				}
+				return proxiesName, nil, true
 			}
-			if expired && s.beginBackgroundWork() {
-				go func() {
-					defer s.finishBackgroundWork()
-					refreshUnwrapCache(isUDP)
-				}()
-			}
-			return proxiesName, nil, true
 		}
 		names, weights := computeFreshSingleFlight(isUDP)
 		return names, weights, false
