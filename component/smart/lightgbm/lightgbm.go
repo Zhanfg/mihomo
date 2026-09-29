@@ -752,7 +752,10 @@ func (m *WeightModel) PredictFeatureVector(features []float64, priorityFactor fl
 }
 
 func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor float64) (weight float64, predicted bool) {
-	if m == nil || input == nil {
+	if input == nil {
+		return 0, false
+	}
+	if m == nil {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
