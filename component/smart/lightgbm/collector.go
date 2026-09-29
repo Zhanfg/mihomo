@@ -50,19 +50,22 @@ func cleanupCollectorBackups(dataPath string) {
 	}
 }
 
-func InitCollector(collectSize float64) {
-	var smartCollectorSize int64
+func boundedCollectorSize(collectSize float64) int64 {
+	size := int64(defaultSmartCollectorSize)
 	if collectSize > 0 {
-		smartCollectorSize = int64(collectSize * 1024 * 1024)
-	} else {
-		smartCollectorSize = defaultSmartCollectorSize
+		size = int64(collectSize * 1024 * 1024)
 	}
-	if smartCollectorSize > maxSmartCollectorSize {
-		smartCollectorSize = maxSmartCollectorSize
+	if size > maxSmartCollectorSize {
+		size = maxSmartCollectorSize
 	}
-	if smartCollectorSize < 1*1024*1024 {
-		smartCollectorSize = 1 * 1024 * 1024
+	if size < 1*1024*1024 {
+		size = 1 * 1024 * 1024
 	}
+	return size
+}
+
+func InitCollector(collectSize float64) {
+	smartCollectorSize := boundedCollectorSize(collectSize)
 
 	collectMutex.Lock()
 	defer collectMutex.Unlock()
