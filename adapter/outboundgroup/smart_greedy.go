@@ -212,7 +212,23 @@ func greedySelectionBudget(assessment linkprofile.Assessment, epochChanged, rece
 }
 
 
-func (s *Smart) currentGreedyBudget(all []C.Proxy) int {
+func greedyExplorationAlpha(assessment linkprofile.Assessment, epochChanged, recentFailure bool) float64 {
+	if epochChanged || recentFailure {
+		return 0
+	}
+	switch assessment.Condition {
+	case linkprofile.ConditionWeak, linkprofile.ConditionUnstable:
+		return 0
+	case linkprofile.ConditionHealthy:
+		return 0.06
+	case linkprofile.ConditionConstrained:
+		return 0.02
+	default:
+		return 0.03
+	}
+}
+
+func (s *Smart) currentGreedyPolicy(all []C.Proxy) (budget int, explorationAlpha float64) {
 	assessment := linkprofile.Assessment{Condition: linkprofile.ConditionUnknown}
 	if winner, ok := s.lastWinner.LoadOk(); ok && winner.Name != "" {
 		if p := s.proxyIndexFor(all)[winner.Name]; p != nil {
@@ -230,12 +246,18 @@ func (s *Smart) currentGreedyBudget(all []C.Proxy) int {
 		}
 	}
 
-	budget := greedySelectionBudget(assessment, epochChanged, recentFailure)
+	budget = greedySelectionBudget(assessment, epochChanged, recentFailure)
 	if len(all) > 0 && budget > len(all) {
 		budget = len(all)
 	}
 	if budget < 1 {
 		budget = 1
 	}
+	explorationAlpha = greedyExplorationAlpha(assessment, epochChanged, recentFailure)
+	return
+}
+
+func (s *Smart) currentGreedyBudget(all []C.Proxy) int {
+	budget, _ := s.currentGreedyPolicy(all)
 	return budget
 }
