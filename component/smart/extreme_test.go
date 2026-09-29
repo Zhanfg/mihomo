@@ -273,3 +273,51 @@ func TestSmartExtremeRankFiftyThousandCandidates(t *testing.T) {
 	}
 	t.Logf("rank_50k_elapsed=%s top=%s weight=%.6f", elapsed, top[0].Node, top[0].Weight)
 }
+
+
+func TestSmartExtremePoisonedTeacherIsBounded(t *testing.T) {
+	requireSmartExtreme(t)
+	const prior = 0.72
+	calibration := 1.0
+	modelError := 0.0
+	for i := 0; i < 100_000; i++ {
+		model := 50.0
+		if i&1 == 1 {
+			model = 1e-12
+		}
+		weight, nextCalibration, nextError := AdaptModelPredictionWithReliability(
+			model, prior, calibration, modelError, 512,
+		)
+		if weight < prior*0.55-1e-12 || weight > prior*1.45+1e-12 {
+			t.Fatalf("poisoned teacher escaped bound at %d: weight=%v", i, weight)
+		}
+		if math.IsNaN(weight) || math.IsInf(weight, 0) {
+			t.Fatalf("poisoned teacher produced non-finite weight at %d", i)
+		}
+		calibration, modelError = nextCalibration, nextError
+	}
+}
+
+func TestSmartExtremeExpertConflictEscalatesTeacher(t *testing.T) {
+	requireSmartExtreme(t)
+	input := extremeModelInput(new(extremePRNG), 1)
+	input.Success = 512
+	input.Failure = 3
+	input.ConnectionFailed = false
+	input.LossRate = 0
+
+	original := distilledExpertCalibration
+	defer func() { distilledExpertCalibration = original }()
+
+	bucket := DistilledExpertBucket(&input)
+	distilledExpertCalibration[bucket] = 1.15
+	distilled := DistilledExpertPrior(&input, 1)
+	full := ExpertTeacherPrior(&input, 1)
+	disagreement := ExpertDisagreement(distilled, full)
+	if disagreement < 0.10 {
+		t.Fatalf("test did not create material expert disagreement: %v", disagreement)
+	}
+	if !ShouldInvokeTeacherWithExperts(&input, 0.02, 0.05, 0.03, 1000, disagreement) {
+		t.Fatal("material expert disagreement did not escalate heavy teacher")
+	}
+}
