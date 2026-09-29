@@ -12,6 +12,8 @@ PORTS = (18101, 18102, 18103)
 counters = {port: 0 for port in PORTS}
 phase_counters = {p: {port: 0 for port in PORTS} for p in range(4)}
 phase_sequence = {p: [] for p in range(4)}
+phase_used_counters = {p: {port: 0 for port in PORTS} for p in range(4)}
+phase_used_sequence = {p: [] for p in range(4)}
 lock = threading.Lock()
 
 def phase():
@@ -87,6 +89,7 @@ class Proxy(socketserver.BaseRequestHandler):
         client.setblocking(False)
         upstream.setblocking(False)
         sockets = [client, upstream]
+        carried_application_data = False
         try:
             while True:
                 readable, _, exceptional = select.select(sockets, [], sockets, 5)
@@ -100,6 +103,12 @@ class Proxy(socketserver.BaseRequestHandler):
                         continue
                     if not buf:
                         return
+                    if src is client and not carried_application_data:
+                        carried_application_data = True
+                        with lock:
+                            phase_used_counters[current_phase][port] += 1
+                            if len(phase_used_sequence[current_phase]) < 4096:
+                                phase_used_sequence[current_phase].append(port)
                     dst.sendall(buf)
         finally:
             upstream.close()
@@ -121,6 +130,8 @@ class Stats(http.server.BaseHTTPRequestHandler):
                     "counters": counters,
                     "phase_counters": phase_counters,
                     "phase_sequence": phase_sequence,
+                    "phase_used_counters": phase_used_counters,
+                    "phase_used_sequence": phase_used_sequence,
                 },
                 separators=(",", ":"),
             ).encode()
