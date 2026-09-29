@@ -2728,7 +2728,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// LightGBM teacher are escalation layers, not mandatory hot-path work.
 	heuristicWeight, _ := smart.CalculateWeight(input, priorityFactor)
 	distilledWeight := smart.DistilledExpertPrior(input, priorityFactor)
-	samples := input.Success + input.Failure
+	samples := smart.SampleCount(input.Success, input.Failure)
 	calculatedWeight = smart.BlendHeuristicAndDistilled(heuristicWeight, distilledWeight, samples)
 	ModelPredicted = false
 	modelError := 0.0
