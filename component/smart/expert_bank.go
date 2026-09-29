@@ -198,10 +198,16 @@ func (b *ExpertBank) NeedsTeacher(input *ModelInput, confidence float64, ready b
 	if input.ConnectionFailed || input.LossRate >= 0.01 {
 		return true
 	}
-	if !ready || confidence < 0.65 {
-		return true
-	}
 	total := input.Success + input.Failure
+	if !ready {
+		if total < 16 {
+			return true
+		}
+		return total%3 == 0
+	}
+	if confidence < 0.65 {
+		return total%3 == 0
+	}
 	// Mature experts are periodically refreshed against the teacher so a
 	// distribution shift cannot become permanently fossilized.
 	return total > 0 && total%97 == 0
