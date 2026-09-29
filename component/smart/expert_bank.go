@@ -153,7 +153,13 @@ func (b *ExpertBank) Predict(input *ModelInput, heuristicPrior float64) (weight,
 	x := OnlineBanditFeatures(input)
 	b.mu.RLock()
 	e := b.experts[idx]
+	verified := b.teacherVerified
 	b.mu.RUnlock()
+	if !verified {
+		// Persisted experts are not allowed into production scoring until the
+		// current process has checked them against the current teacher digest.
+		return heuristicPrior, 0, false
+	}
 	return expertPredict(e, heuristicPrior, x)
 }
 
