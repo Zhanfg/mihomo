@@ -279,3 +279,73 @@ func BenchmarkOnlineBanditCompactStateRoundTrip(b *testing.B) {
 		SaveOnlineBanditState(record, false, got, 0.4)
 	}
 }
+
+
+func TestOnlineBanditPinTrustedRequiresMatureCurrentEvidence(t *testing.T) {
+	base := defaultOnlineBanditState()
+	base.Updates = 32
+	base.Uncertainty = 0.12
+	base.ErrorEWMA = 0.06
+	base.Generation = processBanditGeneration
+	base.Epoch = 7
+
+	if !OnlineBanditPinTrusted(base, 64, 0.82, 7) {
+		t.Fatal("mature current-network learner did not trust pin")
+	}
+
+	tests := []struct {
+		name    string
+		state   OnlineBanditState
+		samples int64
+		weight  float64
+		epoch   uint64
+	}{
+		{"cold samples", base, 8, 0.82, 7},
+		{"low weight", base, 64, AllowedWeight - 0.01, 7},
+		{"epoch mismatch", base, 64, 0.82, 8},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if OnlineBanditPinTrusted(tc.state, tc.samples, tc.weight, tc.epoch) {
+				t.Fatal("untrusted pin passed maturity gate")
+			}
+		})
+	}
+
+	uncertain := base
+	uncertain.Uncertainty = 0.60
+	if OnlineBanditPinTrusted(uncertain, 64, 0.82, 7) {
+		t.Fatal("uncertain learner trusted pin")
+	}
+
+	drifting := base
+	drifting.ErrorEWMA = 0.30
+	if OnlineBanditPinTrusted(drifting, 64, 0.82, 7) {
+		t.Fatal("drifting learner trusted pin")
+	}
+
+	fewUpdates := base
+	fewUpdates.Updates = 4
+	if OnlineBanditPinTrusted(fewUpdates, 64, 0.82, 7) {
+		t.Fatal("undertrained learner trusted pin")
+	}
+
+	oldProcess := base
+	oldProcess.Generation = processBanditGeneration - 1
+	if OnlineBanditPinTrusted(oldProcess, 64, 0.82, 7) {
+		t.Fatal("previous-process learner trusted pin")
+	}
+}
+
+func BenchmarkOnlineBanditPinTrusted(b *testing.B) {
+	state := defaultOnlineBanditState()
+	state.Updates = 64
+	state.Uncertainty = 0.10
+	state.ErrorEWMA = 0.05
+	state.Generation = processBanditGeneration
+	state.Epoch = 3
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = OnlineBanditPinTrusted(state, 128, 0.85, 3)
+	}
+}
