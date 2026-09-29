@@ -2744,6 +2744,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		modelError = oldModelError
 
 		if smart.ShouldRefreshTeacher(input, oldModelError, banditState) {
+			banditState.NoteTeacherAttempt()
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && heuristicWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
