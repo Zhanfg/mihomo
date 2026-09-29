@@ -2782,7 +2782,10 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// Train only from completed-connection truth. This target never depends on
 	// the student's own prediction, which prevents self-confirming drift.
 	if teacherPrior > 0 {
-		reward := smart.ObserveConnectionReward(input, priorityFactor)
+		reward := smart.ObserveConnectionRewardMetrics(
+			connectTime, latency, maxUploadRateKB, maxDownloadRateKB,
+			lossRate, err != nil, priorityFactor,
+		)
 		if isDegraded || failedBlock {
 			reward *= 0.15
 		}
