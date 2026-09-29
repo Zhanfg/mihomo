@@ -59,6 +59,20 @@ func ModelErrorWeightType(isUDP bool) string {
 	return WeightTypeModelErrorTCP
 }
 
+
+func SampleCount(success, failure int64) int64 {
+	if success < 0 {
+		success = 0
+	}
+	if failure < 0 {
+		failure = 0
+	}
+	if success > math.MaxInt64-failure {
+		return math.MaxInt64
+	}
+	return success + failure
+}
+
 // ShouldInvokeModel is the inference gate for the heavy global ensemble.
 // Failures and fresh loss always get a full prediction. Mature, stable records
 // are checked only at prime-numbered evidence intervals so weighted sampling
@@ -67,7 +81,7 @@ func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
 	if input == nil {
 		return false
 	}
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	if total < DefaultMinSampleCount {
 		return false
 	}
@@ -100,7 +114,7 @@ func ShouldInvokeTeacher(input *ModelInput, modelError, studentUncertainty, stud
 	if input == nil {
 		return false
 	}
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	if total < DefaultMinSampleCount {
 		return false
 	}
@@ -158,7 +172,7 @@ func TrainingSampleRate(input *ModelInput, modelError, configured float64) float
 	if input.ConnectionFailed || input.LossRate >= 0.01 || modelError >= 0.20 {
 		return configured
 	}
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	switch {
 	case total < 32:
 		return configured
