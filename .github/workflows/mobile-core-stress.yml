@@ -212,14 +212,9 @@ jobs:
           ) > RESOURCE_SAMPLES.txt &
           MON_PID=$!
 
-          : > FAILURES.txt
-          /usr/bin/time -v sh -c '
-            seq 1 8000 | xargs -P 48 -n 1 sh -c '"'"'
-              if ! curl -fsS --connect-timeout 2 --max-time 4                 -x http://127.0.0.1:17890                 http://127.0.0.1:18080/ >/dev/null 2>>CURL_ERRORS.txt; then
-                echo "$1" >> FAILURES.txt
-              fi
-            '"'"' sh
-          ' 2> LOAD_TIME.txt
+          /usr/bin/time -v python3 .github/scripts/smart_extreme_soak.py \
+            --count 8000 --concurrency 48 --timeout 4 --label churn \
+            > CHURN.json 2> LOAD_TIME.txt
 
           sleep 2
           kill "$MON_PID" 2>/dev/null || true
@@ -241,11 +236,16 @@ jobs:
             }
           ' RESOURCE_SAMPLES.txt | tee RESOURCE_SUMMARY.txt
 
-          FAIL_COUNT="$(wc -l < FAILURES.txt 2>/dev/null || echo 0)"
+          FAIL_COUNT="$(python3 - <<'PY'
+          import json
+          print(json.load(open("CHURN.json"))["failures"])
+          PY
+          )"
           echo "requests=8000" | tee -a RESOURCE_SUMMARY.txt
           echo "parallelism=48" | tee -a RESOURCE_SUMMARY.txt
           echo "request_failures=$FAIL_COUNT" | tee -a RESOURCE_SUMMARY.txt
           echo "core_alive_after_load=YES" | tee -a RESOURCE_SUMMARY.txt
+          cat CHURN.json | tee -a RESOURCE_SUMMARY.txt
           tail -n 240 /tmp/mihomo.log > MIHOMO_TAIL.txt
           test "$FAIL_COUNT" -eq 0
 
@@ -259,8 +259,7 @@ jobs:
             RESOURCE_SUMMARY.txt
             LOAD_TIME.txt
             MIHOMO_TAIL.txt
-            FAILURES.txt
-            CURL_ERRORS.txt
+            CHURN.json
             /tmp/mihomo.log
             /tmp/http.log
 
