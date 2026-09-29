@@ -107,3 +107,38 @@ func TestTrainingSampleRateHonorsConfiguredCeiling(t *testing.T) {
 	stable := &ModelInput{Success: 300}
 	require.Equal(t, 0.025, TrainingSampleRate(stable, 0.03, 0.2))
 }
+
+
+func TestShouldInvokeTeacherUsesStudentConfidence(t *testing.T) {
+	stable := &ModelInput{Success: 290}
+	require.True(t, ShouldInvokeTeacher(stable, 0.03, 0.10, 0.04, 300)) // 290 % 29 == 0
+
+	stable.Success = 291
+	require.False(t, ShouldInvokeTeacher(stable, 0.03, 0.10, 0.04, 300))
+
+	uncertain := &ModelInput{Success: 66}
+	require.True(t, ShouldInvokeTeacher(uncertain, 0.03, 0.70, 0.05, 80)) // 66 % 3 == 0
+
+	uncertain.Success = 67
+	require.False(t, ShouldInvokeTeacher(uncertain, 0.03, 0.70, 0.05, 80))
+}
+
+func TestShouldInvokeTeacherEscalatesFailureAndColdStudent(t *testing.T) {
+	failed := &ModelInput{Success: 300, ConnectionFailed: true}
+	require.True(t, ShouldInvokeTeacher(failed, 0.01, 0.05, 0.02, 500))
+
+	lossy := &ModelInput{Success: 300, LossRate: 0.02}
+	require.True(t, ShouldInvokeTeacher(lossy, 0.01, 0.05, 0.02, 500))
+
+	cold := &ModelInput{Success: 12}
+	require.True(t, ShouldInvokeTeacher(cold, 0.01, 1, 0, 3))
+}
+
+func BenchmarkShouldInvokeTeacherStable(b *testing.B) {
+	input := &ModelInput{Success: 512}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		input.Success = 512 + int64(i%29)
+		_ = ShouldInvokeTeacher(input, 0.03, 0.10, 0.04, 300)
+	}
+}
