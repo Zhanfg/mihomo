@@ -321,3 +321,71 @@ func TestSmartExtremeExpertConflictEscalatesTeacher(t *testing.T) {
 		t.Fatal("material expert disagreement did not escalate heavy teacher")
 	}
 }
+
+
+func TestSmartExtremeDistillationSkewAndCoverage(t *testing.T) {
+	requireSmartExtreme(t)
+	const total = 120_000
+	samples := make([]DistillProductionSample, 0, total)
+	for i := 0; i < total; i++ {
+		scene := sceneKind(i % 4)
+		udp := i%5 == 0
+		if i < total*7/10 {
+			// Deliberately skew most production volume toward web/TCP.
+			scene = sceneWeb
+			udp = false
+		}
+		input := *expertTestInput(scene, udp)
+		base := DistilledExpertBasePrior(&input, 1)
+		factor := 0.92 + 0.002*float64((i*13)%31)
+		samples = append(samples, DistillProductionSample{
+			Input: input,
+			TeacherWeight: base * factor,
+		})
+	}
+	cal := FitProductionDistillationCalibration(samples)
+	report := EvaluateProductionDistillation(samples, cal)
+	if report.Count != total {
+		t.Fatalf("distillation report count=%d want=%d", report.Count, total)
+	}
+	if !ProductionDistillationAcceptable(report, 0.35) {
+		t.Fatalf("skewed production distillation failed quality gate: %+v", report)
+	}
+	covered := 0
+	for i, bucket := range report.Buckets {
+		if bucket.Count == 0 {
+			continue
+		}
+		covered++
+		if bucket.Count >= 8 && bucket.CalibratedLogRMSE > bucket.BaseLogRMSE+1e-12 {
+			t.Fatalf("bucket=%d worsened under skew: base=%v calibrated=%v", i, bucket.BaseLogRMSE, bucket.CalibratedLogRMSE)
+		}
+	}
+	if covered < 8 {
+		t.Fatalf("distillation coverage only %d/8 buckets", covered)
+	}
+	t.Logf("distill_samples=%d base_rmse=%.6f calibrated_rmse=%.6f max_relative_error=%.6f",
+		report.Count, report.BaseLogRMSE, report.CalibratedLogRMSE, report.MaxRelativeError)
+}
+
+func TestSmartExtremeDistillationRejectsUnrepresentableTeacher(t *testing.T) {
+	requireSmartExtreme(t)
+	input := *expertTestInput(sceneTransfer, false)
+	base := DistilledExpertBasePrior(&input, 1)
+	samples := make([]DistillProductionSample, 25_000)
+	for i := range samples {
+		samples[i] = DistillProductionSample{
+			Input: input,
+			TeacherWeight: base * 2.4,
+		}
+	}
+	cal := FitProductionDistillationCalibration(samples)
+	report := EvaluateProductionDistillation(samples, cal)
+	if ProductionDistillationAcceptable(report, 0.35) {
+		t.Fatalf("capacity-mismatched teacher unexpectedly passed: %+v", report)
+	}
+	if report.CalibratedLogRMSE <= 0.35 {
+		t.Fatalf("test did not create an unrepresentable teacher: rmse=%v", report.CalibratedLogRMSE)
+	}
+	t.Logf("rejected_teacher_rmse=%.6f max_relative_error=%.6f", report.CalibratedLogRMSE, report.MaxRelativeError)
+}
