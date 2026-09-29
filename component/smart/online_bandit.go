@@ -300,7 +300,7 @@ func OnlineBanditFeatures(input *ModelInput) [OnlineBanditDimension]float64 {
 		return x
 	}
 
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	if total > 0 {
 		x[1] = clamp01(float64(input.Success) / float64(total))
 	} else {
