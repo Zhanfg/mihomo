@@ -1,6 +1,9 @@
 package smart
 
-import "math"
+import (
+	"math"
+	"time"
+)
 
 // OnlineBanditDimension is intentionally small: the global LightGBM teacher
 // handles high-dimensional generalization, while this local student only needs
@@ -11,6 +14,11 @@ const (
 	WeightTypeBanditUncertaintyTCP = "bandit-u:tcp"
 	WeightTypeBanditUncertaintyUDP = "bandit-u:udp"
 )
+
+// processBanditGeneration distinguishes one core lifetime from persisted state.
+// netstate epochs are process-local and restart from 1, so epoch alone cannot
+// tell whether confidence was learned on the current boot/network.
+var processBanditGeneration = float64((uint64(time.Now().UnixNano()) & ((1 << 53) - 1)) + 1)
 
 var (
 	banditThetaTCP = [OnlineBanditDimension]string{
@@ -53,6 +61,13 @@ func banditEpochKey(isUDP bool) string {
 	return "bandit-epoch:tcp"
 }
 
+func banditGenerationKey(isUDP bool) string {
+	if isUDP {
+		return "bandit-gen:udp"
+	}
+	return "bandit-gen:tcp"
+}
+
 func BanditUncertaintyWeightType(isUDP bool) string {
 	if isUDP {
 		return WeightTypeBanditUncertaintyUDP
@@ -69,6 +84,7 @@ type OnlineBanditState struct {
 	Updates   float64
 	ErrorEWMA float64
 	Epoch     float64
+	Generation float64
 }
 
 func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditState {
@@ -94,6 +110,7 @@ func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditSt
 	state.Updates = record.GetWeight(banditUpdatesKey(isUDP))
 	state.ErrorEWMA = record.GetWeight(banditErrorKey(isUDP))
 	state.Epoch = record.GetWeight(banditEpochKey(isUDP))
+	state.Generation = record.GetWeight(banditGenerationKey(isUDP))
 	if state.Updates < 0 || math.IsNaN(state.Updates) || math.IsInf(state.Updates, 0) {
 		state.Updates = 0
 	}
@@ -102,6 +119,9 @@ func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditSt
 	}
 	if state.Epoch < 0 || math.IsNaN(state.Epoch) || math.IsInf(state.Epoch, 0) {
 		state.Epoch = 0
+	}
+	if state.Generation < 0 || math.IsNaN(state.Generation) || math.IsInf(state.Generation, 0) {
+		state.Generation = 0
 	}
 	return state
 }
@@ -121,16 +141,44 @@ func SaveOnlineBanditState(record *AtomicStatsRecord, isUDP bool, state OnlineBa
 	record.SetWeight(banditUpdatesKey(isUDP), state.Updates)
 	record.SetWeight(banditErrorKey(isUDP), state.ErrorEWMA)
 	record.SetWeight(banditEpochKey(isUDP), state.Epoch)
+	record.SetWeight(banditGenerationKey(isUDP), state.Generation)
 	record.SetWeight(BanditUncertaintyWeightType(isUDP), clamp01(uncertainty))
 }
 
 // ObserveEpoch retains useful cross-network prior knowledge while reopening
 // confidence after a handover. Full reset throws away too much; keeping the
 // old precision unchanged makes the learner stubborn on the new path.
+func (state *OnlineBanditState) softenForEnvironmentChange(thetaKeep, precisionKeep float64) {
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] *= thetaKeep
+		precision := state.Precision[i]
+		if precision < 1 {
+			precision = 1
+		}
+		state.Precision[i] = 1 + (precision-1)*precisionKeep
+	}
+	if state.ErrorEWMA < 0.15 {
+		state.ErrorEWMA = 0.15
+	}
+}
+
 func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
 	if state == nil || epoch == 0 {
 		return
 	}
+
+	// A persisted learner belongs to a previous core lifetime even when both
+	// process-local network epochs happen to equal 1. Reopen confidence once on
+	// first use after restart, while preserving a small directional prior.
+	if state.Generation != processBanditGeneration {
+		if state.Updates > 0 {
+			state.softenForEnvironmentChange(0.20, 0.25)
+		}
+		state.Generation = processBanditGeneration
+		state.Epoch = float64(epoch)
+		return
+	}
+
 	if state.Epoch == 0 {
 		state.Epoch = float64(epoch)
 		return
@@ -138,20 +186,9 @@ func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
 	if uint64(state.Epoch) == epoch {
 		return
 	}
-	for i := 0; i < OnlineBanditDimension; i++ {
-		// A handover must pull even a worst-case saturated 6-D residual back
-		// inside the ±35% safety cap. Retain only a directional trace (15%);
-		// the global teacher becomes the dominant prior on the new network.
-		state.Theta[i] *= 0.15
-		precision := state.Precision[i]
-		if precision < 1 {
-			precision = 1
-		}
-		state.Precision[i] = 1 + (precision-1)*0.20
-	}
-	if state.ErrorEWMA < 0.15 {
-		state.ErrorEWMA = 0.15
-	}
+
+	// A same-process handover is stronger evidence of context drift.
+	state.softenForEnvironmentChange(0.15, 0.20)
 	state.Epoch = float64(epoch)
 }
 
