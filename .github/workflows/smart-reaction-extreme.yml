@@ -1,0 +1,147 @@
+name: Smart Reaction Extreme
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - opt/smart-expert-v8
+    paths:
+      - ".github/workflows/smart-reaction-extreme.yml"
+      - ".github/scripts/smart_extreme_*.py"
+      - "adapter/outboundgroup/**"
+      - "component/smart/**"
+      - "component/linkprofile/**"
+      - "component/netstate/**"
+      - "tunnel/statistic/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-reaction-extreme-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  reaction-chaos:
+    name: 16K adaptive reaction chaos
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Build stress core
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -ldflags "-w -s -buildid=" -o mihomo-smart-reaction
+
+      - name: Prepare reaction harness
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/smart-extreme/www
+          printf 'smart-reaction\n' >/tmp/smart-extreme/www/index.html
+          echo 0 >/tmp/smart-extreme/phase
+          cp .github/scripts/smart_extreme_harness.py /tmp/smart-extreme/harness.py
+          cat >/tmp/smart-extreme/config.yaml <<'YAML'
+          mixed-port: 17890
+          allow-lan: false
+          mode: rule
+          log-level: error
+          ipv6: true
+          find-process-mode: off
+          profile:
+            store-selected: false
+            store-fake-ip: false
+          proxies:
+            - {name: FAST, type: http, server: 127.0.0.1, port: 18101}
+            - {name: BACKUP, type: http, server: 127.0.0.1, port: 18102}
+            - {name: FLAP, type: http, server: 127.0.0.1, port: 18103}
+          proxy-groups:
+            - name: SMART-REACTION
+              type: smart
+              proxies: [FAST, BACKUP, FLAP]
+              url: http://127.0.0.1:18080/
+              interval: 1
+              lazy: false
+              uselightgbm: false
+              auto-ip-family: true
+              empty-fallback: REJECT
+          rules:
+            - MATCH,SMART-REACTION
+          YAML
+          ./mihomo-smart-reaction -t -d /tmp/smart-extreme -f /tmp/smart-extreme/config.yaml
+
+      - name: Run four-phase reaction matrix
+        shell: bash
+        env:
+          GOMEMLIMIT: "192MiB"
+          GOMAXPROCS: "4"
+        run: |
+          set -euo pipefail
+          python3 /tmp/smart-extreme/harness.py >/tmp/harness.log 2>&1 &
+          HARNESS_PID=$!
+          ./mihomo-smart-reaction -d /tmp/smart-extreme -f /tmp/smart-extreme/config.yaml >/tmp/mihomo.log 2>&1 &
+          CORE_PID=$!
+
+          cleanup() { kill "$CORE_PID" "$HARNESS_PID" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          READY=0
+          for _ in $(seq 1 120); do
+            if curl -fsS --max-time 3 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null; then
+              READY=1
+              break
+            fi
+            kill -0 "$CORE_PID"
+            sleep 0.1
+          done
+          test "$READY" -eq 1
+
+          : >FAILURES.txt
+          : >REACTION_RESULTS.txt
+          : >PHASE_RESULTS.txt
+
+          for PHASE in 0 1 2 3; do
+            echo "$PHASE" >/tmp/smart-extreme/phase
+            sleep 1
+            BEFORE=$(wc -l <FAILURES.txt)
+            START=$(date +%s%3N)
+            seq 1 4000 | xargs -P 96 -n 1 sh -c '
+              curl -fsS --connect-timeout 2 --max-time 5 -x http://127.0.0.1:17890 http://127.0.0.1:18080/ >/dev/null 2>>CURL_ERRORS.txt || echo "$1" >>FAILURES.txt
+            ' sh
+            END=$(date +%s%3N)
+            AFTER=$(wc -l <FAILURES.txt)
+            curl -fsS http://127.0.0.1:18082/stats > "PHASE_${PHASE}_STATS.json"
+            echo "phase=$PHASE failures=$((AFTER-BEFORE)) elapsed_ms=$((END-START))" | tee -a PHASE_RESULTS.txt
+            python3 .github/scripts/smart_extreme_analyze.py "$PHASE" "PHASE_${PHASE}_STATS.json" | tee -a REACTION_RESULTS.txt
+            kill -0 "$CORE_PID"
+          done
+
+          FAILS=$(wc -l <FAILURES.txt)
+          echo "requests=16000" | tee RESOURCE_SUMMARY.txt
+          echo "parallelism=96" | tee -a RESOURCE_SUMMARY.txt
+          echo "failures=$FAILS" | tee -a RESOURCE_SUMMARY.txt
+          test "$FAILS" -le 160
+          kill -0 "$CORE_PID"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: smart-reaction-extreme
+          path: |
+            REACTION_RESULTS.txt
+            PHASE_RESULTS.txt
+            RESOURCE_SUMMARY.txt
+            PHASE_*_STATS.json
+            FAILURES.txt
+            CURL_ERRORS.txt
+            /tmp/mihomo.log
+            /tmp/harness.log
