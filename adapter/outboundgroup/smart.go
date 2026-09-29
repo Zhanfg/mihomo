@@ -2760,6 +2760,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	teacherPrior := calculatedWeight
 	banditFeatures := smart.OnlineBanditFeatures(input)
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
+	banditState.ObserveEpoch(netstate.CurrentEpoch())
 	if teacherPrior > 0 {
 		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
 	}
