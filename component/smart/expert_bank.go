@@ -217,13 +217,9 @@ func (b *ExpertBank) TakeDirty(threshold uint32) bool {
 	if b == nil {
 		return false
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.dirty < threshold {
-		return false
-	}
-	b.dirty = 0
-	return true
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.dirty >= threshold
 }
 
 func (b *ExpertBank) MarkClean() {
