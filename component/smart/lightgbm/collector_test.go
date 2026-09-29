@@ -1,6 +1,8 @@
 package lightgbm
 
 import (
+	"encoding/csv"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -94,5 +96,42 @@ func TestApplyTransformsInPlaceMatchesCopyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("in-place transform differs: got=%v want=%v", got, want)
+	}
+}
+
+
+func TestCollectorSchemaIncludesDistillationSignals(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "samples.csv")
+	collector := &DataCollector{
+		dataPath:           path,
+		smartCollectorSize: defaultSmartCollectorSize,
+	}
+	if err := collector.initializeWriter(); err != nil {
+		t.Fatal(err)
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	header, err := csv.NewReader(f).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(header) != expectedColumns {
+		t.Fatalf("header columns=%d want=%d", len(header), expectedColumns)
+	}
+	found := map[string]bool{}
+	for _, h := range header {
+		found[h] = true
+	}
+	for _, required := range []string{"ema_loss_rate", "connection_failed", "weight", "weight_source"} {
+		if !found[required] {
+			t.Fatalf("collector schema missing %q", required)
+		}
 	}
 }
