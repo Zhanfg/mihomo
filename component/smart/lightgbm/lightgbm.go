@@ -26,6 +26,11 @@ import (
 
 const (
 	MaxFeatureSize = 30
+	// MaxModelFileBytes is a hard storage/input ceiling for every LightGBM
+	// loading path. It is intentionally well above the current official models
+	// while preventing a bad custom URL from turning model refresh into an
+	// unbounded memory/disk operation.
+	MaxModelFileBytes int64 = 64 << 20
 
 	// The parsed ensemble is much larger than the tiny online residual state.
 	// Keep it resident while it is actually serving predictions, then release
@@ -508,6 +513,12 @@ func ensureModelAsync(m *WeightModel) {
 }
 
 func (m *WeightModel) loadModel(path string) error {
+	if stat, err := os.Stat(path); err != nil {
+		return err
+	} else if stat.Size() <= 0 || stat.Size() > MaxModelFileBytes {
+		return fmt.Errorf("LightGBM model size %d exceeds allowed range (max %d)", stat.Size(), MaxModelFileBytes)
+	}
+
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
 
@@ -651,6 +662,9 @@ func downloadModel(path string) (err error) {
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("model download returned HTTP %d", resp.StatusCode)
 	}
+	if resp.ContentLength > MaxModelFileBytes {
+		return fmt.Errorf("model download too large: %d > %d bytes", resp.ContentLength, MaxModelFileBytes)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -663,7 +677,13 @@ func downloadModel(path string) (err error) {
 	if err != nil {
 		return err
 	}
-	if _, err = io.Copy(f, resp.Body); err == nil {
+	reader := io.LimitReader(resp.Body, MaxModelFileBytes+1)
+	written, copyErr := io.Copy(f, reader)
+	if copyErr != nil {
+		err = copyErr
+	} else if written > MaxModelFileBytes {
+		err = fmt.Errorf("model download exceeded hard limit: %d > %d bytes", written, MaxModelFileBytes)
+	} else {
 		err = f.Sync()
 	}
 	closeErr := f.Close()
