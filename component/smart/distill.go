@@ -1,6 +1,8 @@
 package smart
 
 import (
+	"errors"
+	"fmt"
 	"math"
 )
 
