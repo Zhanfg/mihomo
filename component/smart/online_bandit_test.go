@@ -453,3 +453,22 @@ func BenchmarkDistilledSmartDecision(b *testing.B) {
 		_ = ShouldRefreshTeacher(input, 0.04, state)
 	}
 }
+
+
+func TestV7StudentDefaultsToNeutralTeacherAnchor(t *testing.T) {
+	// v7 compact records do not have TeacherRatio/TeacherAt fields. Loading
+	// them into v8 must be neutral rather than suppressing the heuristic prior.
+	state := normalizeOnlineBanditState(OnlineBanditState{
+		Updates:     40,
+		Uncertainty: 0.20,
+	})
+	if math.Abs(state.TeacherRatio-1) > 1e-12 {
+		t.Fatalf("v7 migration teacher ratio=%v want=1", state.TeacherRatio)
+	}
+	if got := state.ApplyTeacherAnchor(0.80); math.Abs(got-0.80) > 1e-12 {
+		t.Fatalf("neutral migrated anchor changed prior: %v", got)
+	}
+	if !ShouldRefreshTeacher(testBanditInput(), 0.05, state) {
+		t.Fatal("migrated v7 student did not request its first Teacher refresh")
+	}
+}
