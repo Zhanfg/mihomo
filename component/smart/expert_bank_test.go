@@ -31,6 +31,7 @@ func syntheticTeacher(prior float64, x [OnlineBanditDimension]float64) float64 {
 
 func TestDistilledExpertConvergesTowardTeacher(t *testing.T) {
 	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
 	for i := 0; i < 600; i++ {
 		input := expertTestInput(i, false)
 		prior := 0.55 + float64(i%9)*0.025
@@ -130,6 +131,7 @@ func TestExpertTeacherCadenceTransitions(t *testing.T) {
 
 func BenchmarkDistilledExpertPredict(b *testing.B) {
 	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
 	input := expertTestInput(0, false)
 	x := OnlineBanditFeatures(input)
 	for i := 0; i < 200; i++ {
