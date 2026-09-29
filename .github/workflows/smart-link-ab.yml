@@ -11,6 +11,7 @@ on:
       - opt/smart-runtime-v6
       - opt/smart-model-v7
       - opt/smart-expert-v8
+      - opt/smart-production-v9
     paths:
       - ".github/workflows/smart-link-ab.yml"
       - "adapter/outboundgroup/**"
