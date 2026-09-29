@@ -2755,6 +2755,15 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		}
 	}
 
+	// The global model/heuristic is the teacher prior. The compact local
+	// contextual student learns only the residual the global prior misses.
+	teacherPrior := calculatedWeight
+	banditFeatures := smart.OnlineBanditFeatures(input)
+	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
+	if teacherPrior > 0 {
+		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
+	}
+
 	if calculatedWeight > 0 && linkFactor > 0 {
 		calculatedWeight *= linkFactor
 	}
@@ -2769,6 +2778,17 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 
 	// block node for the specific domain/IP (wildcardTarget + SmartTarget two-level records)
 	failedBlock := s.markNodeFailure(metadata, proxyName, isDegraded, checked, blockCode, 0)
+
+	// Train only from completed-connection truth. This target never depends on
+	// the student's own prediction, which prevents self-confirming drift.
+	if teacherPrior > 0 {
+		reward := smart.ObserveConnectionReward(input, priorityFactor)
+		if isDegraded || failedBlock {
+			reward *= 0.15
+		}
+		_, uncertainty := banditState.Update(teacherPrior, reward, banditFeatures, sampleScale)
+		smart.SaveOnlineBanditState(atomicRecord, isUDP, banditState, uncertainty)
+	}
 
 	newWeight := updateEMAFloat(oldWeight, adjWeight)
 	lastUsed := time.Now().Unix()
