@@ -81,7 +81,10 @@ func loadSamples(path string) ([]smart.DistillProductionSample, error) {
 		input.IsUDP = parseFloat(row, index, "is_udp") >= 0.5
 		input.IsTCP = parseFloat(row, index, "is_tcp") >= 0.5
 		weight := parseFloat(row, index, "weight")
-		out = append(out, smart.DistillProductionSample{Input: input, ActualWeight: weight})
+		teacherWeight := parseFloat(row, index, "teacher_weight")
+		out = append(out, smart.DistillProductionSample{
+			Input: input, ActualWeight: weight, TeacherWeight: teacherWeight,
+		})
 	}
 	return out, nil
 }
@@ -119,6 +122,7 @@ func main() {
 	input := flag.String("input", "", "optional smart_weight_data.csv used only for aggregate calibration")
 	output := flag.String("output", "component/smart/distilled_expert_model_gen.go", "generated Go artifact")
 	verify := flag.Bool("verify", false, "verify the committed artifact is reproducible")
+	maxLogRMSE := flag.Float64("max-log-rmse", 0.35, "reject production calibration above this log-RMSE")
 	flag.Parse()
 
 	samples, err := loadSamples(*input)
@@ -126,8 +130,35 @@ func main() {
 		panic(err)
 	}
 	calibration := smart.FitProductionDistillationCalibration(samples)
-	content := render(calibration)
+	if *verify && *input == "" {
+		// Verification without the private production dataset checks that the
+		// committed analytical coefficients still reproduce the source experts
+		// while preserving whatever aggregate calibration is already embedded.
+		calibration = smart.CurrentDistilledExpertCalibration()
+	}
 
+	report := smart.EvaluateProductionDistillation(samples, calibration)
+	if len(samples) > 0 {
+		fmt.Printf(
+			"distill_quality samples=%d base_log_rmse=%.6f calibrated_log_rmse=%.6f max_relative_error=%.6f\n",
+			report.Count, report.BaseLogRMSE, report.CalibratedLogRMSE, report.MaxRelativeError,
+		)
+		for i, bucket := range report.Buckets {
+			if bucket.Count == 0 {
+				continue
+			}
+			fmt.Printf(
+				"bucket=%d samples=%d base_log_rmse=%.6f calibrated_log_rmse=%.6f max_relative_error=%.6f\n",
+				i, bucket.Count, bucket.BaseLogRMSE, bucket.CalibratedLogRMSE, bucket.MaxRelativeError,
+			)
+		}
+		if !smart.ProductionDistillationAcceptable(report, *maxLogRMSE) {
+			fmt.Fprintln(os.Stderr, "production distillation rejected: quality gate failed")
+			os.Exit(2)
+		}
+	}
+
+	content := render(calibration)
 	if *verify {
 		existing, err := os.ReadFile(*output)
 		if err != nil {
