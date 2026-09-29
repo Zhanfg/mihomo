@@ -389,6 +389,7 @@ type Smart struct {
 	disableUDP     bool
 
 	weightModel     *lightgbm.WeightModel
+	expertBank      *smart.ExpertBank
 	policyPriority  []priorityRule
 	priorityCache   xsync.Map[string, float64]
 	sampleRate      float64
@@ -1996,6 +1997,7 @@ func (s *Smart) InitSmart() {
 	s.startGroupTasks()
 	if s.useLightGBM {
 		s.weightModel = lightgbm.GetModel()
+		s.expertBank = s.store.LoadExpertBank(s.Name(), s.configName)
 	}
 }
 
@@ -2734,19 +2736,37 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
 	banditState.ObserveEpoch(netstate.CurrentEpoch())
 
+	expertWeight, expertConfidence, expertReady := observedWeight, 0.0, false
+	if s.expertBank != nil && observedWeight > 0 {
+		expertWeight, expertConfidence, expertReady = s.expertBank.Predict(input, observedWeight)
+		if expertReady {
+			calculatedWeight = expertWeight
+		}
+	}
+
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
-		if smart.ShouldInvokeTeacher(
+		studentNeedsTeacher := smart.ShouldInvokeTeacher(
 			input,
 			oldModelError,
 			banditState.Uncertainty,
 			banditState.ErrorEWMA,
 			banditState.Updates,
-		) {
+		)
+		expertNeedsTeacher := s.expertBank == nil || s.expertBank.NeedsTeacher(input, expertConfidence, expertReady)
+		if studentNeedsTeacher || expertNeedsTeacher {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
+				if s.expertBank != nil {
+					s.expertBank.Distill(input, observedWeight, modelWeight)
+					if s.expertBank.TakeDirty(32) {
+						if err := s.store.SaveExpertBank(s.Name(), s.configName, s.expertBank); err != nil {
+							log.Debugln("[Smart] Deferred expert bank persistence failed: %v", err)
+						}
+					}
+				}
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
 				var newCalibration, newModelError float64
@@ -3718,6 +3738,11 @@ func (s *Smart) Close() error {
 		}
 		s.wg.Wait()
 		s.waitBackgroundWork()
+		if s.expertBank != nil {
+			if err := s.store.SaveExpertBank(s.Name(), s.configName, s.expertBank); err != nil {
+				log.Warnln("[Smart] Failed to persist distilled expert bank: %v", err)
+			}
+		}
 		globalSmartTasks.release(s, s.global)
 		s.global = nil
 	})
