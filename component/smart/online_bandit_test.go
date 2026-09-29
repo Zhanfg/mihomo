@@ -189,3 +189,39 @@ func TestOnlineBanditEpochShiftReopensConfidence(t *testing.T) {
 		t.Fatalf("handover should retain but soften learned residual: before=%v after=%v", beforeWeight, afterWeight)
 	}
 }
+
+
+func TestOnlineBanditReopensConfidenceAcrossProcessRestart(t *testing.T) {
+	oldGeneration := processBanditGeneration
+	processBanditGeneration = 424242
+	t.Cleanup(func() { processBanditGeneration = oldGeneration })
+
+	state := OnlineBanditState{
+		Updates:    200,
+		ErrorEWMA: 0.02,
+		Epoch:      1,
+		Generation: 123456, // persisted by a previous core process
+	}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] = 0.30
+		state.Precision[i] = 512
+	}
+
+	state.ObserveEpoch(1) // same numeric epoch, different process generation
+
+	if state.Generation != processBanditGeneration {
+		t.Fatalf("generation=%v want=%v", state.Generation, processBanditGeneration)
+	}
+	if state.Epoch != 1 {
+		t.Fatalf("epoch=%v want=1", state.Epoch)
+	}
+	if state.Precision[0] >= 512 {
+		t.Fatalf("restart did not reopen confidence: precision=%v", state.Precision[0])
+	}
+	if state.Theta[0] >= 0.30 {
+		t.Fatalf("restart did not soften stale residual: theta=%v", state.Theta[0])
+	}
+	if state.ErrorEWMA < 0.15 {
+		t.Fatalf("restart did not raise adaptation pressure: error=%v", state.ErrorEWMA)
+	}
+}
