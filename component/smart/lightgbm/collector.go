@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,17 +33,42 @@ type DataCollector struct {
 }
 
 const (
-	defaultSmartCollectorSize = 100 * 1024 * 1024
-	expectedColumns           = MaxFeatureSize + 11
+	defaultSmartCollectorSize    = 64 * 1024 * 1024
+	maxSmartCollectorSize        = 128 * 1024 * 1024
+	maxSmartCollectorSizeAndroid = 64 * 1024 * 1024
+	expectedColumns              = MaxFeatureSize + 11
 )
 
-func InitCollector(collectSize float64) {
-	var smartCollectorSize int64
-	if collectSize > 0 {
-		smartCollectorSize = int64(collectSize * 1024 * 1024)
-	} else {
-		smartCollectorSize = defaultSmartCollectorSize
+func normalizeCollectorSize(requested int64, android bool) int64 {
+	maxSize := int64(maxSmartCollectorSize)
+	if android {
+		maxSize = maxSmartCollectorSizeAndroid
 	}
+	if requested <= 0 {
+		requested = defaultSmartCollectorSize
+	}
+	if requested > maxSize {
+		return maxSize
+	}
+	return requested
+}
+
+func removeLegacyCollectorBackups(path string) {
+	matches, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		return
+	}
+	for _, match := range matches {
+		_ = os.Remove(match)
+	}
+}
+
+func InitCollector(collectSize float64) {
+	var requested int64
+	if collectSize > 0 {
+		requested = int64(collectSize * 1024 * 1024)
+	}
+	smartCollectorSize := normalizeCollectorSize(requested, runtime.GOOS == "android")
 
 	collectMutex.Lock()
 	defer collectMutex.Unlock()
@@ -220,9 +246,21 @@ func (c *DataCollector) initializeWriter() error {
 	}
 
 	if needUpgrade {
-		backupPath := c.dataPath + ".bak." + time.Now().Format("20060102150405")
-		os.Rename(c.dataPath, backupPath)
-		log.Infoln("[Smart] Old CSV schema is missing current Smart distillation columns, backup to %s and create new file", backupPath)
+		// Keep exactly one migration backup. Historical timestamped backups from
+		// older builds are removed so schema churn cannot grow storage without
+		// bound over a long-lived installation.
+		removeLegacyCollectorBackups(c.dataPath)
+		backupPath := c.dataPath + ".bak"
+		_ = os.Remove(backupPath)
+		if stat, statErr := os.Stat(c.dataPath); statErr == nil && stat.Size() <= c.smartCollectorSize {
+			if err := os.Rename(c.dataPath, backupPath); err != nil {
+				return err
+			}
+			log.Infoln("[Smart] Old CSV schema backed up to %s", backupPath)
+		} else {
+			_ = os.Remove(c.dataPath)
+			log.Warnln("[Smart] Old CSV schema exceeded collector budget and was discarded")
+		}
 		fileExists = false
 	}
 
@@ -345,7 +383,7 @@ func (c *DataCollector) reconfigure(dataPath string, collectorSize int64) error 
 		err = c.closeLocked()
 		c.dataPath = dataPath
 	}
-	c.smartCollectorSize = collectorSize
+	c.smartCollectorSize = normalizeCollectorSize(collectorSize, runtime.GOOS == "android")
 	return err
 }
 
