@@ -61,7 +61,7 @@ func ExpertFeatures(input *ModelInput) ExpertFeatureVector {
 		return x
 	}
 
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	if total > 0 {
 		x[1] = clamp01(float64(input.Success) / float64(total))
 	} else {
@@ -233,7 +233,7 @@ func ShouldConsultExpert(input *ModelInput, student OnlineBanditState) bool {
 	if student.Updates < 8 || student.Uncertainty >= 0.45 || student.ErrorEWMA >= 0.20 {
 		return true
 	}
-	total := input.Success + input.Failure
+	total := SampleCount(input.Success, input.Failure)
 	if total < 32 {
 		return total%5 == 0
 	}
