@@ -1,7 +1,10 @@
 package smart
 
 import (
+	"math"
 	"testing"
+
+	"github.com/metacubex/mihomo/common/lru"
 )
 
 func testBanditInput() *ModelInput {
@@ -134,5 +137,29 @@ func BenchmarkOnlineBanditUpdate(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		state.Update(0.8, 0.82, x, 1)
+	}
+}
+
+
+func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
+	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
+	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] = float64(i+1) * 0.01
+		state.Precision[i] = float64(i + 2)
+	}
+	SaveOnlineBanditState(record, false, state, 0.42)
+	got := LoadOnlineBanditState(record, false)
+
+	if math.Abs(got.Updates-state.Updates) > 1e-12 || math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 {
+		t.Fatalf("scalar state mismatch: got=%+v want=%+v", got, state)
+	}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		if math.Abs(got.Theta[i]-state.Theta[i]) > 1e-12 || math.Abs(got.Precision[i]-state.Precision[i]) > 1e-12 {
+			t.Fatalf("dimension %d mismatch: got=%+v want=%+v", i, got, state)
+		}
+	}
+	if gotU := record.GetWeight(BanditUncertaintyWeightType(false)); math.Abs(gotU-0.42) > 1e-12 {
+		t.Fatalf("uncertainty=%v want=0.42", gotU)
 	}
 }
