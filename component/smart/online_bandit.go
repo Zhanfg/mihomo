@@ -79,38 +79,33 @@ func BanditUncertaintyWeightType(isUDP bool) string {
 // only the diagonal is deliberate: one update is O(d), persistence is tiny,
 // and no matrix inversion or heap allocation is required on Android.
 type OnlineBanditState struct {
-	Theta     [OnlineBanditDimension]float64
-	Precision [OnlineBanditDimension]float64
-	Updates   float64
-	ErrorEWMA float64
-	Epoch     float64
-	Generation float64
+	Theta       [OnlineBanditDimension]float64 `json:"theta"`
+	Precision   [OnlineBanditDimension]float64 `json:"precision"`
+	Updates     float64                        `json:"updates,omitempty"`
+	ErrorEWMA   float64                        `json:"error_ewma,omitempty"`
+	Epoch       float64                        `json:"epoch,omitempty"`
+	Generation  float64                        `json:"generation,omitempty"`
+	Uncertainty float64                        `json:"uncertainty,omitempty"`
 }
 
-func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditState {
+func defaultOnlineBanditState() OnlineBanditState {
 	var state OnlineBanditState
-	if record == nil {
-		for i := range state.Precision {
-			state.Precision[i] = 1
-		}
-		return state
+	for i := range state.Precision {
+		state.Precision[i] = 1
 	}
+	state.Uncertainty = 1
+	return state
+}
 
-	thetaKeys, precisionKeys := &banditThetaTCP, &banditPrecisionTCP
-	if isUDP {
-		thetaKeys, precisionKeys = &banditThetaUDP, &banditPrecisionUDP
-	}
+func normalizeOnlineBanditState(state OnlineBanditState) OnlineBanditState {
 	for i := 0; i < OnlineBanditDimension; i++ {
-		state.Theta[i] = record.GetWeight((*thetaKeys)[i])
-		state.Precision[i] = record.GetWeight((*precisionKeys)[i])
+		if math.IsNaN(state.Theta[i]) || math.IsInf(state.Theta[i], 0) {
+			state.Theta[i] = 0
+		}
 		if state.Precision[i] < 1 || math.IsNaN(state.Precision[i]) || math.IsInf(state.Precision[i], 0) {
 			state.Precision[i] = 1
 		}
 	}
-	state.Updates = record.GetWeight(banditUpdatesKey(isUDP))
-	state.ErrorEWMA = record.GetWeight(banditErrorKey(isUDP))
-	state.Epoch = record.GetWeight(banditEpochKey(isUDP))
-	state.Generation = record.GetWeight(banditGenerationKey(isUDP))
 	if state.Updates < 0 || math.IsNaN(state.Updates) || math.IsInf(state.Updates, 0) {
 		state.Updates = 0
 	}
@@ -123,73 +118,109 @@ func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditSt
 	if state.Generation < 0 || math.IsNaN(state.Generation) || math.IsInf(state.Generation, 0) {
 		state.Generation = 0
 	}
+	if state.Updates <= 0 {
+		state.Uncertainty = 1
+	} else {
+		state.Uncertainty = clamp01(state.Uncertainty)
+	}
 	return state
+}
+
+// legacyBanditStateFromWeights migrates the first v7 on-disk representation,
+// where each student scalar occupied its own generic weight/LRU entry.
+func legacyBanditStateFromWeights(weights map[string]float64, isUDP bool) (OnlineBanditState, bool) {
+	state := defaultOnlineBanditState()
+	if len(weights) == 0 {
+		return state, false
+	}
+	thetaKeys, precisionKeys := &banditThetaTCP, &banditPrecisionTCP
+	if isUDP {
+		thetaKeys, precisionKeys = &banditThetaUDP, &banditPrecisionUDP
+	}
+	found := false
+	for i := 0; i < OnlineBanditDimension; i++ {
+		if value, ok := weights[(*thetaKeys)[i]]; ok {
+			state.Theta[i] = value
+			found = true
+		}
+		if value, ok := weights[(*precisionKeys)[i]]; ok {
+			state.Precision[i] = value
+			found = true
+		}
+	}
+	if value, ok := weights[banditUpdatesKey(isUDP)]; ok {
+		state.Updates = value
+		found = true
+	}
+	if value, ok := weights[banditErrorKey(isUDP)]; ok {
+		state.ErrorEWMA = value
+		found = true
+	}
+	if value, ok := weights[banditEpochKey(isUDP)]; ok {
+		state.Epoch = value
+		found = true
+	}
+	if value, ok := weights[banditGenerationKey(isUDP)]; ok {
+		state.Generation = value
+		found = true
+	}
+	if value, ok := weights[BanditUncertaintyWeightType(isUDP)]; ok {
+		state.Uncertainty = value
+		found = true
+	}
+	return normalizeOnlineBanditState(state), found
+}
+
+func isLegacyBanditWeightKey(key string) bool {
+	return len(key) >= 7 && key[:7] == "bandit-"
+}
+
+func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditState {
+	if record == nil {
+		return defaultOnlineBanditState()
+	}
+	record.banditMu.RLock()
+	var state *OnlineBanditState
+	if isUDP {
+		state = record.banditUDP
+	} else {
+		state = record.banditTCP
+	}
+	if state == nil {
+		record.banditMu.RUnlock()
+		return defaultOnlineBanditState()
+	}
+	out := *state
+	record.banditMu.RUnlock()
+	return normalizeOnlineBanditState(out)
 }
 
 func SaveOnlineBanditState(record *AtomicStatsRecord, isUDP bool, state OnlineBanditState, uncertainty float64) {
 	if record == nil {
 		return
 	}
-	thetaKeys, precisionKeys := &banditThetaTCP, &banditPrecisionTCP
+	state.Uncertainty = clamp01(uncertainty)
+	state = normalizeOnlineBanditState(state)
+
+	record.banditMu.Lock()
 	if isUDP {
-		thetaKeys, precisionKeys = &banditThetaUDP, &banditPrecisionUDP
-	}
-	for i := 0; i < OnlineBanditDimension; i++ {
-		record.SetWeight((*thetaKeys)[i], state.Theta[i])
-		record.SetWeight((*precisionKeys)[i], state.Precision[i])
-	}
-	record.SetWeight(banditUpdatesKey(isUDP), state.Updates)
-	record.SetWeight(banditErrorKey(isUDP), state.ErrorEWMA)
-	record.SetWeight(banditEpochKey(isUDP), state.Epoch)
-	record.SetWeight(banditGenerationKey(isUDP), state.Generation)
-	record.SetWeight(BanditUncertaintyWeightType(isUDP), clamp01(uncertainty))
-}
-
-// ObserveEpoch retains useful cross-network prior knowledge while reopening
-// confidence after a handover. Full reset throws away too much; keeping the
-// old precision unchanged makes the learner stubborn on the new path.
-func (state *OnlineBanditState) softenForEnvironmentChange(thetaKeep, precisionKeep float64) {
-	for i := 0; i < OnlineBanditDimension; i++ {
-		state.Theta[i] *= thetaKeep
-		precision := state.Precision[i]
-		if precision < 1 {
-			precision = 1
+		if record.banditUDP == nil {
+			record.banditUDP = new(OnlineBanditState)
 		}
-		state.Precision[i] = 1 + (precision-1)*precisionKeep
-	}
-	if state.ErrorEWMA < 0.15 {
-		state.ErrorEWMA = 0.15
-	}
-}
-
-func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
-	if state == nil || epoch == 0 {
-		return
-	}
-
-	// A persisted learner belongs to a previous core lifetime even when both
-	// process-local network epochs happen to equal 1. Reopen confidence once on
-	// first use after restart, while preserving a small directional prior.
-	if state.Generation != processBanditGeneration {
-		if state.Updates > 0 {
-			state.softenForEnvironmentChange(0.20, 0.25)
+		*record.banditUDP = state
+	} else {
+		if record.banditTCP == nil {
+			record.banditTCP = new(OnlineBanditState)
 		}
-		state.Generation = processBanditGeneration
-		state.Epoch = float64(epoch)
-		return
+		*record.banditTCP = state
 	}
+	record.banditMu.Unlock()
 
-	if state.Epoch == 0 {
-		state.Epoch = float64(epoch)
-		return
+	if isUDP {
+		record.banditUncertaintyUDP.Store(state.Uncertainty)
+	} else {
+		record.banditUncertaintyTCP.Store(state.Uncertainty)
 	}
-	if uint64(state.Epoch) == epoch {
-		return
-	}
-
-	// A same-process handover is stronger evidence of context drift.
-	state.softenForEnvironmentChange(0.15, 0.20)
-	state.Epoch = float64(epoch)
 }
 
 func clamp01(v float64) float64 {
@@ -352,7 +383,9 @@ func (state *OnlineBanditState) Update(prior, reward float64, x [OnlineBanditDim
 	}
 	state.Updates += scale
 
-	return state.Predict(prior, x)
+	weight, uncertainty = state.Predict(prior, x)
+	state.Uncertainty = uncertainty
+	return weight, uncertainty
 }
 
 // ExplorationBonus applies a bounded UCB-style optimism term. Callers decide
