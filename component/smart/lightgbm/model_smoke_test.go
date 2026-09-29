@@ -79,6 +79,53 @@ func BenchmarkCurrentModelPredict(b *testing.B) {
 }
 
 
+func BenchmarkDistilledCurrentModelDecision(b *testing.B) {
+	m := loadExternalModel(b)
+	input := externalModelInput()
+	heuristic, ok := smart.CalculateWeight(input, 1)
+	if !ok && heuristic <= 0 {
+		b.Fatal("heuristic prior unavailable")
+	}
+	x := smart.OnlineBanditFeatures(input)
+	state := smart.OnlineBanditState{
+		Updates:        128,
+		Uncertainty:    0.10,
+		ErrorEWMA:      0.03,
+		TeacherRatio:   1.02,
+		TeacherAt:      128,
+		TeacherProbeAt: 128,
+	}
+	for i := range state.Precision {
+		state.Precision[i] = 32
+	}
+
+	teacherCalls := 0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		prior := state.ApplyTeacherAnchor(heuristic)
+		if smart.ShouldRefreshTeacher(input, 0.03, state) {
+			state.NoteTeacherAttempt()
+			modelWeight, predicted := m.PredictWeight(input, 1)
+			if predicted {
+				state.ObserveTeacher(modelWeight, heuristic)
+				prior = state.ApplyTeacherAnchor(heuristic)
+				teacherCalls++
+			}
+		}
+		weight, _ := state.Predict(prior, x)
+		if weight <= 0 {
+			b.Fatalf("distilled prediction failed: %v", weight)
+		}
+		state.Updates++
+	}
+	b.StopTimer()
+	if b.N > 0 {
+		b.ReportMetric(float64(teacherCalls)/float64(b.N), "teacher/decision")
+	}
+}
+
+
 func TestReloadModelKeepsUnusedModelLazy(t *testing.T) {
 	previous := smartModel
 	smartModel = &WeightModel{}
