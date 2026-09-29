@@ -32,9 +32,23 @@ type DataCollector struct {
 }
 
 const (
-	defaultSmartCollectorSize = 100 * 1024 * 1024
+	defaultSmartCollectorSize = 64 * 1024 * 1024
+	maxSmartCollectorSize     = 64 * 1024 * 1024
 	expectedColumns           = MaxFeatureSize + 10
 )
+
+func cleanupCollectorBackups(dataPath string) {
+	// Old versions used timestamped backups and could accumulate forever.
+	// Keep only the fixed single backup introduced by the bounded collector.
+	matches, _ := filepath.Glob(dataPath + ".bak.*")
+	for _, path := range matches {
+		_ = os.Remove(path)
+	}
+	backup := dataPath + ".bak"
+	if stat, err := os.Stat(backup); err == nil && stat.Size() > maxSmartCollectorSize {
+		_ = os.Remove(backup)
+	}
+}
 
 func InitCollector(collectSize float64) {
 	var smartCollectorSize int64
@@ -43,11 +57,18 @@ func InitCollector(collectSize float64) {
 	} else {
 		smartCollectorSize = defaultSmartCollectorSize
 	}
+	if smartCollectorSize > maxSmartCollectorSize {
+		smartCollectorSize = maxSmartCollectorSize
+	}
+	if smartCollectorSize < 1*1024*1024 {
+		smartCollectorSize = 1 * 1024 * 1024
+	}
 
 	collectMutex.Lock()
 	defer collectMutex.Unlock()
 
 	dataPath := filepath.Join(C.Path.HomeDir(), "smart_weight_data.csv")
+	cleanupCollectorBackups(dataPath)
 	if smartCollector == nil {
 		smartCollector = &DataCollector{
 			dataPath:           dataPath,
@@ -216,9 +237,14 @@ func (c *DataCollector) initializeWriter() error {
 	}
 
 	if needUpgrade {
-		backupPath := c.dataPath + ".bak." + time.Now().Format("20060102150405")
-		os.Rename(c.dataPath, backupPath)
-		log.Infoln("[Smart] Old CSV file does not contain hash columns, backup to %s and create new file", backupPath)
+		backupPath := c.dataPath + ".bak"
+		_ = os.Remove(backupPath)
+		if err := os.Rename(c.dataPath, backupPath); err != nil {
+			_ = os.Remove(c.dataPath)
+			log.Warnln("[Smart] Failed to retain incompatible collector backup: %v", err)
+		} else {
+			log.Infoln("[Smart] Replaced bounded collector backup at %s", backupPath)
+		}
 		fileExists = false
 	}
 
