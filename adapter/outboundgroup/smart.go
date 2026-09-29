@@ -2768,6 +2768,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
 				if s.expertBank != nil {
+					s.expertBank.ObserveTeacherRevision(s.weightModel.Revision())
 					s.expertBank.Distill(input, observedWeight, modelWeight)
 					if s.expertBank.TakeDirty(32) {
 						if err := s.store.SaveExpertBank(s.Name(), s.configName, s.expertBank); err != nil {
