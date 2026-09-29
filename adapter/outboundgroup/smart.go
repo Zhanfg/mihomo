@@ -2724,38 +2724,52 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	)
 	input.ConnectionFailed = err != nil
 
-	// The heuristic is always available as the zero-cost prior. Load the compact
-	// local student before consulting LightGBM: its uncertainty/drift now decides
-	// whether the heavy global teacher is worth invoking at all.
-	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
-	calculatedWeight = observedWeight
+	// Build the zero/low-cost prior first. The full expert ensemble and global
+	// LightGBM teacher are escalation layers, not mandatory hot-path work.
+	heuristicWeight, _ := smart.CalculateWeight(input, priorityFactor)
+	distilledWeight := smart.DistilledExpertPrior(input, priorityFactor)
+	samples := input.Success + input.Failure
+	calculatedWeight = smart.BlendHeuristicAndDistilled(heuristicWeight, distilledWeight, samples)
 	ModelPredicted = false
 	modelError := 0.0
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
 	banditState.ObserveEpoch(netstate.CurrentEpoch())
 
+	expertDisagreement := 0.0
+	if smart.ShouldConsultExpert(input, banditState) {
+		fullExpertWeight := smart.ExpertTeacherPrior(input, priorityFactor)
+		expertDisagreement = smart.ExpertDisagreement(distilledWeight, fullExpertWeight)
+		if fullExpertWeight > 0 {
+			// Full experts are a medium-cost teacher and also guard against a
+			// stale production calibration artifact. Keep the distilled prior
+			// in the blend so a single shadow check cannot jerk routing.
+			calculatedWeight = fullExpertWeight*0.55 + calculatedWeight*0.45
+		}
+	}
+
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
-		if smart.ShouldInvokeTeacher(
+		if smart.ShouldInvokeTeacherWithExperts(
 			input,
 			oldModelError,
 			banditState.Uncertainty,
 			banditState.ErrorEWMA,
 			banditState.Updates,
+			expertDisagreement,
 		) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
-			if predicted && observedWeight > 0 {
+			if predicted && calculatedWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
 				var newCalibration, newModelError float64
 				calculatedWeight, newCalibration, newModelError = smart.AdaptModelPredictionWithReliability(
 					modelWeight,
-					observedWeight,
+					calculatedWeight,
 					oldCalibration,
 					oldModelError,
-					input.Success+input.Failure,
+					samples,
 				)
 				atomicRecord.SetWeight(calKey, newCalibration)
 				atomicRecord.SetWeight(errKey, newModelError)
@@ -2765,8 +2779,9 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		}
 	}
 
-	// The global model/heuristic is the teacher prior. The compact local
-	// contextual student learns only the residual the global prior misses.
+	// The compact local contextual student personalizes the resulting global
+	// prior. It is the only learner updated from actual completed-connection
+	// reward, preventing expert/teacher self-confirmation.
 	teacherPrior := calculatedWeight
 	banditFeatures := smart.OnlineBanditFeatures(input)
 	if teacherPrior > 0 {
