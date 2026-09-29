@@ -30,6 +30,7 @@ const (
 	KeyTypeStats        = "stats"
 	KeyTypeRanking      = "ranking"
 	KeyTypeHostFailures = "failures"
+	KeyTypeExperts      = "experts"
 
 	WeightTypeTCP = "tcp"
 	WeightTypeUDP = "udp"
