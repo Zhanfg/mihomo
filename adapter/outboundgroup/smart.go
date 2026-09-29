@@ -2724,26 +2724,33 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	)
 	input.ConnectionFailed = err != nil
 
-	// The heuristic is the always-on online learner. The global LightGBM
-	// ensemble is an occasional expert: stable mature records do not pay for a
-	// full tree traversal on every sampled close.
-	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
-	calculatedWeight = observedWeight
+	// Hierarchical Smart inference:
+	//  1) cheap heuristic = always-on base prior,
+	//  2) LightGBM Teacher = sparse global refresh,
+	//  3) compact Student = every-connection local residual.
+	heuristicWeight, _ := smart.CalculateWeight(input, priorityFactor)
+	banditFeatures := smart.OnlineBanditFeatures(input)
+	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
+	banditState.ObserveEpoch(netstate.CurrentEpoch())
+
+	teacherPrior := banditState.ApplyTeacherAnchor(heuristicWeight)
+	calculatedWeight = teacherPrior
 	ModelPredicted = false
 	modelError := 0.0
+
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
-		if smart.ShouldInvokeModel(input, oldModelError) {
+
+		if smart.ShouldRefreshTeacher(input, oldModelError, banditState) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
-			if predicted && observedWeight > 0 {
+			if predicted && heuristicWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
-				var newCalibration, newModelError float64
-				calculatedWeight, newCalibration, newModelError = smart.AdaptModelPredictionWithReliability(
+				adaptedTeacher, newCalibration, newModelError := smart.AdaptModelPredictionWithReliability(
 					modelWeight,
-					observedWeight,
+					heuristicWeight,
 					oldCalibration,
 					oldModelError,
 					input.Success+input.Failure,
@@ -2751,17 +2758,16 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				atomicRecord.SetWeight(calKey, newCalibration)
 				atomicRecord.SetWeight(errKey, newModelError)
 				modelError = newModelError
+
+				// Distill the expensive global prediction into one bounded scalar
+				// anchor that remains useful between Teacher refreshes.
+				banditState.ObserveTeacher(adaptedTeacher, heuristicWeight)
+				teacherPrior = banditState.ApplyTeacherAnchor(heuristicWeight)
 				ModelPredicted = true
 			}
 		}
 	}
 
-	// The global model/heuristic is the teacher prior. The compact local
-	// contextual student learns only the residual the global prior misses.
-	teacherPrior := calculatedWeight
-	banditFeatures := smart.OnlineBanditFeatures(input)
-	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
-	banditState.ObserveEpoch(netstate.CurrentEpoch())
 	if teacherPrior > 0 {
 		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
 	}
