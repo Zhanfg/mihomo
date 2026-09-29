@@ -55,3 +55,50 @@ func FitProductionDistillationCalibration(samples []DistillProductionSample) [8]
 	}
 	return calibration
 }
+
+
+type DistilledArtifactManifest struct {
+	Version          string
+	Source           string
+	TrainingSamples  int
+	HoldoutSamples   int
+	MAE              float64
+	RMSE             float64
+	P95AbsoluteError float64
+	MeanRelative     float64
+	RankingAgreement float64
+	Fingerprint      string
+}
+
+func ValidateDistilledArtifactValues(coeff [8][ExpertFeatureDimension]float64, calibration [8]float64, manifest DistilledArtifactManifest) error {
+	if manifest.Version == "" {
+		return errors.New("empty distilled artifact version")
+	}
+	for bucket := 0; bucket < len(coeff); bucket++ {
+		for feature := 0; feature < ExpertFeatureDimension; feature++ {
+			value := coeff[bucket][feature]
+			if math.IsNaN(value) || math.IsInf(value, 0) || value < -1.25 || value > 1.25 {
+				return fmt.Errorf("invalid distilled coefficient bucket=%d feature=%d value=%v", bucket, feature, value)
+			}
+		}
+		scale := calibration[bucket]
+		if math.IsNaN(scale) || math.IsInf(scale, 0) || scale < 0.80 || scale > 1.20 {
+			return fmt.Errorf("invalid distilled calibration bucket=%d value=%v", bucket, scale)
+		}
+	}
+	if manifest.TrainingSamples < 0 || manifest.HoldoutSamples < 0 {
+		return errors.New("negative distilled sample count")
+	}
+	for name, value := range map[string]float64{
+		"mae": manifest.MAE,
+		"rmse": manifest.RMSE,
+		"p95": manifest.P95AbsoluteError,
+		"mean_relative": manifest.MeanRelative,
+		"ranking_agreement": manifest.RankingAgreement,
+	} {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+			return fmt.Errorf("invalid distilled manifest %s=%v", name, value)
+		}
+	}
+	return nil
+}
