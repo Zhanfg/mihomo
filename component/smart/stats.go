@@ -639,6 +639,10 @@ func (h *nodeWeightMinHeap) Pop() any {
 }
 
 func (s *Store) rankTargetStats(group, config, target string, stats map[string][]byte, isUDP bool, limit int, now int64) []NodeWithWeight {
+	return s.rankTargetStatsWithExploration(group, config, target, stats, isUDP, limit, now, 0)
+}
+
+func (s *Store) rankTargetStatsWithExploration(group, config, target string, stats map[string][]byte, isUDP bool, limit int, now int64, explorationAlpha float64) []NodeWithWeight {
 	if len(stats) == 0 {
 		return nil
 	}
@@ -659,6 +663,7 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 	}
 	for nodeName, data := range stats {
 		weight := 0.0
+		uncertainty := 0.0
 		lastUsed := int64(0)
 
 		// The live AtomicStatsRecord is already the source that recordConnectionStats
@@ -670,6 +675,7 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 			cacheKey := FormatDBKey(KeyTypeStats, config, group, target, nodeName)
 			if record, ok := liveCache.Get(cacheKey); ok && record != nil {
 				weight = record.GetWeight(weightType)
+				uncertainty = record.GetWeight(BanditUncertaintyWeightType(isUDP))
 				lastUsed = record.lastUsed.Load()
 			} else {
 				var record StatsRecord
@@ -677,6 +683,7 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 					continue
 				}
 				weight = record.Weights[weightType]
+				uncertainty = record.Weights[BanditUncertaintyWeightType(isUDP)]
 				lastUsed = record.LastUsed
 			}
 		} else {
@@ -685,12 +692,14 @@ func (s *Store) rankTargetStats(group, config, target string, stats map[string][
 				continue
 			}
 			weight = record.Weights[weightType]
+			uncertainty = record.Weights[BanditUncertaintyWeightType(isUDP)]
 			lastUsed = record.LastUsed
 		}
 
 		if weight <= 0 {
 			continue
 		}
+		weight = ExplorationBonus(weight, uncertainty, explorationAlpha)
 		weight *= GetTimeDecayWithCache(lastUsed, now, 0.4)
 		candidate := NodeWithWeight{Node: nodeName, Weight: weight}
 
@@ -735,6 +744,10 @@ func bestProxySlices(nodeList []NodeWithWeight) ([]string, []float64, error) {
 // requested target and keeps a bounded top-K heap, so one connection does not
 // deserialize every target in the Smart database.
 func (s *Store) GetBestProxyForTargetLimit(group, config, target string, isUDP bool, limit int) ([]string, []float64, error) {
+	return s.GetBestProxyForTargetLimitExplore(group, config, target, isUDP, limit, 0)
+}
+
+func (s *Store) GetBestProxyForTargetLimitExplore(group, config, target string, isUDP bool, limit int, explorationAlpha float64) ([]string, []float64, error) {
 	if target == "" {
 		return nil, nil, errors.New("empty target")
 	}
@@ -742,7 +755,7 @@ func (s *Store) GetBestProxyForTargetLimit(group, config, target string, isUDP b
 	if err != nil {
 		return nil, nil, err
 	}
-	return bestProxySlices(s.rankTargetStats(group, config, target, stats, isUDP, limit, time.Now().Unix()))
+	return bestProxySlices(s.rankTargetStatsWithExploration(group, config, target, stats, isUDP, limit, time.Now().Unix(), explorationAlpha))
 }
 
 // 获取目标的最佳代理
