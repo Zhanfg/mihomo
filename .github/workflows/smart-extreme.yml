@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - opt/smart-expert-v8
+      - opt/smart-production-v9
     paths:
       - ".github/workflows/smart-extreme.yml"
       - "adapter/outboundgroup/**"
