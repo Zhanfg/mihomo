@@ -1482,7 +1482,7 @@ func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
 	return known && !ok
 }
 
-func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool) []C.Proxy {
+func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, explorationAlpha float64) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
@@ -1578,6 +1578,10 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		}
 
 		_, fit := countryFit(proxy)
+		if explorationAlpha > 0 {
+			uncertainty := s.store.LiveBanditUncertainty(s.Name(), s.configName, metadata.SmartTarget, name, isUDP)
+			w = smart.ExplorationBonus(w, uncertainty, explorationAlpha)
+		}
 		effectiveWeight := adjustedGreedyWeight(w, fit, adapter.TunnelPathAssessmentForProxy(proxy))
 		insertAt := len(selectedWeights)
 		for j := range selectedWeights {
@@ -1846,18 +1850,15 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 	selectionLimit, explorationAlpha := s.currentGreedyPolicy(proxies)
 
-	// use prefetch cache or compute in real time. Prefetch contains exploitation
-	// scores; when bounded exploration is allowed, refresh from live stats so
-	// uncertainty can influence only the current decision rather than polluting
-	// the persisted prefetch order.
+	// Prefetch remains the exploitation baseline. Contextual exploration is
+	// applied later only to the bounded shortlist using resident uncertainty,
+	// so "smarter" selection does not turn into repeated DB/full-rank work.
 	computeFreshNodes := func(isUDP bool) ([]string, []float64) {
-		if explorationAlpha == 0 {
-			if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
-				return proxiesName, weights
-			}
+		if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
+			return proxiesName, weights
 		}
-		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimitExplore(
-			s.Name(), s.configName, metadata.SmartTarget, isUDP, selectionLimit, explorationAlpha,
+		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimit(
+			s.Name(), s.configName, metadata.SmartTarget, isUDP, selectionLimit,
 		); err == nil && len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
@@ -1867,7 +1868,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	computeFreshSingleFlight := func(isUDP bool) ([]string, []float64) {
 		// The budget is part of the key: a healthy K=5 computation must not be
 		// shared with a concurrent handover/failure request that requires K=10.
-		sfKey := fmt.Sprintf("%s|%v|%d|%.3f", metadata.SmartTarget, isUDP, selectionLimit, explorationAlpha)
+		sfKey := fmt.Sprintf("%s|%v|%d", metadata.SmartTarget, isUDP, selectionLimit)
 		res, _, _ := s.freshNodesGroup.Do(sfKey, func() (nodeResult, error) {
 			names, weights := computeFreshNodes(isUDP)
 			return nodeResult{names: names, weights: weights}, nil
@@ -1971,7 +1972,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		pinned = false
 	}
 
-	return s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, selectionLimit, isUDP), pinned
+	return s.filterProxies(metadata, wildcardTarget, resultNames, resultWeights, proxies, selectionLimit, isUDP, explorationAlpha), pinned
 }
 
 func (s *Smart) InitSmart() {
