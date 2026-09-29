@@ -103,6 +103,7 @@ func TestExpertPersistenceGenerationDoesNotLoseConcurrentUpdate(t *testing.T) {
 
 func TestExpertTeacherCadenceTransitions(t *testing.T) {
 	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
 	input := expertTestInput(0, false)
 	input.Success = 12
 	if !bank.NeedsTeacher(input, 0, false) {
@@ -150,5 +151,60 @@ func BenchmarkDistilledExpertUpdate(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		bank.Distill(input, 0.7, teacher)
+	}
+}
+
+
+func TestExpertBankTeacherRevisionReopensConfidence(t *testing.T) {
+	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
+	input := expertTestInput(0, false)
+	prior := 0.7
+	for i := 0; i < 400; i++ {
+		bank.Distill(input, prior, syntheticTeacher(prior, OnlineBanditFeatures(input)))
+	}
+	_, confidenceBefore, readyBefore := bank.Predict(input, prior)
+	if !readyBefore || confidenceBefore < 0.45 {
+		t.Fatalf("expert did not mature before revision change: ready=%v conf=%v", readyBefore, confidenceBefore)
+	}
+
+	before := bank.Snapshot()
+	bank.ObserveTeacherRevision("teacher-v2")
+	after := bank.Snapshot()
+	if after.TeacherRevision != "teacher-v2" {
+		t.Fatalf("teacher revision not updated: %q", after.TeacherRevision)
+	}
+	idx := expertIndex(input)
+	if after.Experts[idx].Distilled != 0 {
+		t.Fatalf("expert did not reopen distillation after teacher change: %d", after.Experts[idx].Distilled)
+	}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		if math.Abs(after.Experts[idx].Theta[i]) > math.Abs(before.Experts[idx].Theta[i])*0.21+1e-12 {
+			t.Fatalf("expert theta was not softened at dim %d", i)
+		}
+	}
+	if !bank.NeedsTeacher(input, 0, false) {
+		t.Fatal("teacher revision change did not force re-distillation")
+	}
+}
+
+func TestExpertSnapshotRoundTripKeepsTeacherRevisionUnverified(t *testing.T) {
+	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
+	input := expertTestInput(0, false)
+	for i := 0; i < 100; i++ {
+		bank.Distill(input, 0.7, 0.8)
+	}
+	data, err := bank.MarshalBounded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded := LoadExpertBank(data)
+	if loaded.Snapshot().TeacherRevision != "teacher-v1" {
+		t.Fatal("teacher revision lost across snapshot")
+	}
+	// Restarted process must verify the current on-disk teacher at least once.
+	if !loaded.NeedsTeacher(input, 0.9, true) {
+		t.Fatal("reloaded expert bank suppressed teacher before revision verification")
 	}
 }
