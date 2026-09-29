@@ -1844,14 +1844,21 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 		// normal Smart selection and let empty-fallback define the outcome.
 	}
 
-	selectionLimit := s.currentGreedyBudget(proxies)
+	selectionLimit, explorationAlpha := s.currentGreedyPolicy(proxies)
 
-	// use prefetch cache or compute in real time
+	// use prefetch cache or compute in real time. Prefetch contains exploitation
+	// scores; when bounded exploration is allowed, refresh from live stats so
+	// uncertainty can influence only the current decision rather than polluting
+	// the persisted prefetch order.
 	computeFreshNodes := func(isUDP bool) ([]string, []float64) {
-		if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
-			return proxiesName, weights
+		if explorationAlpha == 0 {
+			if proxiesName, weights := s.store.GetPrefetchResult(s.Name(), s.configName, metadata.SmartTarget, isUDP); len(proxiesName) > 0 {
+				return proxiesName, weights
+			}
 		}
-		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimit(s.Name(), s.configName, metadata.SmartTarget, isUDP, selectionLimit); err == nil && len(proxiesName) > 0 {
+		if proxiesName, weights, err := s.store.GetBestProxyForTargetLimitExplore(
+			s.Name(), s.configName, metadata.SmartTarget, isUDP, selectionLimit, explorationAlpha,
+		); err == nil && len(proxiesName) > 0 {
 			return proxiesName, weights
 		}
 		return nil, nil
@@ -1860,7 +1867,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 	computeFreshSingleFlight := func(isUDP bool) ([]string, []float64) {
 		// The budget is part of the key: a healthy K=5 computation must not be
 		// shared with a concurrent handover/failure request that requires K=10.
-		sfKey := fmt.Sprintf("%s|%v|%d", metadata.SmartTarget, isUDP, selectionLimit)
+		sfKey := fmt.Sprintf("%s|%v|%d|%.3f", metadata.SmartTarget, isUDP, selectionLimit, explorationAlpha)
 		res, _, _ := s.freshNodesGroup.Do(sfKey, func() (nodeResult, error) {
 			names, weights := computeFreshNodes(isUDP)
 			return nodeResult{names: names, weights: weights}, nil
