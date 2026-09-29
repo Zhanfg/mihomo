@@ -331,7 +331,10 @@ func (state *OnlineBanditState) NoteTeacherAttempt() {
 	if state == nil {
 		return
 	}
-	state.TeacherProbeAt = state.Updates + 1
+	// The attempt happens before this connection's local Student update. Mark
+	// the current completed-evidence count so "retry after four updates" means
+	// exactly four new observations, not five.
+	state.TeacherProbeAt = state.Updates
 }
 
 // ShouldRefreshTeacher makes the expensive ensemble demand-driven. A fresh or
