@@ -25,7 +25,7 @@ func (s *Store) SaveExpertBank(group, config string, bank *ExpertBank) error {
 		bank.MarkClean()
 		return nil
 	}
-	data, err := bank.MarshalBounded()
+	data, generation, err := bank.marshalForPersist()
 	if err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func (s *Store) SaveExpertBank(group, config string, bank *ExpertBank) error {
 	if err := s.DBBatchPutItem(expertBankKey(config, group), data); err != nil {
 		return err
 	}
-	bank.MarkClean()
+	bank.markPersisted(generation)
 	return nil
 }
 
