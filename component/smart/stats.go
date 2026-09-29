@@ -362,7 +362,9 @@ func (record *AtomicStatsRecord) CreateStatsSnapshot(cacheKey string) *StatsReco
 		BanditUDP:          record.snapshotBanditState(true),
 	}
 
-	recordCache.Set(cacheKey, record)
+	if cacheReady.Load() && recordCache != nil {
+		recordCache.Set(cacheKey, record)
+	}
 
 	return snapshot
 }
