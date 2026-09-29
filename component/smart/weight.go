@@ -332,8 +332,9 @@ func CalculateWeight(input *ModelInput, priorityFactor float64) (float64, bool) 
 	historyConnectionDuration := input.HistoryConnectionDuration
 	lastConnectTimestamp := input.LastUsed
 	
-	// 2. 检查样本数量
-	total := success + failure
+	// 2. 检查样本数量. Persisted/corrupted counters must not wrap the
+	// scorer back into a cold-start path at int64 extremes.
+	total := SampleCount(success, failure)
 	if total < DefaultMinSampleCount {
 		return 0, false
 	}
