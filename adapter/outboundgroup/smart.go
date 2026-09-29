@@ -2112,6 +2112,9 @@ func (s *Smart) cleanupOrphanedGroups() {
 	if len(orphanedGroups) > 0 {
 		for _, group := range orphanedGroups {
 			log.Debugln("[Smart] Cleaning up cache data for non-existent policy group [%s]", group)
+			if err := s.store.DeleteExpertBank(group, s.configName); err != nil {
+				log.Debugln("[Smart] Failed to clean up distilled expert bank for [%s]: %v", group, err)
+			}
 			err := s.store.FlushByGroup(group, s.configName)
 			if err != nil {
 				log.Warnln("[Smart] Failed to clean up policy group [%s] cache: %v", group, err)
