@@ -2724,18 +2724,27 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	)
 	input.ConnectionFailed = err != nil
 
-	// The heuristic is the always-on online learner. The global LightGBM
-	// ensemble is an occasional expert: stable mature records do not pay for a
-	// full tree traversal on every sampled close.
+	// The heuristic is always available as the zero-cost prior. Load the compact
+	// local student before consulting LightGBM: its uncertainty/drift now decides
+	// whether the heavy global teacher is worth invoking at all.
 	observedWeight, _ := smart.CalculateWeight(input, priorityFactor)
 	calculatedWeight = observedWeight
 	ModelPredicted = false
 	modelError := 0.0
+	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
+	banditState.ObserveEpoch(netstate.CurrentEpoch())
+
 	if s.useLightGBM && s.weightModel != nil {
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
-		if smart.ShouldInvokeModel(input, oldModelError) {
+		if smart.ShouldInvokeTeacher(
+			input,
+			oldModelError,
+			banditState.Uncertainty,
+			banditState.ErrorEWMA,
+			banditState.Updates,
+		) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
 				calKey := smart.ModelCalibrationWeightType(isUDP)
@@ -2760,8 +2769,6 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// contextual student learns only the residual the global prior misses.
 	teacherPrior := calculatedWeight
 	banditFeatures := smart.OnlineBanditFeatures(input)
-	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
-	banditState.ObserveEpoch(netstate.CurrentEpoch())
 	if teacherPrior > 0 {
 		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
 	}
