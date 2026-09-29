@@ -183,22 +183,22 @@ func (state *OnlineBanditState) Predict(prior float64, x [OnlineBanditDimension]
 	return weight, uncertainty
 }
 
-// ObserveConnectionReward is the bandit's ground truth. It uses only this
-// completed connection, never the student's own previous prediction.
-func ObserveConnectionReward(input *ModelInput, priorityFactor float64) float64 {
-	if input == nil || priorityFactor <= 0 {
+// ObserveConnectionRewardMetrics is the bandit's ground truth. Every signal
+// comes from this completed connection, never from historical EMA fields and
+// never from the student's own previous prediction.
+func ObserveConnectionRewardMetrics(connectTime, latency int64, maxUploadRateKB, maxDownloadRateKB, lossRate float64, failed bool, priorityFactor float64) float64 {
+	if priorityFactor <= 0 {
 		return 0
 	}
-	if input.ConnectionFailed {
+	if failed {
 		return 0.03 * priorityFactor
 	}
 
-	connectQ := banditQualityFromDelay(input.ConnectTime)
-	latencyQ := banditQualityFromDelay(input.Latency)
-	loss := math.Max(input.LossRate, input.EmaLossRate)
-	lossQ := clamp01(math.Exp(-loss * 14))
+	connectQ := banditQualityFromDelay(connectTime)
+	latencyQ := banditQualityFromDelay(latency)
+	lossQ := clamp01(math.Exp(-math.Max(0, lossRate) * 14))
 
-	rate := math.Max(input.MaxuploadRate, input.MaxdownloadRate)
+	rate := math.Max(maxUploadRateKB, maxDownloadRateKB)
 	rateQ := 0.0
 	if rate > 0 {
 		// 8 MiB/s in the existing KB/s feature scale is already "very good";
@@ -208,6 +208,19 @@ func ObserveConnectionReward(input *ModelInput, priorityFactor float64) float64 
 
 	reward := 0.45 + 0.18*connectQ + 0.22*latencyQ + 0.12*lossQ + 0.03*rateQ
 	return math.Max(0.03, math.Min(1.20, reward)) * priorityFactor
+}
+
+// ObserveConnectionReward remains a convenience wrapper for tests/tools whose
+// ModelInput fields are known to represent one connection.
+func ObserveConnectionReward(input *ModelInput, priorityFactor float64) float64 {
+	if input == nil {
+		return 0
+	}
+	return ObserveConnectionRewardMetrics(
+		input.ConnectTime, input.Latency,
+		input.MaxuploadRate, input.MaxdownloadRate,
+		input.LossRate, input.ConnectionFailed, priorityFactor,
+	)
 }
 
 // Update learns a bounded log-residual around prior using diagonal recursive
