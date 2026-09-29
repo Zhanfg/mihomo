@@ -9,6 +9,7 @@ on:
       - opt/smart-greedy-v4
       - opt/smart-learning-v5
       - opt/smart-runtime-v6
+      - opt/smart-model-v7
     paths:
       - ".github/workflows/smart-link-ab.yml"
       - "adapter/outboundgroup/**"
