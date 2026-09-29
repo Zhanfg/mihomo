@@ -34,6 +34,24 @@ var expertSceneGates = [4][expertCount]float64{
 
 var expertUDPMultipliers = [expertCount]float64{1.15, 1.20, 0.80, 0.95}
 
+
+var (
+	analyticDistilledFallback = CompileExpertDistillation()
+	distilledArtifactValid    = ValidateDistilledArtifactValues(
+		distilledExpertCoefficients,
+		distilledExpertCalibration,
+		distilledExpertManifest,
+	) == nil
+)
+
+func DistilledArtifactValid() bool {
+	return distilledArtifactValid
+}
+
+func DistilledArtifactManifestInfo() DistilledArtifactManifest {
+	return distilledExpertManifest
+}
+
 func expertRateQuality(input *ModelInput) float64 {
 	if input == nil {
 		return 0
@@ -148,9 +166,15 @@ func distilledExpertPrior(input *ModelInput, priorityFactor float64, applyProduc
 		bucket = 0
 	}
 	x := ExpertFeatures(input)
-	score := dotExpert(distilledExpertCoefficients[bucket], x)
+	coeff := distilledExpertCoefficients[bucket]
+	scale := distilledExpertCalibration[bucket]
+	if !distilledArtifactValid {
+		coeff = analyticDistilledFallback[bucket]
+		scale = 1
+	}
+	score := dotExpert(coeff, x)
 	if applyProductionCalibration {
-		score *= distilledExpertCalibration[bucket]
+		score *= scale
 	}
 	score = math.Max(0.03, math.Min(1.20, score))
 	return score * priorityFactor
