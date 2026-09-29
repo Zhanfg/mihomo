@@ -33,7 +33,7 @@ type DataCollector struct {
 
 const (
 	defaultSmartCollectorSize = 100 * 1024 * 1024
-	expectedColumns           = MaxFeatureSize + 10
+	expectedColumns           = MaxFeatureSize + 12
 )
 
 func InitCollector(collectSize float64) {
@@ -148,6 +148,8 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 	sample := make([]string, 0, expectedColumns)
 	sample = append(sample, featureStrings...)
 	sample = append(sample,
+		strconv.FormatFloat(input.EmaLossRate, 'f', 8, 64),
+		strconv.FormatBool(input.ConnectionFailed),
 		input.GroupName,
 		input.NodeName,
 		dstASN,
@@ -201,15 +203,21 @@ func (c *DataCollector) initializeWriter() error {
 			reader := csv.NewReader(f)
 			headers, err := reader.Read()
 			if err == nil {
-				hasMax := false
+				required := map[string]bool{
+					"cumul_loss_rate":   false,
+					"ema_loss_rate":     false,
+					"connection_failed": false,
+				}
 				for _, h := range headers {
-					if h == "cumul_loss_rate" {
-						hasMax = true
-						break
+					if _, ok := required[h]; ok {
+						required[h] = true
 					}
 				}
-				if !hasMax {
-					needUpgrade = true
+				for _, present := range required {
+					if !present {
+						needUpgrade = true
+						break
+					}
 				}
 			}
 		}
@@ -275,6 +283,7 @@ func (c *DataCollector) initializeWriter() error {
 			"port_feature",
 			"traffic_ratio", "traffic_density", "connection_type_feature",
 			"asn_hash", "host_hash", "ip_hash", "geoip_hash",
+			"ema_loss_rate", "connection_failed",
 			"group_name", "node_name",
 			"asn_raw", "host_raw", "ip_raw", "port_raw", "geoip_raw",
 			"weight", "weight_source", "timestamp",
