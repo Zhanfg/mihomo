@@ -132,3 +132,30 @@ func TestAutoIPFamilyMismatchFromSnapshot(t *testing.T) {
 		t.Fatal("unknown IPv6 capability must preserve availability")
 	}
 }
+
+
+func TestGreedyExplorationAlpha(t *testing.T) {
+	tests := []struct {
+		name          string
+		condition     linkprofile.Condition
+		epochChanged  bool
+		recentFailure bool
+		want          float64
+	}{
+		{"healthy", linkprofile.ConditionHealthy, false, false, 0.06},
+		{"constrained", linkprofile.ConditionConstrained, false, false, 0.02},
+		{"unknown", linkprofile.ConditionUnknown, false, false, 0.03},
+		{"weak", linkprofile.ConditionWeak, false, false, 0},
+		{"unstable", linkprofile.ConditionUnstable, false, false, 0},
+		{"handover", linkprofile.ConditionHealthy, true, false, 0},
+		{"recent failure", linkprofile.ConditionHealthy, false, true, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := greedyExplorationAlpha(linkprofile.Assessment{Condition: tc.condition}, tc.epochChanged, tc.recentFailure)
+			if math.Abs(got-tc.want) > 1e-12 {
+				t.Fatalf("alpha=%v want=%v", got, tc.want)
+			}
+		})
+	}
+}
