@@ -13,6 +13,33 @@ import (
 	"github.com/metacubex/mihomo/component/smart"
 )
 
+const (
+	maxDistillSamplesPerBucket = 4096
+	maxDistillSamples           = maxDistillSamplesPerBucket * 8
+	maxDistillInputBytes  int64 = 256 << 20
+)
+
+type distillReservoir struct {
+	samples []smart.DistillProductionSample
+	seen    uint64
+	rng     uint64
+}
+
+func (r *distillReservoir) add(sample smart.DistillProductionSample) {
+	r.seen++
+	if len(r.samples) < maxDistillSamplesPerBucket {
+		r.samples = append(r.samples, sample)
+		return
+	}
+	// Deterministic LCG keeps compiler output reproducible while retaining the
+	// bounded-memory property of reservoir sampling.
+	r.rng = r.rng*6364136223846793005 + 1442695040888963407
+	j := r.rng % r.seen
+	if j < uint64(len(r.samples)) {
+		r.samples[j] = sample
+	}
+}
+
 func parseFloat(row []string, index map[string]int, key string) float64 {
 	i, ok := index[key]
 	if !ok || i < 0 || i >= len(row) {
@@ -35,6 +62,10 @@ func loadSamples(path string) ([]smart.DistillProductionSample, error) {
 	if path == "" {
 		return nil, nil
 	}
+	if stat, err := os.Stat(path); err == nil && stat.Size() > maxDistillInputBytes {
+		return nil, fmt.Errorf("distillation input exceeds hard limit: %d > %d bytes", stat.Size(), maxDistillInputBytes)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -51,7 +82,12 @@ func loadSamples(path string) ([]smart.DistillProductionSample, error) {
 		index[h] = i
 	}
 
-	var out []smart.DistillProductionSample
+	var buckets [8]distillReservoir
+	for i := range buckets {
+		buckets[i].samples = make([]smart.DistillProductionSample, 0, maxDistillSamplesPerBucket)
+		buckets[i].rng = uint64(i + 1)
+	}
+
 	for {
 		row, err := r.Read()
 		if err != nil {
@@ -80,11 +116,21 @@ func loadSamples(path string) ([]smart.DistillProductionSample, error) {
 		}
 		input.IsUDP = parseFloat(row, index, "is_udp") >= 0.5
 		input.IsTCP = parseFloat(row, index, "is_tcp") >= 0.5
-		weight := parseFloat(row, index, "weight")
-		teacherWeight := parseFloat(row, index, "teacher_weight")
-		out = append(out, smart.DistillProductionSample{
-			Input: input, ActualWeight: weight, TeacherWeight: teacherWeight,
-		})
+		sample := smart.DistillProductionSample{
+			Input:         input,
+			ActualWeight:  parseFloat(row, index, "weight"),
+			TeacherWeight: parseFloat(row, index, "teacher_weight"),
+		}
+		bucket := smart.DistilledExpertBucket(&input)
+		if bucket < 0 || bucket >= len(buckets) {
+			bucket = 0
+		}
+		buckets[bucket].add(sample)
+	}
+
+	out := make([]smart.DistillProductionSample, 0, maxDistillSamples)
+	for i := range buckets {
+		out = append(out, buckets[i].samples...)
 	}
 	return out, nil
 }
