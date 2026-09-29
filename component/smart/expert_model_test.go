@@ -25,8 +25,12 @@ func expertTestInput(scene sceneKind, udp bool) *ModelInput {
 		in.DownloadTotal = 1
 		in.Latency = 60
 	case sceneStreaming:
+		// Keep both TCP and UDP out of the interactive classifier while still
+		// satisfying the streaming throughput/ratio rules.
 		in.ConnectionDuration = 12
+		in.UploadTotal = 0.05
 		in.DownloadTotal = 80
+		in.MaxuploadRate = 300
 		in.MaxdownloadRate = 6000
 	case sceneTransfer:
 		in.ConnectionDuration = 4
