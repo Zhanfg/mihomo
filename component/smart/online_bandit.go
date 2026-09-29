@@ -223,6 +223,56 @@ func SaveOnlineBanditState(record *AtomicStatsRecord, isUDP bool, state OnlineBa
 	}
 }
 
+func (state *OnlineBanditState) softenForEnvironmentChange(thetaKeep, precisionKeep float64) {
+	if state == nil {
+		return
+	}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] *= thetaKeep
+		precision := state.Precision[i]
+		if precision < 1 {
+			precision = 1
+		}
+		state.Precision[i] = 1 + (precision-1)*precisionKeep
+	}
+	if state.ErrorEWMA < 0.15 {
+		state.ErrorEWMA = 0.15
+	}
+	// Recompute on the next prediction from the reopened precision rather than
+	// carrying a stale "certain" scalar into the selector.
+	state.Uncertainty = 1
+}
+
+func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
+	if state == nil || epoch == 0 {
+		return
+	}
+
+	// A persisted learner belongs to a previous core lifetime even when both
+	// process-local network epochs happen to equal 1. Reopen confidence once on
+	// first use after restart, while preserving a small directional prior.
+	if state.Generation != processBanditGeneration {
+		if state.Updates > 0 {
+			state.softenForEnvironmentChange(0.20, 0.25)
+		}
+		state.Generation = processBanditGeneration
+		state.Epoch = float64(epoch)
+		return
+	}
+
+	if state.Epoch == 0 {
+		state.Epoch = float64(epoch)
+		return
+	}
+	if uint64(state.Epoch) == epoch {
+		return
+	}
+
+	// A same-process handover is stronger evidence of context drift.
+	state.softenForEnvironmentChange(0.15, 0.20)
+	state.Epoch = float64(epoch)
+}
+
 func clamp01(v float64) float64 {
 	if v < 0 || math.IsNaN(v) {
 		return 0
