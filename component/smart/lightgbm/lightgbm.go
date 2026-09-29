@@ -697,13 +697,8 @@ func GetModelDownloadURL() string {
 	return "https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin"
 }
 
-func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor float64) (weight float64, predicted bool) {
-	if m == nil {
-		return smart.CalculateWeight(input, priorityFactor)
-	}
-
-	total := smart.SampleCount(input.Success, input.Failure)
-	if total < smart.DefaultMinSampleCount {
+func (m *WeightModel) predictPreparedFeaturesOwned(features []float64, priorityFactor float64) (weight float64, predicted bool) {
+	if m == nil || len(features) != MaxFeatureSize {
 		return 0, false
 	}
 
@@ -716,12 +711,54 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 	}
 	m.mutex.RUnlock()
 
-	if model == nil {
-		ensureModelAsync(m)
+	if model == nil || !compatible {
+		return 0, false
+	}
+	if transforms != nil && transforms.TransformsEnabled && !transforms.ApplyTransformsInPlace(features) {
+		return 0, false
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorln("[Smart] Model prediction panic: %v", r)
+			weight, predicted = 0, false
+		}
+	}()
+
+	prediction := model.PredictSingle(features, 0)
+	if math.IsNaN(prediction) || math.IsInf(prediction, 0) || prediction <= 0 {
+		return 0, false
+	}
+	return prediction * priorityFactor, true
+}
+
+// PredictFeatureVector is the offline/diagnostic path for an already prepared
+// 30-dimensional feature vector, such as one emitted by smart_weight_data.csv.
+// The input is copied because transforms are applied in-place.
+func (m *WeightModel) PredictFeatureVector(features []float64, priorityFactor float64) (float64, bool) {
+	if len(features) != MaxFeatureSize {
+		return 0, false
+	}
+	bufAny := transformPool.Get()
+	buf, ok := bufAny.([]float64)
+	if !ok || cap(buf) < MaxFeatureSize {
+		buf = make([]float64, MaxFeatureSize)
+	} else {
+		buf = buf[:MaxFeatureSize]
+	}
+	copy(buf, features)
+	defer transformPool.Put(buf)
+	return m.predictPreparedFeaturesOwned(buf, priorityFactor)
+}
+
+func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor float64) (weight float64, predicted bool) {
+	if m == nil || input == nil {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-	if !compatible {
-		return smart.CalculateWeight(input, priorityFactor)
+
+	total := smart.SampleCount(input.Success, input.Failure)
+	if total < smart.DefaultMinSampleCount {
+		return 0, false
 	}
 
 	bufAny := transformPool.Get()
@@ -734,25 +771,13 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 	defer transformPool.Put(buf)
 
 	features := prepareFeaturesInto(input, buf[:0])
-	if len(features) == 0 {
+	if len(features) != MaxFeatureSize {
 		return smart.CalculateWeight(input, priorityFactor)
 	}
-	if transforms != nil && transforms.TransformsEnabled && !transforms.ApplyTransformsInPlace(features) {
-		return smart.CalculateWeight(input, priorityFactor)
+	if weight, predicted = m.predictPreparedFeaturesOwned(features, priorityFactor); predicted {
+		return weight, true
 	}
-
-	defer func() {
-		if r := recover(); r != nil {
-			log.Errorln("[Smart] Model prediction panic: %v", r)
-			weight, predicted = smart.CalculateWeight(input, priorityFactor)
-		}
-	}()
-
-	prediction := model.PredictSingle(features, 0)
-	if math.IsNaN(prediction) || math.IsInf(prediction, 0) || prediction <= 0 {
-		return smart.CalculateWeight(input, priorityFactor)
-	}
-	return prediction * priorityFactor, true
+	return smart.CalculateWeight(input, priorityFactor)
 }
 
 func hashStringToFloat(s string, buckets int) float64 {
