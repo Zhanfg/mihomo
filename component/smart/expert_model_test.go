@@ -37,19 +37,42 @@ func expertTestInput(scene sceneKind, udp bool) *ModelInput {
 	return in
 }
 
-func TestDistilledExpertMatchesFullEnsemble(t *testing.T) {
-	if err := DistillationCoefficientError(); err > 1e-7 {
-		t.Fatalf("distilled coefficient drift=%g", err)
+func TestDistilledExpertArtifactSemantics(t *testing.T) {
+	if err := ValidateDistilledArtifactValues(
+		distilledExpertCoefficients,
+		distilledExpertCalibration,
+		distilledExpertManifest,
+	); err != nil {
+		t.Fatalf("invalid artifact: %v", err)
 	}
-	for scene := sceneWeb; scene <= sceneTransfer; scene++ {
-		for _, udp := range []bool{false, true} {
-			input := expertTestInput(scene, udp)
-			full := ExpertTeacherPrior(input, 1)
-			distilled := DistilledExpertPrior(input, 1)
-			if rel := ExpertDisagreement(full, distilled); rel > 1e-7 {
-				t.Fatalf("scene=%v udp=%v full=%v distilled=%v disagreement=%g", scene, udp, full, distilled, rel)
+
+	if distilledExpertManifest.Source == "analytic" {
+		if err := DistillationCoefficientError(); err > 1e-7 {
+			t.Fatalf("analytic distilled coefficient drift=%g", err)
+		}
+		for scene := sceneWeb; scene <= sceneTransfer; scene++ {
+			for _, udp := range []bool{false, true} {
+				input := expertTestInput(scene, udp)
+				full := ExpertTeacherPrior(input, 1)
+				distilled := DistilledExpertPrior(input, 1)
+				if rel := ExpertDisagreement(full, distilled); rel > 1e-7 {
+					t.Fatalf("scene=%v udp=%v full=%v distilled=%v disagreement=%g", scene, udp, full, distilled, rel)
+				}
 			}
 		}
+		return
+	}
+
+	if err := ValidateDistillQuality(DistillMetrics{
+		TrainingSamples:   distilledExpertManifest.TrainingSamples,
+		HoldoutSamples:    distilledExpertManifest.HoldoutSamples,
+		MeanAbsoluteError: distilledExpertManifest.MAE,
+		RMSE:              distilledExpertManifest.RMSE,
+		P95AbsoluteError:  distilledExpertManifest.P95AbsoluteError,
+		MeanRelativeError: distilledExpertManifest.MeanRelative,
+		RankingAgreement:  distilledExpertManifest.RankingAgreement,
+	}, DefaultDistillQualityPolicy()); err != nil {
+		t.Fatalf("production distilled artifact failed committed quality gate: %v", err)
 	}
 }
 
