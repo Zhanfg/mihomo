@@ -444,6 +444,14 @@ type WeightModel struct {
 	mutex              sync.RWMutex
 }
 
+func LoadWeightModelFromPath(path string) (*WeightModel, error) {
+	m := &WeightModel{}
+	if err := m.loadModel(path); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func GetModel() *WeightModel {
 	// Keep model enablement cheap. The ensemble is loaded only when a target has
 	// enough evidence to request its first prediction; until then Smart's
@@ -694,7 +702,7 @@ func (m *WeightModel) PredictWeight(input *smart.ModelInput, priorityFactor floa
 		return smart.CalculateWeight(input, priorityFactor)
 	}
 
-	total := input.Success + input.Failure
+	total := smart.SampleCount(input.Success, input.Failure)
 	if total < smart.DefaultMinSampleCount {
 		return 0, false
 	}
