@@ -211,8 +211,16 @@ func TestExpertSnapshotRoundTripKeepsTeacherRevisionUnverified(t *testing.T) {
 	if loaded.Snapshot().TeacherRevision != "teacher-v1" {
 		t.Fatal("teacher revision lost across snapshot")
 	}
-	// Restarted process must verify the current on-disk teacher at least once.
+	// Restarted process must verify the current on-disk teacher at least once,
+	// and the persisted expert must not score production traffic before that.
+	if _, _, ready := loaded.Predict(input, 0.7); ready {
+		t.Fatal("unverified persisted expert entered production scoring")
+	}
 	if !loaded.NeedsTeacher(input, 0.9, true) {
 		t.Fatal("reloaded expert bank suppressed teacher before revision verification")
+	}
+	loaded.ObserveTeacherRevision("teacher-v1")
+	if _, _, ready := loaded.Predict(input, 0.7); !ready {
+		t.Fatal("verified persisted expert did not return to production")
 	}
 }
