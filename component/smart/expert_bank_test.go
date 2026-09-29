@@ -226,3 +226,29 @@ func TestExpertSnapshotRoundTripKeepsTeacherRevisionUnverified(t *testing.T) {
 		t.Fatal("verified persisted expert did not return to production")
 	}
 }
+
+
+func TestExpertBankWorstCaseSnapshotFitsHardBudget(t *testing.T) {
+	bank := NewExpertBank()
+	bank.mu.Lock()
+	bank.teacherRevision = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	bank.teacherVerified = true
+	for i := range bank.experts {
+		e := &bank.experts[i]
+		e.Distilled = ^uint64(0)
+		e.ErrorEWMA = 0.999999999999
+		for j := 0; j < OnlineBanditDimension; j++ {
+			e.Theta[j] = 0.28
+			e.Precision[j] = 65536
+		}
+	}
+	bank.mu.Unlock()
+
+	data, err := bank.MarshalBounded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > ExpertMaxPersistBytes {
+		t.Fatalf("worst-case expert snapshot=%d exceeds hard cap=%d", len(data), ExpertMaxPersistBytes)
+	}
+}
