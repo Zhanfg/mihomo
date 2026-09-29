@@ -283,7 +283,7 @@ func (b *ExpertBank) marshalForPersist() ([]byte, uint64, error) {
 		return nil, 0, nil
 	}
 	b.mu.RLock()
-	snapshot := ExpertBankSnapshot{Version: 1, Experts: b.experts}
+	snapshot := ExpertBankSnapshot{Version: 1, TeacherRevision: b.teacherRevision, Experts: b.experts}
 	generation := b.generation
 	b.mu.RUnlock()
 	data, err := json.Marshal(snapshot)
