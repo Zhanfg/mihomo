@@ -437,3 +437,39 @@ func BenchmarkShouldInvokeTeacherWithExperts(b *testing.B) {
 		_ = ShouldInvokeTeacherWithExperts(&input, 0.02, 0.08, 0.04, 1024, 0.01)
 	}
 }
+
+
+func TestSmartExtremeExpertCapacityIsFixed(t *testing.T) {
+	requireSmartExtreme(t)
+
+	if expertCount != 4 {
+		t.Fatalf("expert count=%d want=4; runtime expert growth is forbidden", expertCount)
+	}
+	if ExpertFeatureDimension != 7 {
+		t.Fatalf("expert dimension=%d want=7", ExpertFeatureDimension)
+	}
+	if len(distilledExpertCoefficients) != 8 {
+		t.Fatalf("distilled heads=%d want=8", len(distilledExpertCoefficients))
+	}
+	if OnlineBanditDimension != 6 {
+		t.Fatalf("student dimension=%d want=6", OnlineBanditDimension)
+	}
+
+	state := defaultOnlineBanditState()
+	state.Generation = processBanditGeneration
+	state.Epoch = 1
+	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
+	SaveOnlineBanditState(record, false, state, 1)
+	snapshot, err := json.Marshal(record.CreateStatsSnapshot("capacity-contract"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// This is deliberately generous relative to the current compact state, but
+	// still prevents a future change from quietly embedding histories/replay
+	// buffers inside every target/node record.
+	if len(snapshot) > 4096 {
+		t.Fatalf("per-record learning snapshot=%d bytes exceeds fixed 4 KiB contract", len(snapshot))
+	}
+	t.Logf("experts=%d distilled_heads=%d student_dim=%d snapshot_bytes=%d",
+		expertCount, len(distilledExpertCoefficients), OnlineBanditDimension, len(snapshot))
+}
