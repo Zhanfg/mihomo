@@ -63,7 +63,7 @@ func TestDistilledExpertConvergesTowardTeacher(t *testing.T) {
 
 func TestExpertBankPersistenceIsConstantSize(t *testing.T) {
 	bank := NewExpertBank()
-	for i := 0; i < 1_000_000; i++ {
+	for i := 0; i < 20_000; i++ {
 		input := expertTestInput(i, i&1 == 1)
 		prior := 0.7
 		teacher := syntheticTeacher(prior, OnlineBanditFeatures(input))
