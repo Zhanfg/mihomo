@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/metacubex/mihomo/component/smart"
+	C "github.com/metacubex/mihomo/constant"
 )
 
 func TestDataCollectorCloseAllowsReopen(t *testing.T) {
@@ -225,5 +226,42 @@ func TestCollectorUpgradeKeepsOneBackup(t *testing.T) {
 	matches, _ := filepath.Glob(path + ".bak.*")
 	if len(matches) != 0 {
 		t.Fatalf("old timestamped backups survived: %v", matches)
+	}
+}
+
+
+func TestCollectorNeverExceedsLogicalByteBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bounded.csv")
+	collector := &DataCollector{dataPath: path, smartCollectorSize: defaultSmartCollectorSize}
+	if err := collector.initializeWriter(); err != nil {
+		t.Fatal(err)
+	}
+	headerSize := collector.currentSize
+	collector.smartCollectorSize = headerSize + 2048
+
+	input := &smart.ModelInput{
+		Success: 10, Failure: 1, ConnectTime: 80, Latency: 90,
+		IsTCP: true, Host: "example.com", DestPort: 443,
+		GroupName: "g", NodeName: "n",
+	}
+	meta := &C.Metadata{Host: "example.com", DstPort: 443}
+	for i := 0; i < 1000; i++ {
+		collector.AddSample(input, meta, 0.8, 0.82, "Distilled")
+	}
+	if err := collector.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	stat, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stat.Size() > collector.smartCollectorSize {
+		t.Fatalf("collector exceeded hard budget: size=%d budget=%d", stat.Size(), collector.smartCollectorSize)
+	}
+	if collector.currentSize > collector.smartCollectorSize {
+		t.Fatalf("logical size exceeded budget: size=%d budget=%d", collector.currentSize, collector.smartCollectorSize)
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
