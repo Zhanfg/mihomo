@@ -1,6 +1,8 @@
 package lightgbm
 
 import (
+	"encoding/csv"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -94,5 +96,85 @@ func TestApplyTransformsInPlaceMatchesCopyPath(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("in-place transform differs: got=%v want=%v", got, want)
+	}
+}
+
+
+func TestCollectorSchemaIncludesTeacherWeight(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "samples.csv")
+	collector := &DataCollector{dataPath: path, smartCollectorSize: defaultSmartCollectorSize}
+	if err := collector.initializeWriter(); err != nil {
+		t.Fatalf("initialize collector: %v", err)
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatalf("close collector: %v", err)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	header, err := csv.NewReader(f).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(header) != expectedColumns {
+		t.Fatalf("columns=%d want=%d", len(header), expectedColumns)
+	}
+	found := false
+	for _, h := range header {
+		if h == "teacher_weight" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("collector schema lost teacher_weight")
+	}
+}
+
+func TestCollectorUpgradesPreDistillationSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "samples.csv")
+	legacy := "success,failure,cumul_loss_rate,weight,weight_source,timestamp\n1,0,0,0.8,Traditional,now\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	collector := &DataCollector{dataPath: path, smartCollectorSize: defaultSmartCollectorSize}
+	if err := collector.initializeWriter(); err != nil {
+		t.Fatalf("upgrade collector: %v", err)
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	matches, err := filepath.Glob(path + ".bak.*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 1 {
+		t.Fatalf("legacy backup count=%d want=1", len(matches))
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	header, err := csv.NewReader(f).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range header {
+		if h == "teacher_weight" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("upgraded schema has no teacher_weight")
 	}
 }
