@@ -4,8 +4,10 @@ import sys
 def main():
     phase = int(sys.argv[1])
     data = json.load(open(sys.argv[2]))
-    counts = {int(k): int(v) for k, v in data["phase_counters"][str(phase)].items()}
-    seq = [int(v) for v in data["phase_sequence"][str(phase)]]
+    source_counts = data.get("phase_used_counters", data["phase_counters"])
+    source_sequence = data.get("phase_used_sequence", data["phase_sequence"])
+    counts = {int(k): int(v) for k, v in source_counts[str(phase)].items()}
+    seq = [int(v) for v in source_sequence[str(phase)]]
     best = {0: 18101, 1: 18102, 2: 18101}.get(phase)
     total = sum(counts.values())
     if total <= 0:
