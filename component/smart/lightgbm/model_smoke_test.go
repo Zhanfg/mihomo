@@ -3,6 +3,7 @@ package lightgbm
 import (
 	"math"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -134,5 +135,25 @@ func TestActiveModelLeaseStaysResident(t *testing.T) {
 	}
 	if next <= 0 || next > modelIdleTTL {
 		t.Fatalf("unexpected next idle check: %v", next)
+	}
+}
+
+
+func TestLoadModelRejectsOversizeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversize-model.bin")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(MaxModelFileBytes + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &WeightModel{}
+	if err := m.loadModel(path); err == nil {
+		t.Fatal("oversize LightGBM model was accepted")
 	}
 }
