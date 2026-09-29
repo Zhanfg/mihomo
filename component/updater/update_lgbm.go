@@ -48,10 +48,24 @@ func UpdateLgbmModel() (err error) {
 		modelUrl = lightgbm.GetModelDownloadURL()
 	}
 
-	vehicle := resource.NewHTTPVehicle(modelUrl, C.Path.SmartModel(), "", nil, defaultHttpTimeout, 0)
+	vehicle := resource.NewHTTPVehicle(
+		modelUrl,
+		C.Path.SmartModel(),
+		"",
+		nil,
+		defaultHttpTimeout,
+		lightgbm.MaxModelFileBytes+1,
+	)
 	var oldHash utils.HashType
-	if buf, err := os.ReadFile(vehicle.Path()); err == nil {
-		oldHash = utils.MakeHash(buf)
+	if stat, statErr := os.Stat(vehicle.Path()); statErr == nil {
+		if stat.Size() > 0 && stat.Size() <= lightgbm.MaxModelFileBytes {
+			if buf, err := os.ReadFile(vehicle.Path()); err == nil {
+				oldHash = utils.MakeHash(buf)
+			}
+		} else if stat.Size() > lightgbm.MaxModelFileBytes {
+			log.Warnln("[Smart] Removing oversized local LightGBM model: %d bytes", stat.Size())
+			_ = os.Remove(vehicle.Path())
+		}
 	}
 	data, hash, err := vehicle.Read(context.Background(), oldHash)
 	if err != nil {
@@ -63,6 +77,9 @@ func UpdateLgbmModel() (err error) {
 	}
 	if len(data) == 0 {
 		return fmt.Errorf("can't download LightGBM model file: no data")
+	}
+	if int64(len(data)) > lightgbm.MaxModelFileBytes {
+		return fmt.Errorf("LightGBM model exceeds hard limit: %d > %d bytes", len(data), lightgbm.MaxModelFileBytes)
 	}
 
 	tmpFile, err := os.CreateTemp("", "lgbm_model_*.bin")
