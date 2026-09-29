@@ -21,15 +21,18 @@ type DistilledExpert struct {
 }
 
 type ExpertBankSnapshot struct {
-	Version uint8                   `json:"version"`
-	Experts [ExpertCount]DistilledExpert `json:"experts"`
+	Version         uint8                        `json:"version"`
+	TeacherRevision string                       `json:"teacher_revision,omitempty"`
+	Experts         [ExpertCount]DistilledExpert `json:"experts"`
 }
 
 type ExpertBank struct {
-	mu        sync.RWMutex
-	experts   [ExpertCount]DistilledExpert
-	generation uint64
-	persisted  uint64
+	mu              sync.RWMutex
+	experts         [ExpertCount]DistilledExpert
+	teacherRevision string
+	teacherVerified bool
+	generation      uint64
+	persisted       uint64
 }
 
 func NewExpertBank() *ExpertBank {
@@ -95,6 +98,10 @@ func LoadExpertBank(data []byte) *ExpertBank {
 	for i := range snapshot.Experts {
 		b.experts[i] = normalizeExpert(snapshot.Experts[i])
 	}
+	b.teacherRevision = snapshot.TeacherRevision
+	// A persisted bank must verify the currently loaded teacher once per
+	// process before it can suppress heavy-teacher checks.
+	b.teacherVerified = false
 	return b
 }
 
@@ -103,7 +110,7 @@ func (b *ExpertBank) MarshalBounded() ([]byte, error) {
 		return nil, nil
 	}
 	b.mu.RLock()
-	snapshot := ExpertBankSnapshot{Version: 1, Experts: b.experts}
+	snapshot := ExpertBankSnapshot{Version: 1, TeacherRevision: b.teacherRevision, Experts: b.experts}
 	b.mu.RUnlock()
 	data, err := json.Marshal(snapshot)
 	if err != nil {
@@ -192,9 +199,57 @@ func (b *ExpertBank) Distill(input *ModelInput, heuristicPrior, teacherWeight fl
 	b.mu.Unlock()
 }
 
+func (b *ExpertBank) ObserveTeacherRevision(revision string) {
+	if b == nil || revision == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.teacherRevision == "" {
+		b.teacherRevision = revision
+		b.teacherVerified = true
+		b.generation++
+		return
+	}
+	if b.teacherRevision == revision {
+		b.teacherVerified = true
+		return
+	}
+
+	// Teacher changed: keep only a small directional prior, reopen confidence,
+	// and force fresh distillation. This avoids both full cold-start and stale
+	// expert fossilization.
+	for i := range b.experts {
+		e := b.experts[i]
+		for j := 0; j < OnlineBanditDimension; j++ {
+			e.Theta[j] *= 0.20
+			p := e.Precision[j]
+			if p < 1 {
+				p = 1
+			}
+			e.Precision[j] = 1 + (p-1)*0.10
+		}
+		e.Distilled = 0
+		if e.ErrorEWMA < 0.25 {
+			e.ErrorEWMA = 0.25
+		}
+		b.experts[i] = e
+	}
+	b.teacherRevision = revision
+	b.teacherVerified = true
+	b.generation++
+}
+
 func (b *ExpertBank) NeedsTeacher(input *ModelInput, confidence float64, ready bool) bool {
 	if input == nil {
 		return false
+	}
+	b.mu.RLock()
+	verified := b.teacherVerified
+	b.mu.RUnlock()
+	if !verified {
+		return true
 	}
 	if input.ConnectionFailed || input.LossRate >= 0.01 {
 		return true
@@ -267,5 +322,5 @@ func (b *ExpertBank) Snapshot() ExpertBankSnapshot {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return ExpertBankSnapshot{Version: 1, Experts: b.experts}
+	return ExpertBankSnapshot{Version: 1, TeacherRevision: b.teacherRevision, Experts: b.experts}
 }
