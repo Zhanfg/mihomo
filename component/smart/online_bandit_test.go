@@ -407,3 +407,49 @@ func BenchmarkShouldRefreshTeacher(b *testing.B) {
 		_ = ShouldRefreshTeacher(input, 0.04, state)
 	}
 }
+
+
+func TestMatureStudentKeepsTeacherRefreshSparse(t *testing.T) {
+	input := testBanditInput()
+	state := defaultOnlineBanditState()
+	state.Updates = 128
+	state.TeacherRatio = 1.03
+	state.TeacherAt = 128
+	state.TeacherProbeAt = 128
+	state.Uncertainty = 0.10
+	state.ErrorEWMA = 0.03
+
+	refreshes := 0
+	for i := 0; i < 640; i++ {
+		input.Success++
+		if ShouldRefreshTeacher(input, 0.03, state) {
+			refreshes++
+			state.ObserveTeacher(0.82, 0.80)
+		}
+		state.Updates++
+	}
+	if refreshes < 8 || refreshes > 11 {
+		t.Fatalf("mature teacher refreshes=%d want about 10/640", refreshes)
+	}
+}
+
+func BenchmarkDistilledSmartDecision(b *testing.B) {
+	input := testBanditInput()
+	x := OnlineBanditFeatures(input)
+	state := defaultOnlineBanditState()
+	state.Updates = 256
+	state.TeacherRatio = 1.04
+	state.TeacherAt = 220
+	state.TeacherProbeAt = 220
+	state.Uncertainty = 0.10
+	state.ErrorEWMA = 0.04
+	for i := range state.Precision {
+		state.Precision[i] = 32
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		prior := state.ApplyTeacherAnchor(0.80)
+		_, _ = state.Predict(prior, x)
+		_ = ShouldRefreshTeacher(input, 0.04, state)
+	}
+}
