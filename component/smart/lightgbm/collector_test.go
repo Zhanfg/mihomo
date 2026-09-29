@@ -150,12 +150,15 @@ func TestCollectorUpgradesPreDistillationSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatalf("single bounded legacy backup missing: %v", err)
+	}
 	matches, err := filepath.Glob(path + ".bak.*")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 1 {
-		t.Fatalf("legacy backup count=%d want=1", len(matches))
+	if len(matches) != 0 {
+		t.Fatalf("timestamped legacy backups leaked: %v", matches)
 	}
 
 	f, err := os.Open(path)
@@ -176,5 +179,51 @@ func TestCollectorUpgradesPreDistillationSchema(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("upgraded schema has no teacher_weight")
+	}
+}
+
+
+func TestNormalizeCollectorSizeHardCaps(t *testing.T) {
+	if got := normalizeCollectorSize(1<<40, false); got != maxSmartCollectorSize {
+		t.Fatalf("desktop hard cap=%d want=%d", got, maxSmartCollectorSize)
+	}
+	if got := normalizeCollectorSize(1<<40, true); got != maxSmartCollectorSizeAndroid {
+		t.Fatalf("android hard cap=%d want=%d", got, maxSmartCollectorSizeAndroid)
+	}
+	if got := normalizeCollectorSize(2*1024*1024, true); got != 2*1024*1024 {
+		t.Fatalf("small explicit budget changed: %d", got)
+	}
+	if got := normalizeCollectorSize(0, true); got != defaultSmartCollectorSize {
+		t.Fatalf("default=%d want=%d", got, defaultSmartCollectorSize)
+	}
+}
+
+func TestCollectorUpgradeKeepsOneBackup(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "samples.csv")
+	for i := 0; i < 3; i++ {
+		name := path + ".bak." + string(rune('a'+i))
+		if err := os.WriteFile(name, []byte("old"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy := "success,failure,cumul_loss_rate,weight,weight_source,timestamp\n1,0,0,0.8,Traditional,now\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	collector := &DataCollector{dataPath: path, smartCollectorSize: 1024 * 1024}
+	if err := collector.initializeWriter(); err != nil {
+		t.Fatal(err)
+	}
+	if err := collector.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatalf("bounded backup missing: %v", err)
+	}
+	matches, _ := filepath.Glob(path + ".bak.*")
+	if len(matches) != 0 {
+		t.Fatalf("old timestamped backups survived: %v", matches)
 	}
 }
