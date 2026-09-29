@@ -45,6 +45,14 @@ func banditErrorKey(isUDP bool) string {
 	return "bandit-e:tcp"
 }
 
+
+func banditEpochKey(isUDP bool) string {
+	if isUDP {
+		return "bandit-epoch:udp"
+	}
+	return "bandit-epoch:tcp"
+}
+
 func BanditUncertaintyWeightType(isUDP bool) string {
 	if isUDP {
 		return WeightTypeBanditUncertaintyUDP
@@ -60,6 +68,7 @@ type OnlineBanditState struct {
 	Precision [OnlineBanditDimension]float64
 	Updates   float64
 	ErrorEWMA float64
+	Epoch     float64
 }
 
 func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditState {
@@ -84,11 +93,15 @@ func LoadOnlineBanditState(record *AtomicStatsRecord, isUDP bool) OnlineBanditSt
 	}
 	state.Updates = record.GetWeight(banditUpdatesKey(isUDP))
 	state.ErrorEWMA = record.GetWeight(banditErrorKey(isUDP))
+	state.Epoch = record.GetWeight(banditEpochKey(isUDP))
 	if state.Updates < 0 || math.IsNaN(state.Updates) || math.IsInf(state.Updates, 0) {
 		state.Updates = 0
 	}
 	if state.ErrorEWMA < 0 || math.IsNaN(state.ErrorEWMA) || math.IsInf(state.ErrorEWMA, 0) {
 		state.ErrorEWMA = 0
+	}
+	if state.Epoch < 0 || math.IsNaN(state.Epoch) || math.IsInf(state.Epoch, 0) {
+		state.Epoch = 0
 	}
 	return state
 }
@@ -107,7 +120,36 @@ func SaveOnlineBanditState(record *AtomicStatsRecord, isUDP bool, state OnlineBa
 	}
 	record.SetWeight(banditUpdatesKey(isUDP), state.Updates)
 	record.SetWeight(banditErrorKey(isUDP), state.ErrorEWMA)
+	record.SetWeight(banditEpochKey(isUDP), state.Epoch)
 	record.SetWeight(BanditUncertaintyWeightType(isUDP), clamp01(uncertainty))
+}
+
+// ObserveEpoch retains useful cross-network prior knowledge while reopening
+// confidence after a handover. Full reset throws away too much; keeping the
+// old precision unchanged makes the learner stubborn on the new path.
+func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
+	if state == nil || epoch == 0 {
+		return
+	}
+	if state.Epoch == 0 {
+		state.Epoch = float64(epoch)
+		return
+	}
+	if uint64(state.Epoch) == epoch {
+		return
+	}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] *= 0.65
+		precision := state.Precision[i]
+		if precision < 1 {
+			precision = 1
+		}
+		state.Precision[i] = 1 + (precision-1)*0.20
+	}
+	if state.ErrorEWMA < 0.15 {
+		state.ErrorEWMA = 0.15
+	}
+	state.Epoch = float64(epoch)
 }
 
 func clamp01(v float64) float64 {
