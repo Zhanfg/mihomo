@@ -106,3 +106,87 @@ func BenchmarkDistilledExpertPrior(b *testing.B) {
 		_ = DistilledExpertPrior(input, 1)
 	}
 }
+
+
+func TestProductionDistillationPrefersTeacherSoftTarget(t *testing.T) {
+	input := *expertTestInput(sceneStreaming, false)
+	base := DistilledExpertBasePrior(&input, 1)
+	samples := make([]DistillProductionSample, 32)
+	for i := range samples {
+		samples[i] = DistillProductionSample{
+			Input: input,
+			ActualWeight: base * 0.80,
+			TeacherWeight: base * 1.10,
+		}
+	}
+	cal := FitProductionDistillationCalibration(samples)
+	bucket := DistilledExpertBucket(&input)
+	if math.Abs(cal[bucket]-1.10) > 1e-9 {
+		t.Fatalf("teacher soft target not preferred: got=%v want=1.10", cal[bucket])
+	}
+}
+
+func TestProductionDistillationFallsBackToActualWeight(t *testing.T) {
+	input := *expertTestInput(sceneInteractive, true)
+	base := DistilledExpertBasePrior(&input, 1)
+	samples := make([]DistillProductionSample, 32)
+	for i := range samples {
+		samples[i] = DistillProductionSample{Input: input, ActualWeight: base * 0.90}
+	}
+	cal := FitProductionDistillationCalibration(samples)
+	bucket := DistilledExpertBucket(&input)
+	if math.Abs(cal[bucket]-0.90) > 1e-9 {
+		t.Fatalf("actual-weight fallback got=%v want=0.90", cal[bucket])
+	}
+}
+
+func TestProductionDistillationQualityGate(t *testing.T) {
+	input := *expertTestInput(sceneWeb, false)
+	base := DistilledExpertBasePrior(&input, 1)
+	samples := make([]DistillProductionSample, 64)
+	for i := range samples {
+		samples[i] = DistillProductionSample{Input: input, TeacherWeight: base}
+	}
+	good := FitProductionDistillationCalibration(samples)
+	report := EvaluateProductionDistillation(samples, good)
+	if !ProductionDistillationAcceptable(report, 0.35) {
+		t.Fatalf("identity-quality calibration rejected: %+v", report)
+	}
+
+	bad := good
+	bad[DistilledExpertBucket(&input)] = 1.15
+	badReport := EvaluateProductionDistillation(samples, bad)
+	if ProductionDistillationAcceptable(badReport, 0.35) {
+		t.Fatalf("worse calibration passed quality gate: %+v", badReport)
+	}
+}
+
+func TestProductionDistillationPerBucketNeverWorsensFit(t *testing.T) {
+	var samples []DistillProductionSample
+	for scene := sceneWeb; scene <= sceneTransfer; scene++ {
+		for _, udp := range []bool{false, true} {
+			input := *expertTestInput(scene, udp)
+			base := DistilledExpertBasePrior(&input, 1)
+			for i := 0; i < 64; i++ {
+				factor := 0.92 + 0.002*float64(i%9)
+				samples = append(samples, DistillProductionSample{
+					Input: input,
+					TeacherWeight: base * factor,
+				})
+			}
+		}
+	}
+	cal := FitProductionDistillationCalibration(samples)
+	report := EvaluateProductionDistillation(samples, cal)
+	if !ProductionDistillationAcceptable(report, 0.35) {
+		t.Fatalf("fitted production calibration failed own quality gate: %+v", report)
+	}
+	for i, bucket := range report.Buckets {
+		if bucket.Count < 8 {
+			t.Fatalf("bucket=%d insufficient test coverage=%d", i, bucket.Count)
+		}
+		if bucket.CalibratedLogRMSE > bucket.BaseLogRMSE+1e-12 {
+			t.Fatalf("bucket=%d worsened: base=%v calibrated=%v", i, bucket.BaseLogRMSE, bucket.CalibratedLogRMSE)
+		}
+	}
+}
