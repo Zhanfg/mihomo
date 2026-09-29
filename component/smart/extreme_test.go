@@ -389,3 +389,51 @@ func TestSmartExtremeDistillationRejectsUnrepresentableTeacher(t *testing.T) {
 	}
 	t.Logf("rejected_teacher_rmse=%.6f max_relative_error=%.6f", report.CalibratedLogRMSE, report.MaxRelativeError)
 }
+
+
+func TestSmartExtremeStableTeacherSuppression(t *testing.T) {
+	requireSmartExtreme(t)
+	const iterations = 200_000
+	input := *expertTestInput(sceneWeb, false)
+	input.Failure = 2
+	input.ConnectionFailed = false
+	input.LossRate = 0
+
+	calls := 0
+	for i := 0; i < iterations; i++ {
+		input.Success = 256 + int64(i)
+		if ShouldInvokeTeacherWithExperts(&input, 0.02, 0.08, 0.04, 1024, 0.01) {
+			calls++
+		}
+	}
+	rate := float64(calls) / iterations
+	if rate > 0.04 {
+		t.Fatalf("stable heavy-teacher rate %.4f exceeds 4%% budget", rate)
+	}
+	if rate < 0.02 {
+		t.Fatalf("stable heavy-teacher rate %.4f is suspiciously low; shadow checks vanished", rate)
+	}
+
+	escalations := 0
+	for i := 0; i < 10_000; i++ {
+		input.Success = 1000 + int64(i)
+		if ShouldInvokeTeacherWithExperts(&input, 0.02, 0.08, 0.04, 1024, 0.11) {
+			escalations++
+		}
+	}
+	if escalations != 10_000 {
+		t.Fatalf("expert conflict escalation=%d want=10000", escalations)
+	}
+	t.Logf("stable_teacher_calls=%d/%d rate=%.4f conflict_escalation=%d",
+		calls, iterations, rate, escalations)
+}
+
+func BenchmarkShouldInvokeTeacherWithExperts(b *testing.B) {
+	input := *expertTestInput(sceneWeb, false)
+	input.Success = 4096
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		input.Success++
+		_ = ShouldInvokeTeacherWithExperts(&input, 0.02, 0.08, 0.04, 1024, 0.01)
+	}
+}
