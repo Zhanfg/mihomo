@@ -143,7 +143,7 @@ func BenchmarkOnlineBanditUpdate(b *testing.B) {
 
 func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
-	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12, Epoch: 7, Generation: 12345}
+	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12, Epoch: 7, Generation: 12345, TeacherRatio: 1.08, TeacherAt: 12, TeacherProbeAt: 12}
 	for i := 0; i < OnlineBanditDimension; i++ {
 		state.Theta[i] = float64(i+1) * 0.01
 		state.Precision[i] = float64(i + 2)
@@ -155,6 +155,9 @@ func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 		math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 ||
 		math.Abs(got.Epoch-state.Epoch) > 1e-12 ||
 		math.Abs(got.Generation-state.Generation) > 1e-12 ||
+		math.Abs(got.TeacherRatio-state.TeacherRatio) > 1e-12 ||
+		math.Abs(got.TeacherAt-state.TeacherAt) > 1e-12 ||
+		math.Abs(got.TeacherProbeAt-state.TeacherProbeAt) > 1e-12 ||
 		math.Abs(got.Uncertainty-0.42) > 1e-12 {
 		t.Fatalf("scalar state mismatch: got=%+v want=%+v", got, state)
 	}
@@ -277,5 +280,130 @@ func BenchmarkOnlineBanditCompactStateRoundTrip(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		got := LoadOnlineBanditState(record, false)
 		SaveOnlineBanditState(record, false, got, 0.4)
+	}
+}
+
+
+func TestTeacherAnchorIsBoundedAndPersistent(t *testing.T) {
+	state := defaultOnlineBanditState()
+	if got := state.ApplyTeacherAnchor(0.8); math.Abs(got-0.8) > 1e-12 {
+		t.Fatalf("default teacher anchor changed heuristic: %v", got)
+	}
+
+	state.ObserveTeacher(2.0, 0.8) // ratio 2.5, must clamp to 1.25
+	if math.Abs(state.TeacherRatio-1.25) > 1e-12 {
+		t.Fatalf("teacher ratio=%v want=1.25", state.TeacherRatio)
+	}
+	if got := state.ApplyTeacherAnchor(0.8); math.Abs(got-1.0) > 1e-12 {
+		t.Fatalf("anchored prior=%v want=1.0", got)
+	}
+
+	previous := state.TeacherRatio
+	state.Updates = 20
+	state.ObserveTeacher(0.60, 0.80) // ratio 0.75, EMA should move conservatively
+	if !(state.TeacherRatio < previous && state.TeacherRatio > 0.75) {
+		t.Fatalf("teacher refresh was not conservative: before=%v after=%v", previous, state.TeacherRatio)
+	}
+	if state.TeacherAt != 21 || state.TeacherProbeAt != 21 {
+		t.Fatalf("teacher timestamps not updated: at=%v probe=%v", state.TeacherAt, state.TeacherProbeAt)
+	}
+}
+
+func TestTeacherRefreshUsesStudentConfidenceAndAge(t *testing.T) {
+	input := testBanditInput()
+	state := defaultOnlineBanditState()
+	state.Updates = 100
+	state.TeacherAt = 90
+	state.TeacherProbeAt = 90
+	state.Uncertainty = 0.20
+	state.ErrorEWMA = 0.05
+
+	if ShouldRefreshTeacher(input, 0.05, state) {
+		t.Fatal("fresh normal teacher anchor refreshed too early")
+	}
+	state.Updates = 114 // normal age=24
+	if !ShouldRefreshTeacher(input, 0.05, state) {
+		t.Fatal("normal teacher anchor did not refresh at age 24")
+	}
+
+	state.Updates = 200
+	state.TeacherAt = 150
+	state.Uncertainty = 0.10
+	state.ErrorEWMA = 0.03
+	if ShouldRefreshTeacher(input, 0.03, state) {
+		t.Fatal("mature confident student refreshed before age 64")
+	}
+	state.Updates = 214
+	if !ShouldRefreshTeacher(input, 0.03, state) {
+		t.Fatal("mature confident student did not refresh at age 64")
+	}
+
+	state.Updates = 100
+	state.TeacherAt = 95
+	state.Uncertainty = 0.60
+	if ShouldRefreshTeacher(input, 0.03, state) {
+		t.Fatal("uncertain student refreshed before age 6")
+	}
+	state.Updates = 101
+	if !ShouldRefreshTeacher(input, 0.03, state) {
+		t.Fatal("uncertain student did not refresh at age 6")
+	}
+
+	input.ConnectionFailed = true
+	state.Uncertainty = 0.20
+	state.Updates = 99
+	state.TeacherAt = 95
+	if !ShouldRefreshTeacher(input, 0.03, state) {
+		t.Fatal("failure path did not request teacher refresh at age 4")
+	}
+}
+
+func TestUnavailableTeacherProbeIsThrottled(t *testing.T) {
+	input := testBanditInput()
+	state := defaultOnlineBanditState()
+	state.Updates = 20
+	if !ShouldRefreshTeacher(input, 0, state) {
+		t.Fatal("cold teacher was not requested")
+	}
+	state.NoteTeacherAttempt()
+	if ShouldRefreshTeacher(input, 0, state) {
+		t.Fatal("teacher retry was not throttled immediately")
+	}
+	state.Updates = 24
+	if !ShouldRefreshTeacher(input, 0, state) {
+		t.Fatal("teacher retry did not reopen after four student updates")
+	}
+}
+
+func TestEnvironmentChangeSoftensTeacherAnchor(t *testing.T) {
+	state := defaultOnlineBanditState()
+	state.Updates = 100
+	state.Epoch = 7
+	state.Generation = processBanditGeneration
+	state.TeacherRatio = 1.20
+	state.TeacherAt = 90
+	state.TeacherProbeAt = 90
+	for i := range state.Precision {
+		state.Precision[i] = 64
+	}
+	state.ObserveEpoch(8)
+	if math.Abs(state.TeacherRatio-1.05) > 1e-12 {
+		t.Fatalf("handover teacher ratio=%v want=1.05", state.TeacherRatio)
+	}
+	if state.TeacherAt != 0 || state.TeacherProbeAt != 0 {
+		t.Fatalf("handover did not force teacher refresh: at=%v probe=%v", state.TeacherAt, state.TeacherProbeAt)
+	}
+}
+
+func BenchmarkShouldRefreshTeacher(b *testing.B) {
+	input := testBanditInput()
+	state := defaultOnlineBanditState()
+	state.Updates = 256
+	state.TeacherAt = 220
+	state.Uncertainty = 0.10
+	state.ErrorEWMA = 0.04
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = ShouldRefreshTeacher(input, 0.04, state)
 	}
 }
