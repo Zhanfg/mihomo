@@ -472,3 +472,20 @@ func TestV7StudentDefaultsToNeutralTeacherAnchor(t *testing.T) {
 		t.Fatal("migrated v7 student did not request its first Teacher refresh")
 	}
 }
+
+
+func TestTeacherAnchorCannotOscillateOutsideSafetyEnvelope(t *testing.T) {
+	state := defaultOnlineBanditState()
+	state.Updates = 32
+	for i := 0; i < 200; i++ {
+		if i%2 == 0 {
+			state.ObserveTeacher(10, 0.8)
+		} else {
+			state.ObserveTeacher(0.01, 0.8)
+		}
+		if state.TeacherRatio < 0.75 || state.TeacherRatio > 1.25 {
+			t.Fatalf("teacher ratio escaped envelope at step %d: %v", i, state.TeacherRatio)
+		}
+		state.Updates++
+	}
+}
