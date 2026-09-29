@@ -42,6 +42,27 @@ type StatsRecord struct {
 	BanditUDP          *OnlineBanditState `json:"bandit_udp,omitempty"`
 }
 
+
+func (r *StatsRecord) banditUncertainty(isUDP bool) float64 {
+	if r == nil {
+		return 1
+	}
+	state := r.BanditTCP
+	if isUDP {
+		state = r.BanditUDP
+	}
+	if state != nil && state.Updates > 0 {
+		return clamp01(state.Uncertainty)
+	}
+	if r.Weights != nil {
+		if value, ok := r.Weights[BanditUncertaintyWeightType(isUDP)]; ok {
+			return clamp01(value)
+		}
+	}
+	return 1
+}
+
+
 type NodeState struct {
 	Name           string `json:"name"`
 	LastChecked    int64  `json:"last_checked"`
@@ -766,7 +787,7 @@ func (s *Store) rankTargetStatsWithExploration(group, config, target string, sta
 					continue
 				}
 				weight = record.Weights[weightType]
-				uncertainty = record.Weights[BanditUncertaintyWeightType(isUDP)]
+				uncertainty = record.banditUncertainty(isUDP)
 				lastUsed = record.LastUsed
 			}
 		} else {
@@ -775,7 +796,7 @@ func (s *Store) rankTargetStatsWithExploration(group, config, target string, sta
 				continue
 			}
 			weight = record.Weights[weightType]
-			uncertainty = record.Weights[BanditUncertaintyWeightType(isUDP)]
+			uncertainty = record.banditUncertainty(isUDP)
 			lastUsed = record.LastUsed
 		}
 
