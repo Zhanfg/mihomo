@@ -75,6 +75,38 @@ func BanditUncertaintyWeightType(isUDP bool) string {
 	return WeightTypeBanditUncertaintyTCP
 }
 
+
+const (
+	smartPinMinSamples     = int64(16)
+	smartPinMinUpdates     = 8.0
+	smartPinMaxUncertainty = 0.35
+	smartPinMaxError       = 0.20
+)
+
+// OnlineBanditPinTrusted decides whether a cached winner is mature enough to
+// bypass fresh Smart ranking. Cold/uncertain/drifting learners must keep
+// comparing alternatives; otherwise one lucky early winner can freeze a target
+// for the unwrap cache lifetime and prevent the learner from ever correcting it.
+func OnlineBanditPinTrusted(state OnlineBanditState, samples int64, learnedWeight float64, currentEpoch uint64) bool {
+	state = normalizeOnlineBanditState(state)
+	if samples < smartPinMinSamples || state.Updates < smartPinMinUpdates {
+		return false
+	}
+	if learnedWeight < AllowedWeight || math.IsNaN(learnedWeight) || math.IsInf(learnedWeight, 0) {
+		return false
+	}
+	if state.Uncertainty > smartPinMaxUncertainty || state.ErrorEWMA > smartPinMaxError {
+		return false
+	}
+	if state.Generation != processBanditGeneration {
+		return false
+	}
+	if currentEpoch != 0 && (state.Epoch <= 0 || uint64(state.Epoch) != currentEpoch) {
+		return false
+	}
+	return true
+}
+
 // OnlineBanditState is a diagonal online least-squares residual model. Keeping
 // only the diagonal is deliberate: one update is O(d), persistence is tiny,
 // and no matrix inversion or heap allocation is required on Android.
