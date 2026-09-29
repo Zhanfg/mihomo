@@ -26,9 +26,10 @@ type ExpertBankSnapshot struct {
 }
 
 type ExpertBank struct {
-	mu      sync.RWMutex
-	experts [ExpertCount]DistilledExpert
-	dirty   uint32
+	mu        sync.RWMutex
+	experts   [ExpertCount]DistilledExpert
+	generation uint64
+	persisted  uint64
 }
 
 func NewExpertBank() *ExpertBank {
@@ -187,7 +188,7 @@ func (b *ExpertBank) Distill(input *ModelInput, heuristicPrior, teacherWeight fl
 	}
 	e.Distilled++
 	b.experts[idx] = e
-	b.dirty++
+	b.generation++
 	b.mu.Unlock()
 }
 
@@ -219,7 +220,36 @@ func (b *ExpertBank) TakeDirty(threshold uint32) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.dirty >= threshold
+	return b.generation-b.persisted >= uint64(threshold)
+}
+
+func (b *ExpertBank) marshalForPersist() ([]byte, uint64, error) {
+	if b == nil {
+		return nil, 0, nil
+	}
+	b.mu.RLock()
+	snapshot := ExpertBankSnapshot{Version: 1, Experts: b.experts}
+	generation := b.generation
+	b.mu.RUnlock()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return nil, generation, err
+	}
+	if len(data) > ExpertMaxPersistBytes {
+		return nil, generation, errors.New("Smart expert bank exceeded hard persistence budget")
+	}
+	return data, generation, nil
+}
+
+func (b *ExpertBank) markPersisted(generation uint64) {
+	if b == nil {
+		return
+	}
+	b.mu.Lock()
+	if generation > b.persisted {
+		b.persisted = generation
+	}
+	b.mu.Unlock()
 }
 
 func (b *ExpertBank) MarkClean() {
@@ -227,7 +257,7 @@ func (b *ExpertBank) MarkClean() {
 		return
 	}
 	b.mu.Lock()
-	b.dirty = 0
+	b.persisted = b.generation
 	b.mu.Unlock()
 }
 
