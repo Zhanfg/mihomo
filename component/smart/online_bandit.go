@@ -139,7 +139,10 @@ func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
 		return
 	}
 	for i := 0; i < OnlineBanditDimension; i++ {
-		state.Theta[i] *= 0.65
+		// A handover must pull even a previously saturated residual back toward
+		// the teacher prior; 35% retains direction without letting the old
+		// network keep pinning the ±35% residual cap.
+		state.Theta[i] *= 0.35
 		precision := state.Precision[i]
 		if precision < 1 {
 			precision = 1
