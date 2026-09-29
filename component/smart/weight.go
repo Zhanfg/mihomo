@@ -135,6 +135,14 @@ func ShouldInvokeTeacher(input *ModelInput, modelError, studentUncertainty, stud
 	return total%stride == 0
 }
 
+func ShouldInvokeTeacherWithExperts(input *ModelInput, modelError, studentUncertainty, studentError, studentUpdates, expertDisagreement float64) bool {
+	if expertDisagreement >= 0.10 {
+		return true
+	}
+	return ShouldInvokeTeacher(input, modelError, studentUncertainty, studentError, studentUpdates)
+}
+
+
 
 // TrainingSampleRate treats the configured rate as a ceiling, then spends it
 // where samples carry information. Failures/loss and model disagreement are
