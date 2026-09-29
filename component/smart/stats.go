@@ -38,6 +38,8 @@ type StatsRecord struct {
 	LossRate           float64            `json:"loss_rate,omitempty"`
 	CumulSent          uint64             `json:"cumul_sent,omitempty"`
 	CumulRetrans       uint64             `json:"cumul_retrans,omitempty"`
+	BanditTCP          *OnlineBanditState `json:"bandit_tcp,omitempty"`
+	BanditUDP          *OnlineBanditState `json:"bandit_udp,omitempty"`
 }
 
 type NodeState struct {
@@ -64,7 +66,50 @@ type AtomicStatsRecord struct {
 	cumulRetrans    atomic.Int64
 
 	weights *lru.LruCache[string, float64]
+
+	// Contextual student state is compact and typed. Keeping dozens of model
+	// scalars in the generic LRU caused one map/list node per scalar.
+	banditMu             sync.RWMutex
+	banditTCP            *OnlineBanditState
+	banditUDP            *OnlineBanditState
+	banditUncertaintyTCP atomic.Float64
+	banditUncertaintyUDP atomic.Float64
 }
+
+func (r *AtomicStatsRecord) restoreBanditState(state *OnlineBanditState, isUDP bool) {
+	if r == nil || state == nil {
+		return
+	}
+	copyState := normalizeOnlineBanditState(*state)
+	if isUDP {
+		r.banditUDP = &copyState
+		r.banditUncertaintyUDP.Store(copyState.Uncertainty)
+	} else {
+		r.banditTCP = &copyState
+		r.banditUncertaintyTCP.Store(copyState.Uncertainty)
+	}
+}
+
+func (r *AtomicStatsRecord) snapshotBanditState(isUDP bool) *OnlineBanditState {
+	if r == nil {
+		return nil
+	}
+	r.banditMu.RLock()
+	var state *OnlineBanditState
+	if isUDP {
+		state = r.banditUDP
+	} else {
+		state = r.banditTCP
+	}
+	if state == nil {
+		r.banditMu.RUnlock()
+		return nil
+	}
+	copyState := *state
+	r.banditMu.RUnlock()
+	return &copyState
+}
+
 
 // BlockCode says why a node is excluded from a target. The values are the keys
 // of HostStatus.Codes and are persisted, so they are an on-disk format: they
@@ -223,6 +268,8 @@ func (s *Store) GetOrCreateAtomicRecord(cacheKey string, group, config, target, 
 		r := &AtomicStatsRecord{
 			weights: lru.New[string, float64](lru.WithSize[string, float64](100)),
 		}
+		r.banditUncertaintyTCP.Store(1)
+		r.banditUncertaintyUDP.Store(1)
 
 		if existingData, err := s.GetStatsForTarget(group, config, target, proxy); err == nil {
 			if data, exists := existingData[proxy]; exists {
@@ -241,8 +288,23 @@ func (s *Store) GetOrCreateAtomicRecord(cacheKey string, group, config, target, 
 					r.lossRate.Store(existingRecord.LossRate)
 					r.cumulSent.Store(int64(existingRecord.CumulSent))
 					r.cumulRetrans.Store(int64(existingRecord.CumulRetrans))
+
+					if existingRecord.BanditTCP != nil {
+						r.restoreBanditState(existingRecord.BanditTCP, false)
+					} else if migrated, ok := legacyBanditStateFromWeights(existingRecord.Weights, false); ok {
+						r.restoreBanditState(&migrated, false)
+					}
+					if existingRecord.BanditUDP != nil {
+						r.restoreBanditState(existingRecord.BanditUDP, true)
+					} else if migrated, ok := legacyBanditStateFromWeights(existingRecord.Weights, true); ok {
+						r.restoreBanditState(&migrated, true)
+					}
+
 					if existingRecord.Weights != nil {
 						for k, v := range existingRecord.Weights {
+							if isLegacyBanditWeightKey(k) {
+								continue
+							}
 							r.weights.Set(k, v)
 						}
 					}
@@ -275,6 +337,8 @@ func (record *AtomicStatsRecord) CreateStatsSnapshot(cacheKey string) *StatsReco
 		CumulSent:          uint64(record.cumulSent.Load()),
 		CumulRetrans:       uint64(record.cumulRetrans.Load()),
 		Weights:            record.weights.FilterByKeyPrefix(""),
+		BanditTCP:          record.snapshotBanditState(false),
+		BanditUDP:          record.snapshotBanditState(true),
 	}
 
 	recordCache.Set(cacheKey, record)
@@ -451,8 +515,8 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 
 func (s *Store) LiveBanditUncertainty(group, config, target, node string, isUDP bool) float64 {
 	// Unknown/cold records are intentionally treated as maximally uncertain.
-	// This keeps exploration useful after restart without adding DB reads to the
-	// selector hot path. Once a record is resident, uncertainty is O(1).
+	// Resident records expose one atomic scalar: no model mutex and no generic
+	// weights-LRU lookup is needed on the shortlist ranking path.
 	if !cacheReady.Load() {
 		return 1
 	}
@@ -461,10 +525,10 @@ func (s *Store) LiveBanditUncertainty(group, config, target, node string, isUDP 
 	if !ok || record == nil {
 		return 1
 	}
-	if record.GetWeight(banditUpdatesKey(isUDP)) <= 0 {
-		return 1
+	if isUDP {
+		return clamp01(record.banditUncertaintyUDP.Load())
 	}
-	return clamp01(record.GetWeight(BanditUncertaintyWeightType(isUDP)))
+	return clamp01(record.banditUncertaintyTCP.Load())
 }
 
 // AddASNEvidence counts one more observation of a network on this target, the
