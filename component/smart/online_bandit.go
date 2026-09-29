@@ -84,8 +84,10 @@ type OnlineBanditState struct {
 	Updates     float64                        `json:"updates,omitempty"`
 	ErrorEWMA   float64                        `json:"error_ewma,omitempty"`
 	Epoch       float64                        `json:"epoch,omitempty"`
-	Generation  float64                        `json:"generation,omitempty"`
-	Uncertainty float64                        `json:"uncertainty,omitempty"`
+	Generation   float64                        `json:"generation,omitempty"`
+	Uncertainty  float64                        `json:"uncertainty,omitempty"`
+	TeacherRatio float64                        `json:"teacher_ratio,omitempty"`
+	TeacherAt    float64                        `json:"teacher_at,omitempty"`
 }
 
 func defaultOnlineBanditState() OnlineBanditState {
@@ -94,6 +96,7 @@ func defaultOnlineBanditState() OnlineBanditState {
 		state.Precision[i] = 1
 	}
 	state.Uncertainty = 1
+	state.TeacherRatio = 1
 	return state
 }
 
@@ -117,6 +120,13 @@ func normalizeOnlineBanditState(state OnlineBanditState) OnlineBanditState {
 	}
 	if state.Generation < 0 || math.IsNaN(state.Generation) || math.IsInf(state.Generation, 0) {
 		state.Generation = 0
+	}
+	if state.TeacherRatio <= 0 || math.IsNaN(state.TeacherRatio) || math.IsInf(state.TeacherRatio, 0) {
+		state.TeacherRatio = 1
+	}
+	state.TeacherRatio = math.Max(0.75, math.Min(1.25, state.TeacherRatio))
+	if state.TeacherAt < 0 || math.IsNaN(state.TeacherAt) || math.IsInf(state.TeacherAt, 0) {
+		state.TeacherAt = 0
 	}
 	if state.Updates <= 0 {
 		state.Uncertainty = 1
@@ -238,6 +248,13 @@ func (state *OnlineBanditState) softenForEnvironmentChange(thetaKeep, precisionK
 	if state.ErrorEWMA < 0.15 {
 		state.ErrorEWMA = 0.15
 	}
+	// A teacher anchor is also environment-sensitive. Preserve only a small
+	// fraction of its direction and force an early refresh on the new path.
+	if state.TeacherRatio <= 0 {
+		state.TeacherRatio = 1
+	}
+	state.TeacherRatio = 1 + (state.TeacherRatio-1)*0.25
+	state.TeacherAt = 0
 	// Recompute on the next prediction from the reopened precision rather than
 	// carrying a stale "certain" scalar into the selector.
 	state.Uncertainty = 1
@@ -271,6 +288,68 @@ func (state *OnlineBanditState) ObserveEpoch(epoch uint64) {
 	// A same-process handover is stronger evidence of context drift.
 	state.softenForEnvironmentChange(0.15, 0.20)
 	state.Epoch = float64(epoch)
+}
+
+func (state *OnlineBanditState) ApplyTeacherAnchor(heuristicWeight float64) float64 {
+	if heuristicWeight <= 0 || math.IsNaN(heuristicWeight) || math.IsInf(heuristicWeight, 0) {
+		return heuristicWeight
+	}
+	ratio := state.TeacherRatio
+	if ratio <= 0 || math.IsNaN(ratio) || math.IsInf(ratio, 0) {
+		ratio = 1
+	}
+	ratio = math.Max(0.75, math.Min(1.25, ratio))
+	return heuristicWeight * ratio
+}
+
+func (state *OnlineBanditState) ObserveTeacher(teacherWeight, heuristicWeight float64) {
+	if state == nil || teacherWeight <= 0 || heuristicWeight <= 0 ||
+		math.IsNaN(teacherWeight) || math.IsInf(teacherWeight, 0) ||
+		math.IsNaN(heuristicWeight) || math.IsInf(heuristicWeight, 0) {
+		return
+	}
+	ratio := teacherWeight / heuristicWeight
+	ratio = math.Max(0.75, math.Min(1.25, ratio))
+	if state.TeacherAt <= 0 || state.TeacherRatio <= 0 {
+		state.TeacherRatio = ratio
+	} else {
+		// The teacher is a slow global anchor; the local student owns fast
+		// adaptation, so refreshes move the anchor conservatively.
+		state.TeacherRatio = state.TeacherRatio*0.80 + ratio*0.20
+	}
+	state.TeacherRatio = math.Max(0.75, math.Min(1.25, state.TeacherRatio))
+	state.TeacherAt = state.Updates + 1
+}
+
+// ShouldRefreshTeacher makes the expensive ensemble demand-driven. A fresh or
+// uncertain student gets early global guidance; a mature local learner can run
+// for dozens of observations using the cached teacher ratio.
+func ShouldRefreshTeacher(input *ModelInput, modelError float64, state OnlineBanditState) bool {
+	if input == nil {
+		return false
+	}
+	total := input.Success + input.Failure
+	if total < DefaultMinSampleCount {
+		return false
+	}
+	if state.TeacherAt <= 0 || state.Updates < 4 {
+		return true
+	}
+
+	age := state.Updates - state.TeacherAt
+	if age < 0 {
+		age = 0
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.05 {
+		return age >= 4
+	}
+	if state.Uncertainty >= 0.45 || state.ErrorEWMA >= 0.20 || modelError >= 0.20 {
+		return age >= 6
+	}
+	if state.Updates >= 128 && state.Uncertainty < 0.15 && state.ErrorEWMA < 0.08 {
+		return age >= 64
+	}
+	return age >= 24
 }
 
 func clamp01(v float64) float64 {
