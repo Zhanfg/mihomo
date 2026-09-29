@@ -91,6 +91,51 @@ func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
 }
 
 
+// ShouldInvokeTeacher lets the compact online student decide when the heavy
+// global ensemble is worth consulting. Failures and fresh loss always escalate
+// immediately. A cold or uncertain student consults frequently; a mature,
+ // low-error student stretches the cadence to a large prime interval so
+// weighted sampling cannot phase-lock into always invoking the teacher.
+func ShouldInvokeTeacher(input *ModelInput, modelError, studentUncertainty, studentError, studentUpdates float64) bool {
+	if input == nil {
+		return false
+	}
+	total := input.Success + input.Failure
+	if total < DefaultMinSampleCount {
+		return false
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 {
+		return true
+	}
+	if studentUpdates < 8 {
+		return true
+	}
+
+	studentUncertainty = clamp01(studentUncertainty)
+	if studentError < 0 || math.IsNaN(studentError) || math.IsInf(studentError, 0) {
+		studentError = 1
+	}
+	if modelError < 0 || math.IsNaN(modelError) || math.IsInf(modelError, 0) {
+		modelError = 1
+	}
+
+	stride := int64(11)
+	switch {
+	case studentError >= 0.25 || studentUncertainty >= 0.55:
+		stride = 3
+	case studentError >= 0.15 || studentUncertainty >= 0.35 || modelError >= 0.20:
+		stride = 5
+	case total < 64:
+		stride = 7
+	case studentError < 0.08 && studentUncertainty < 0.18 && modelError < 0.08 && total >= 256:
+		stride = 29
+	case studentError < 0.12 && studentUncertainty < 0.28 && modelError < 0.12 && total >= 128:
+		stride = 17
+	}
+	return total%stride == 0
+}
+
+
 // TrainingSampleRate treats the configured rate as a ceiling, then spends it
 // where samples carry information. Failures/loss and model disagreement are
 // retained densely; mature stable traffic is downsampled because thousands of
