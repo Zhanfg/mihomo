@@ -30,6 +30,17 @@ type DistillFitResult struct {
 	BucketHoldout [8]int
 }
 
+type DistillSufficientStats struct {
+	SchemaVersion int                                                   `json:"schema_version"`
+	Ridge         float64                                               `json:"ridge"`
+	Source        string                                                `json:"source"`
+	BucketTrain   [8]int                                                `json:"bucket_train"`
+	BucketHoldout [8]int                                                `json:"bucket_holdout"`
+	XTX           [8][ExpertFeatureDimension][ExpertFeatureDimension]float64 `json:"xtx"`
+	XTY           [8][ExpertFeatureDimension]float64                   `json:"xty"`
+	Metrics       DistillMetrics                                        `json:"metrics"`
+}
+
 type DistillQualityPolicy struct {
 	MinHoldout          int
 	MaxMAE              float64
@@ -133,46 +144,57 @@ func predictDistilledCoefficients(coeff [8][ExpertFeatureDimension]float64, inpu
 // {scene,transport} bucket. The analytic expert fold is the regularization
 // center, so sparse production data can refine a model but cannot erase the
 // hand-designed prior.
-func FitDistilledExpertModel(samples []DistillTrainingSample, ridge float64) DistillFitResult {
+func normalizeDistillRidge(ridge float64) float64 {
 	if ridge <= 0 || math.IsNaN(ridge) || math.IsInf(ridge, 0) {
-		ridge = 8
+		return 8
 	}
-	base := CompileExpertDistillation()
-	result := DistillFitResult{Coefficients: base}
+	return ridge
+}
 
-	var xtx [8][ExpertFeatureDimension][ExpertFeatureDimension]float64
-	var xty [8][ExpertFeatureDimension]float64
+func BuildDistillSufficientStats(samples []DistillTrainingSample, ridge float64, source string) (DistillSufficientStats, []DistillTrainingSample) {
+	stats := DistillSufficientStats{
+		SchemaVersion: 1,
+		Ridge:         normalizeDistillRidge(ridge),
+		Source:        source,
+	}
 	var holdout []DistillTrainingSample
-
 	for i, sample := range samples {
 		if !validDistillTarget(sample.TargetWeight) {
 			continue
 		}
 		bucket := DistilledExpertBucket(&sample.Input)
-		// Stable 80/20 split. Keeping this deterministic makes generated model
-		// artifacts reproducible from the exact same CSV.
 		if i%5 == 0 {
-			result.BucketHoldout[bucket]++
+			stats.BucketHoldout[bucket]++
 			holdout = append(holdout, sample)
 			continue
 		}
-		result.BucketTrain[bucket]++
+		stats.BucketTrain[bucket]++
 		x := ExpertFeatures(&sample.Input)
 		y := math.Max(0.03, math.Min(1.20, sample.TargetWeight))
 		for row := 0; row < ExpertFeatureDimension; row++ {
-			xty[bucket][row] += x[row] * y
+			stats.XTY[bucket][row] += x[row] * y
 			for col := 0; col < ExpertFeatureDimension; col++ {
-				xtx[bucket][row][col] += x[row] * x[col]
+				stats.XTX[bucket][row][col] += x[row] * x[col]
 			}
 		}
 	}
+	return stats, holdout
+}
 
+func FitDistilledExpertFromStats(stats DistillSufficientStats) DistillFitResult {
+	base := CompileExpertDistillation()
+	result := DistillFitResult{
+		Coefficients: base,
+		BucketTrain:  stats.BucketTrain,
+		BucketHoldout: stats.BucketHoldout,
+	}
+	ridge := normalizeDistillRidge(stats.Ridge)
 	for bucket := 0; bucket < 8; bucket++ {
 		if result.BucketTrain[bucket] < ExpertFeatureDimension*4 {
 			continue
 		}
-		a := xtx[bucket]
-		b := xty[bucket]
+		a := stats.XTX[bucket]
+		b := stats.XTY[bucket]
 		for i := 0; i < ExpertFeatureDimension; i++ {
 			a[i][i] += ridge
 			b[i] += ridge * base[bucket][i]
@@ -181,12 +203,30 @@ func FitDistilledExpertModel(samples []DistillTrainingSample, ridge float64) Dis
 			result.Coefficients[bucket] = clampDistilledCoefficients(coeff)
 		}
 	}
+	result.Metrics = stats.Metrics
+	result.Metrics.TrainingSamples = 0
+	result.Metrics.HoldoutSamples = 0
+	for _, n := range result.BucketTrain {
+		result.Metrics.TrainingSamples += n
+	}
+	for _, n := range result.BucketHoldout {
+		result.Metrics.HoldoutSamples += n
+	}
+	return result
+}
 
+// FitDistilledExpertModel trains one tiny ridge-regression student per
+// {scene,transport} bucket. It returns a model that can later be reconstructed
+// from anonymized sufficient statistics without retaining raw production rows.
+func FitDistilledExpertModel(samples []DistillTrainingSample, ridge float64) DistillFitResult {
+	stats, holdout := BuildDistillSufficientStats(samples, ridge, "memory")
+	result := FitDistilledExpertFromStats(stats)
 	result.Metrics = EvaluateDistilledExpertModel(result.Coefficients, holdout)
 	result.Metrics.TrainingSamples = 0
 	for _, n := range result.BucketTrain {
 		result.Metrics.TrainingSamples += n
 	}
+	stats.Metrics = result.Metrics
 	return result
 }
 
