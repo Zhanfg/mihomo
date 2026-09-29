@@ -164,6 +164,7 @@ func TestSmartExtremeRank100kCandidatesBoundedTopK(t *testing.T) {
 
 func TestSmartExtremeTeacherRateAfterDistillation(t *testing.T) {
 	bank := NewExpertBank()
+	bank.ObserveTeacherRevision("teacher-v1")
 	input := expertTestInput(0, false)
 	prior := 0.7
 	for i := 0; i < 2_000; i++ {
