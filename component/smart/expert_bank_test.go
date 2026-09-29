@@ -183,8 +183,16 @@ func TestExpertBankTeacherRevisionReopensConfidence(t *testing.T) {
 			t.Fatalf("expert theta was not softened at dim %d", i)
 		}
 	}
+	if _, _, ready := bank.Predict(input, prior); ready {
+		t.Fatal("teacher revision change left old expert production-ready")
+	}
+	// The revision was discovered by a successful new-teacher call, so that
+	// call already supplied the first fresh distillation sample. Subsequent
+	// cold-expert refreshes return to the bounded 1-in-3 cadence.
+	input.Success = 66
+	input.Failure = 0
 	if !bank.NeedsTeacher(input, 0, false) {
-		t.Fatal("teacher revision change did not force re-distillation")
+		t.Fatal("teacher revision change did not reopen bounded re-distillation cadence")
 	}
 }
 
