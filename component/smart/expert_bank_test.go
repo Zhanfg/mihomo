@@ -113,7 +113,7 @@ func TestExpertTeacherCadenceTransitions(t *testing.T) {
 	if bank.NeedsTeacher(input, 0, false) != (30%3 == 0) {
 		t.Fatal("cold expert bootstrap cadence changed")
 	}
-	input.Success = 194
+	input.Success = 193
 	if bank.NeedsTeacher(input, 0.9, true) {
 		t.Fatal("mature expert should not refresh before prime cadence")
 	}
