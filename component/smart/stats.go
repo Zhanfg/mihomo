@@ -2215,7 +2215,7 @@ func (s *Store) CleanupOldRecords(group, config string) {
 		for i := 0; i < len(validTargets); i++ {
 			path := validTargets[i]
 			info := targetMap[path]
-			shouldDeleteByCount := deleted < toDeleteCount && totalRecords > maxTargets*2
+			shouldDeleteByCount := deleted < toDeleteCount
 			if shouldDeleteByCount || time.Since(info.time) > RecordExpiredTime {
 				toDelete = append(toDelete, path)
 				deleted++
