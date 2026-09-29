@@ -1,6 +1,7 @@
 package lightgbm
 
 import (
+	"bytes"
 	"encoding/csv"
 	"errors"
 	"os"
@@ -30,6 +31,7 @@ type DataCollector struct {
 	configured         bool
 	smartCollectorSize int64
 	lastFileCheck      time.Time
+	currentSize        int64
 }
 
 const (
@@ -113,13 +115,12 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 		}
 	}
 
-	// 检查文件大小限制
-	if c.file != nil {
-		stat, err := c.file.Stat()
-		if err == nil && stat.Size() > c.smartCollectorSize {
-			log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.smartCollectorSize/(1024*1024))
-			return
-		}
+	// currentSize tracks logical CSV bytes, including rows still buffered by
+	// csv.Writer. This prevents buffered writes from slipping past the hard
+	// collector budget.
+	if c.currentSize >= c.smartCollectorSize {
+		log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.smartCollectorSize/(1024*1024))
+		return
 	}
 
 	if !c.configured {
@@ -191,6 +192,21 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 		return
 	}
 
+	var encoded bytes.Buffer
+	sizeWriter := csv.NewWriter(&encoded)
+	if err := sizeWriter.Write(sample); err != nil {
+		return
+	}
+	sizeWriter.Flush()
+	if err := sizeWriter.Error(); err != nil {
+		return
+	}
+	rowSize := int64(encoded.Len())
+	if rowSize <= 0 || c.currentSize+rowSize > c.smartCollectorSize {
+		log.Infoln("[Smart] Collector byte budget exhausted; dropping further training rows")
+		return
+	}
+
 	if err := c.writer.Write(sample); err != nil {
 		log.Warnln("[Smart] Failed to write training data: %v", err)
 		c.configured = false
@@ -201,6 +217,7 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 		c.writer = nil
 		return
 	}
+	c.currentSize += rowSize
 
 	c.sampleCount++
 
@@ -329,6 +346,20 @@ func (c *DataCollector) initializeWriter() error {
 		c.writer.Flush()
 	}
 
+	if c.writer != nil {
+		c.writer.Flush()
+		if err := c.writer.Error(); err != nil {
+			_ = c.file.Close()
+			c.file = nil
+			c.writer = nil
+			return err
+		}
+	}
+	if stat, err := c.file.Stat(); err == nil {
+		c.currentSize = stat.Size()
+	} else {
+		c.currentSize = 0
+	}
 	c.configured = true
 	return nil
 }
@@ -370,6 +401,7 @@ func (c *DataCollector) closeLocked() error {
 	}
 	c.file = nil
 	c.writer = nil
+	c.currentSize = 0
 	c.configured = false
 	return result
 }
