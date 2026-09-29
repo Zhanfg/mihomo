@@ -21,6 +21,10 @@ func (s *Store) SaveExpertBank(group, config string, bank *ExpertBank) error {
 	if s == nil || bank == nil {
 		return nil
 	}
+	if db == nil {
+		bank.MarkClean()
+		return nil
+	}
 	data, err := bank.MarshalBounded()
 	if err != nil {
 		return err
