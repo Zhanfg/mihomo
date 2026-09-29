@@ -19,14 +19,14 @@ var distilledExpertCalibration = [8]float64{
 }
 
 var distilledExpertManifest = DistilledArtifactManifest{
-	Version:          DistilledExpertVersion,
-	Source:           "analytic",
-	TrainingSamples:  0,
-	HoldoutSamples:   0,
-	MAE:              0,
-	RMSE:             0,
-	P95AbsoluteError: 0,
-	MeanRelative:     0,
-	RankingAgreement: 1,
-	Fingerprint:      "analytic-expert-v9-1",
+	Version: "expert-v9-1",
+	Source: "analytic",
+	TrainingSamples: 0,
+	HoldoutSamples: 0,
+	MAE: 0.00000000,
+	RMSE: 0.00000000,
+	P95AbsoluteError: 0.00000000,
+	MeanRelative: 0.00000000,
+	RankingAgreement: 1.00000000,
+	Fingerprint: "analytic-expert-v9-1",
 }
