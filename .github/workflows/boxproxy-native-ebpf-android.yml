@@ -97,7 +97,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          CGO_ENABLED=0 go test ./adapter -run '^
+          CGO_ENABLED=0 go test ./adapter -run '^$' -bench '^BenchmarkCapabilitySnapshotReuse$' -benchmem | tee CAPABILITY_SNAPSHOT_BENCH.txt
+          CGO_ENABLED=0 go test ./adapter/outboundgroup -run '^$' -bench '^BenchmarkSmartStats(Closure|Event)Queue$' -benchmem | tee SMART_STATS_EVENT_BENCH.txt
+          CGO_ENABLED=0 go test ./component/smart -run '^$' -bench '^BenchmarkOnlineBandit(Predict|Update)$' -benchmem | tee SMART_BANDIT_BENCH.txt
+
       - name: Current Smart model smoke
         shell: bash
         run: |
