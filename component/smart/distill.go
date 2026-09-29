@@ -161,3 +161,8 @@ func ProductionDistillationAcceptable(report DistillationQualityReport, maxLogRM
 	}
 	return true
 }
+
+
+func CurrentDistilledExpertCalibration() [8]float64 {
+	return distilledExpertCalibration
+}
