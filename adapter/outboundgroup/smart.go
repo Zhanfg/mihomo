@@ -2751,15 +2751,20 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		errKey := smart.ModelErrorWeightType(isUDP)
 		oldModelError := atomicRecord.GetWeight(errKey)
 		modelError = oldModelError
-		studentNeedsTeacher := smart.ShouldInvokeTeacher(
+		shouldTeacher := smart.ShouldInvokeTeacher(
 			input,
 			oldModelError,
 			banditState.Uncertainty,
 			banditState.ErrorEWMA,
 			banditState.Updates,
 		)
-		expertNeedsTeacher := s.expertBank == nil || s.expertBank.NeedsTeacher(input, expertConfidence, expertReady)
-		if studentNeedsTeacher || expertNeedsTeacher {
+		if s.expertBank != nil {
+			// Once a distilled expert exists it owns heavy-teacher cadence.
+			// Target-local student uncertainty is resolved by the cheap online
+			// learner itself; it must not wake the global ensemble back up.
+			shouldTeacher = s.expertBank.NeedsTeacher(input, expertConfidence, expertReady)
+		}
+		if shouldTeacher {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && observedWeight > 0 {
 				if s.expertBank != nil {
