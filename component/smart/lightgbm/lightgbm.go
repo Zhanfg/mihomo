@@ -2,6 +2,7 @@ package lightgbm
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"math"
@@ -439,6 +440,7 @@ type WeightModel struct {
 	transforms         *FeatureTransforms
 	featuresCompatible bool
 	lastUpdate         time.Time
+	modelDigest        string
 	lastUse            atomic.Int64
 	idleTimer          *time.Timer
 	mutex              sync.RWMutex
@@ -516,6 +518,21 @@ func (m *WeightModel) loadModel(path string) error {
 		return fmt.Errorf("failed to load binary model: %v", err)
 	}
 
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open model for digest: %v", err)
+	}
+	hasher := sha256.New()
+	_, hashErr := io.Copy(hasher, f)
+	closeErr := f.Close()
+	if hashErr != nil {
+		return fmt.Errorf("hash model: %v", hashErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close model after hash: %v", closeErr)
+	}
+	modelDigest := fmt.Sprintf("%x", hasher.Sum(nil))
+
 	// Load and validate transforms once. Compatibility belongs to model-load
 	// time, not the per-prediction hot path.
 	transforms, err := LoadTransformsFromModel(path)
@@ -544,6 +561,7 @@ func (m *WeightModel) loadModel(path string) error {
 	m.transforms = transforms
 	m.featuresCompatible = compatible
 	m.model = model
+	m.modelDigest = modelDigest
 	m.lastUpdate = now
 	m.lastUse.Store(now.UnixNano())
 	if m.idleTimer == nil {
@@ -590,6 +608,16 @@ func (m *WeightModel) expireIdleModel() {
 	if released {
 		log.Debugln("[Smart] Released idle LightGBM ensemble; online residual state remains resident")
 	}
+}
+
+func (m *WeightModel) Revision() string {
+	if m == nil {
+		return ""
+	}
+	m.mutex.RLock()
+	revision := m.modelDigest
+	m.mutex.RUnlock()
+	return revision
 }
 
 func ReloadModel() {
