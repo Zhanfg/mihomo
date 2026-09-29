@@ -246,6 +246,25 @@ func (s *Store) GetUnwrapResult(group, config, target string) (proxies []string,
 	return proxies, expired
 }
 
+
+func (s *Store) UnwrapPinTrusted(group, config, target, proxy string, isUDP bool, currentEpoch uint64) bool {
+	if !cacheReady.Load() || recordCache == nil || target == "" || proxy == "" {
+		return false
+	}
+	cacheKey := FormatDBKey(KeyTypeStats, config, group, target, proxy)
+	record, ok := recordCache.Get(cacheKey)
+	if !ok || record == nil {
+		return false
+	}
+	state := LoadOnlineBanditState(record, isUDP)
+	samples := SampleCount(record.success.Load(), record.failure.Load())
+	weightType := WeightTypeTCP
+	if isUDP {
+		weightType = WeightTypeUDP
+	}
+	return OnlineBanditPinTrusted(state, samples, record.GetWeight(weightType), currentEpoch)
+}
+
 func (s *Store) DeleteUnwrapResult(group, config string, target string) {
 	if target == "" {
 		return
