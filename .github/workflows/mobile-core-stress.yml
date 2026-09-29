@@ -13,6 +13,7 @@ on:
       - opt/smart-model-v7
     paths:
       - ".github/workflows/mobile-core-stress.yml"
+      - ".github/scripts/smart_extreme_soak.py"
       - "adapter/**"
       - "component/smart/**"
       - "component/linkprofile/**"
@@ -262,3 +263,221 @@ jobs:
             CURL_ERRORS.txt
             /tmp/mihomo.log
             /tmp/http.log
+
+
+  smart-extreme:
+    name: Smart extreme model / distill / drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Run adversarial model extreme suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v go test -tags smart_extreme ./component/smart -run '^TestSmartExtreme' -count=1 -timeout=25m 2>&1 | tee SMART_EXTREME.txt
+
+      - name: Race concurrent distillation
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -race -tags smart_extreme ./component/smart -run '^TestSmartExtremeConcurrentExpertDistillAndSnapshot$' -count=1 -timeout=20m 2>&1 | tee SMART_EXTREME_RACE.txt
+
+      - name: Benchmark online model stack
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test ./component/smart -run '^$' -bench 'Benchmark(DistilledExpert|OnlineBandit|ExplorationBonus)' -benchmem -benchtime=5s | tee SMART_MODEL_STACK_BENCH.txt
+
+      - name: Enforce extreme-suite memory budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          RSS="$(awk -F: '/Maximum resident set size \(kbytes\)/{gsub(/ /,"",$2); print $2}' SMART_EXTREME.txt | tail -n1)"
+          test -n "$RSS"
+          echo "extreme_test_max_rss_kb=$RSS" | tee SMART_EXTREME_SUMMARY.txt
+          test "$RSS" -lt 786432
+
+      - name: Upload extreme model reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-extreme-model
+          path: |
+            SMART_EXTREME.txt
+            SMART_EXTREME_RACE.txt
+            SMART_MODEL_STACK_BENCH.txt
+            SMART_EXTREME_SUMMARY.txt
+
+  adversarial-soak:
+    name: 47000-request failure / recovery soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Build soak core
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -o mihomo-soak
+
+      - name: Prepare soak fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/mihomo-soak/www
+          printf 'smart-soak-ok\n' > /tmp/mihomo-soak/www/index.html
+          cat > /tmp/mihomo-soak/server.py <<'PY'
+          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+          import os
+          class S(ThreadingHTTPServer):
+              request_queue_size = 1024
+              daemon_threads = True
+          class H(SimpleHTTPRequestHandler):
+              def log_message(self, *_):
+                  pass
+          os.chdir("/tmp/mihomo-soak/www")
+          S(("127.0.0.1", 18080), H).serve_forever()
+          PY
+          cat > /tmp/mihomo-soak/config.yaml <<'YAML'
+          mixed-port: 17890
+          allow-lan: false
+          mode: rule
+          log-level: error
+          ipv6: true
+          find-process-mode: off
+          profile:
+            store-selected: false
+            store-fake-ip: false
+          proxy-groups:
+            - name: STRESS
+              type: smart
+              proxies: [DIRECT]
+              url: http://127.0.0.1:18080/
+              interval: 60
+              lazy: false
+              uselightgbm: false
+              auto-ip-family: true
+              max-failed-times: 100000
+              empty-fallback: REJECT
+          rules:
+            - MATCH,STRESS
+          YAML
+          ./mihomo-soak -t -d /tmp/mihomo-soak -f /tmp/mihomo-soak/config.yaml
+
+      - name: Run healthy-failure-recovery waves
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 /tmp/mihomo-soak/server.py >/tmp/soak-http.log 2>&1 &
+          HTTP_PID=$!
+          ./mihomo-soak -d /tmp/mihomo-soak -f /tmp/mihomo-soak/config.yaml >/tmp/soak-mihomo.log 2>&1 &
+          MIHOMO_PID=$!
+
+          cleanup() {
+            kill "$MIHOMO_PID" "$HTTP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 150); do
+            if python3 .github/scripts/smart_extreme_soak.py --count 1 --concurrency 1 --timeout 1 --label ready >/tmp/ready.json 2>/dev/null; then
+              if grep -q '"failures":0' /tmp/ready.json; then break; fi
+            fi
+            kill -0 "$MIHOMO_PID"
+            sleep 0.1
+          done
+          grep -q '"failures":0' /tmp/ready.json
+
+          (
+            while kill -0 "$MIHOMO_PID" 2>/dev/null; do
+              TS=$(date +%s%3N)
+              RSS=$(awk '/VmRSS:/{print $2}' /proc/$MIHOMO_PID/status 2>/dev/null || echo 0)
+              THR=$(awk '/Threads:/{print $2}' /proc/$MIHOMO_PID/status 2>/dev/null || echo 0)
+              CPU=$(ps -p "$MIHOMO_PID" -o %cpu= 2>/dev/null | xargs || echo 0)
+              echo "$TS $RSS $THR $CPU"
+              sleep 0.2
+            done
+          ) > SOAK_RESOURCE_SAMPLES.txt &
+          MON_PID=$!
+
+          python3 .github/scripts/smart_extreme_soak.py --count 15000 --concurrency 96 --timeout 4 --label healthy > SOAK_HEALTHY.json
+
+          kill "$HTTP_PID"
+          wait "$HTTP_PID" 2>/dev/null || true
+          python3 .github/scripts/smart_extreme_soak.py --count 2000 --concurrency 96 --timeout 1.5 --label outage > SOAK_OUTAGE.json || true
+          kill -0 "$MIHOMO_PID"
+
+          python3 /tmp/mihomo-soak/server.py >>/tmp/soak-http.log 2>&1 &
+          HTTP_PID=$!
+          RECOVERED=0
+          for _ in $(seq 1 150); do
+            python3 .github/scripts/smart_extreme_soak.py --count 4 --concurrency 2 --timeout 2 --label recovery-probe >/tmp/recovery-probe.json || true
+            if grep -q '"failures":0' /tmp/recovery-probe.json; then
+              RECOVERED=1
+              break
+            fi
+            kill -0 "$MIHOMO_PID"
+            sleep 0.2
+          done
+          test "$RECOVERED" -eq 1
+
+          python3 .github/scripts/smart_extreme_soak.py --count 30000 --concurrency 128 --timeout 4 --label recovered > SOAK_RECOVERED.json
+
+          kill "$MON_PID" 2>/dev/null || true
+          wait "$MON_PID" 2>/dev/null || true
+          kill -0 "$MIHOMO_PID"
+
+          python3 - <<'PY'
+          import json
+          h=json.load(open("SOAK_HEALTHY.json"))
+          o=json.load(open("SOAK_OUTAGE.json"))
+          r=json.load(open("SOAK_RECOVERED.json"))
+          assert h["failure_rate"] <= 0.001, h
+          assert o["failure_rate"] >= 0.80, o
+          assert r["failure_rate"] <= 0.002, r
+          print("healthy_failure_rate=%.6f" % h["failure_rate"])
+          print("outage_failure_rate=%.6f" % o["failure_rate"])
+          print("recovered_failure_rate=%.6f" % r["failure_rate"])
+          print("recovered_p99_ms=%.2f" % r["latency_ms"]["p99"])
+          PY
+
+          awk '
+            BEGIN { maxrss=0; maxthr=0; maxcpu=0 }
+            {
+              if ($2+0 > maxrss) maxrss=$2+0
+              if ($3+0 > maxthr) maxthr=$3+0
+              if ($4+0 > maxcpu) maxcpu=$4+0
+            }
+            END {
+              printf "max_core_rss_kb=%d\nmax_core_threads=%d\nmax_core_cpu_percent=%.2f\n", maxrss,maxthr,maxcpu
+              if (maxrss >= 196608) exit 2
+              if (maxthr >= 96) exit 3
+            }
+          ' SOAK_RESOURCE_SAMPLES.txt | tee SOAK_RESOURCE_SUMMARY.txt
+          tail -n 300 /tmp/soak-mihomo.log > SOAK_MIHOMO_TAIL.txt
+
+      - name: Upload adversarial soak reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-adversarial-soak
+          path: |
+            SOAK_HEALTHY.json
+            SOAK_OUTAGE.json
+            SOAK_RECOVERED.json
+            SOAK_RESOURCE_SAMPLES.txt
+            SOAK_RESOURCE_SUMMARY.txt
+            SOAK_MIHOMO_TAIL.txt
+            /tmp/recovery-probe.json
+            /tmp/soak-mihomo.log
+            /tmp/soak-http.log
