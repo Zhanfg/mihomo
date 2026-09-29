@@ -159,7 +159,7 @@ func loadRows(path string) ([]collectedRow, error) {
 		if input.EmaLossRate == 0 {
 			input.EmaLossRate = input.CumulLossRate
 		}
-		if port := parseInt(row, index, "port_raw"); port > 0 && port <= math.MaxUint16 {
+		if port := parseInt(row, index, "port_raw"); port > 0 && port <= 65535 {
 			input.DestPort = uint16(port)
 		}
 		if geo := parseString(row, index, "geoip_raw"); geo != "" {
