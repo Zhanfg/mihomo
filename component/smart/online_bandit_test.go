@@ -143,7 +143,7 @@ func BenchmarkOnlineBanditUpdate(b *testing.B) {
 
 func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
-	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12}
+	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12, Epoch: 7}
 	for i := 0; i < OnlineBanditDimension; i++ {
 		state.Theta[i] = float64(i+1) * 0.01
 		state.Precision[i] = float64(i + 2)
@@ -151,7 +151,7 @@ func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	SaveOnlineBanditState(record, false, state, 0.42)
 	got := LoadOnlineBanditState(record, false)
 
-	if math.Abs(got.Updates-state.Updates) > 1e-12 || math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 {
+	if math.Abs(got.Updates-state.Updates) > 1e-12 || math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 || math.Abs(got.Epoch-state.Epoch) > 1e-12 {
 		t.Fatalf("scalar state mismatch: got=%+v want=%+v", got, state)
 	}
 	for i := 0; i < OnlineBanditDimension; i++ {
@@ -161,5 +161,31 @@ func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	}
 	if gotU := record.GetWeight(BanditUncertaintyWeightType(false)); math.Abs(gotU-0.42) > 1e-12 {
 		t.Fatalf("uncertainty=%v want=0.42", gotU)
+	}
+}
+
+
+func TestOnlineBanditEpochShiftReopensConfidence(t *testing.T) {
+	x := OnlineBanditFeatures(testBanditInput())
+	state := OnlineBanditState{Epoch: 11, ErrorEWMA: 0.02}
+	for i := 0; i < OnlineBanditDimension; i++ {
+		state.Theta[i] = 0.20
+		state.Precision[i] = 100
+	}
+	beforeWeight, beforeU := state.Predict(0.8, x)
+	state.ObserveEpoch(12)
+	afterWeight, afterU := state.Predict(0.8, x)
+
+	if state.Epoch != 12 {
+		t.Fatalf("epoch=%v want=12", state.Epoch)
+	}
+	if afterU <= beforeU {
+		t.Fatalf("handover did not reopen confidence: before=%v after=%v", beforeU, afterU)
+	}
+	if state.ErrorEWMA < 0.15 {
+		t.Fatalf("handover did not raise adaptation pressure: %v", state.ErrorEWMA)
+	}
+	if afterWeight == 0 || afterWeight >= beforeWeight {
+		t.Fatalf("handover should retain but soften learned residual: before=%v after=%v", beforeWeight, afterWeight)
 	}
 }
