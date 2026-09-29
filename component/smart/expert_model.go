@@ -135,7 +135,7 @@ func ExpertTeacherPrior(input *ModelInput, priorityFactor float64) float64 {
 	return score * priorityFactor
 }
 
-func DistilledExpertPrior(input *ModelInput, priorityFactor float64) float64 {
+func distilledExpertPrior(input *ModelInput, priorityFactor float64, applyProductionCalibration bool) float64 {
 	if input == nil || priorityFactor <= 0 {
 		return 0
 	}
@@ -149,9 +149,19 @@ func DistilledExpertPrior(input *ModelInput, priorityFactor float64) float64 {
 	}
 	x := ExpertFeatures(input)
 	score := dotExpert(distilledExpertCoefficients[bucket], x)
-	score *= distilledExpertCalibration[bucket]
+	if applyProductionCalibration {
+		score *= distilledExpertCalibration[bucket]
+	}
 	score = math.Max(0.03, math.Min(1.20, score))
 	return score * priorityFactor
+}
+
+func DistilledExpertPrior(input *ModelInput, priorityFactor float64) float64 {
+	return distilledExpertPrior(input, priorityFactor, true)
+}
+
+func DistilledExpertBasePrior(input *ModelInput, priorityFactor float64) float64 {
+	return distilledExpertPrior(input, priorityFactor, false)
 }
 
 // CompileExpertDistillation analytically folds the scene router and four
