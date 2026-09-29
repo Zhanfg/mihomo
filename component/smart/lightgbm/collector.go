@@ -33,7 +33,7 @@ type DataCollector struct {
 
 const (
 	defaultSmartCollectorSize = 100 * 1024 * 1024
-	expectedColumns           = MaxFeatureSize + 10
+	expectedColumns           = MaxFeatureSize + 11
 )
 
 func InitCollector(collectSize float64) {
@@ -66,7 +66,7 @@ func GetCollector() *DataCollector {
 	return smartCollector
 }
 
-func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata, actualWeight float64, weightSource string) {
+func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata, actualWeight, teacherWeight float64, weightSource string) {
 	if c == nil {
 		return
 	}
@@ -156,6 +156,7 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 		strconv.FormatUint(uint64(metadata.DstPort), 10),
 		geoIPStr,
 		strconv.FormatFloat(actualWeight, 'f', 6, 64),
+		strconv.FormatFloat(teacherWeight, 'f', 6, 64),
 		standardizedSource,
 		time.Now().Format(time.RFC3339),
 	)
@@ -201,14 +202,17 @@ func (c *DataCollector) initializeWriter() error {
 			reader := csv.NewReader(f)
 			headers, err := reader.Read()
 			if err == nil {
-				hasMax := false
+				hasLoss := false
+				hasTeacher := false
 				for _, h := range headers {
-					if h == "cumul_loss_rate" {
-						hasMax = true
-						break
+					switch h {
+					case "cumul_loss_rate":
+						hasLoss = true
+					case "teacher_weight":
+						hasTeacher = true
 					}
 				}
-				if !hasMax {
+				if !hasLoss || !hasTeacher {
 					needUpgrade = true
 				}
 			}
@@ -218,7 +222,7 @@ func (c *DataCollector) initializeWriter() error {
 	if needUpgrade {
 		backupPath := c.dataPath + ".bak." + time.Now().Format("20060102150405")
 		os.Rename(c.dataPath, backupPath)
-		log.Infoln("[Smart] Old CSV file does not contain hash columns, backup to %s and create new file", backupPath)
+		log.Infoln("[Smart] Old CSV schema is missing current Smart distillation columns, backup to %s and create new file", backupPath)
 		fileExists = false
 	}
 
@@ -277,7 +281,7 @@ func (c *DataCollector) initializeWriter() error {
 			"asn_hash", "host_hash", "ip_hash", "geoip_hash",
 			"group_name", "node_name",
 			"asn_raw", "host_raw", "ip_raw", "port_raw", "geoip_raw",
-			"weight", "weight_source", "timestamp",
+			"weight", "teacher_weight", "weight_source", "timestamp",
 		}
 
 		if err := c.writer.Write(headers); err != nil {
