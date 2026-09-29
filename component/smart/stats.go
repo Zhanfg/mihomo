@@ -448,6 +448,25 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 	r.weights.Set(weightType, value)
 }
 
+
+func (s *Store) LiveBanditUncertainty(group, config, target, node string, isUDP bool) float64 {
+	// Unknown/cold records are intentionally treated as maximally uncertain.
+	// This keeps exploration useful after restart without adding DB reads to the
+	// selector hot path. Once a record is resident, uncertainty is O(1).
+	if !cacheReady.Load() {
+		return 1
+	}
+	cacheKey := FormatDBKey(KeyTypeStats, config, group, target, node)
+	record, ok := recordCache.Get(cacheKey)
+	if !ok || record == nil {
+		return 1
+	}
+	if record.GetWeight(banditUpdatesKey(isUDP)) <= 0 {
+		return 1
+	}
+	return clamp01(record.GetWeight(BanditUncertaintyWeightType(isUDP)))
+}
+
 // AddASNEvidence counts one more observation of a network on this target, the
 // evidence ClaimedASNRules is built from, see asnEvidencePrefix.
 func (r *AtomicStatsRecord) AddASNEvidence(asn string) {
