@@ -247,6 +247,13 @@ func AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibra
 
 	adaptedModel := modelWeight * calibration
 	weight = adaptedModel*modelShare + observedWeight*(1-modelShare)
+
+	// The heavy teacher is advisory. A valid-but-corrupted model must not be
+	// able to drag the route score arbitrarily far from the compact expert
+	// prior that is continuously checked by real connection reward.
+	lower := observedWeight * 0.55
+	upper := observedWeight * 1.45
+	weight = math.Max(lower, math.Min(upper, weight))
 	return weight, calibration, modelError
 }
 
