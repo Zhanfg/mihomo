@@ -143,7 +143,7 @@ func BenchmarkOnlineBanditUpdate(b *testing.B) {
 
 func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
-	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12, Epoch: 7}
+	state := OnlineBanditState{Updates: 17, ErrorEWMA: 0.12, Epoch: 7, Generation: 12345}
 	for i := 0; i < OnlineBanditDimension; i++ {
 		state.Theta[i] = float64(i+1) * 0.01
 		state.Precision[i] = float64(i + 2)
@@ -151,7 +151,11 @@ func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 	SaveOnlineBanditState(record, false, state, 0.42)
 	got := LoadOnlineBanditState(record, false)
 
-	if math.Abs(got.Updates-state.Updates) > 1e-12 || math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 || math.Abs(got.Epoch-state.Epoch) > 1e-12 {
+	if math.Abs(got.Updates-state.Updates) > 1e-12 ||
+		math.Abs(got.ErrorEWMA-state.ErrorEWMA) > 1e-12 ||
+		math.Abs(got.Epoch-state.Epoch) > 1e-12 ||
+		math.Abs(got.Generation-state.Generation) > 1e-12 ||
+		math.Abs(got.Uncertainty-0.42) > 1e-12 {
 		t.Fatalf("scalar state mismatch: got=%+v want=%+v", got, state)
 	}
 	for i := 0; i < OnlineBanditDimension; i++ {
@@ -159,15 +163,18 @@ func TestOnlineBanditStatePersistsInStatsRecord(t *testing.T) {
 			t.Fatalf("dimension %d mismatch: got=%+v want=%+v", i, got, state)
 		}
 	}
-	if gotU := record.GetWeight(BanditUncertaintyWeightType(false)); math.Abs(gotU-0.42) > 1e-12 {
-		t.Fatalf("uncertainty=%v want=0.42", gotU)
+	if gotU := record.banditUncertaintyTCP.Load(); math.Abs(gotU-0.42) > 1e-12 {
+		t.Fatalf("atomic uncertainty=%v want=0.42", gotU)
+	}
+	if legacy := record.GetWeight(BanditUncertaintyWeightType(false)); legacy != 0 {
+		t.Fatalf("compact state leaked uncertainty into generic weights: %v", legacy)
 	}
 }
 
 
 func TestOnlineBanditEpochShiftReopensConfidence(t *testing.T) {
 	x := OnlineBanditFeatures(testBanditInput())
-	state := OnlineBanditState{Epoch: 11, ErrorEWMA: 0.02}
+	state := OnlineBanditState{Epoch: 11, Generation: processBanditGeneration, ErrorEWMA: 0.02}
 	for i := 0; i < OnlineBanditDimension; i++ {
 		state.Theta[i] = 0.20
 		state.Precision[i] = 100
@@ -223,5 +230,52 @@ func TestOnlineBanditReopensConfidenceAcrossProcessRestart(t *testing.T) {
 	}
 	if state.ErrorEWMA < 0.15 {
 		t.Fatalf("restart did not raise adaptation pressure: error=%v", state.ErrorEWMA)
+	}
+}
+
+
+func TestLegacyBanditWeightsMigrateToCompactState(t *testing.T) {
+	weights := map[string]float64{
+		banditThetaTCP[0]:                 0.11,
+		banditPrecisionTCP[0]:             9,
+		banditUpdatesKey(false):           12,
+		banditErrorKey(false):             0.08,
+		banditEpochKey(false):             3,
+		banditGenerationKey(false):        999,
+		BanditUncertaintyWeightType(false): 0.35,
+		"tcp":                             0.82,
+	}
+	state, ok := legacyBanditStateFromWeights(weights, false)
+	if !ok {
+		t.Fatal("legacy state was not detected")
+	}
+	if math.Abs(state.Theta[0]-0.11) > 1e-12 ||
+		math.Abs(state.Precision[0]-9) > 1e-12 ||
+		math.Abs(state.Updates-12) > 1e-12 ||
+		math.Abs(state.Uncertainty-0.35) > 1e-12 {
+		t.Fatalf("legacy migration mismatch: %+v", state)
+	}
+	if !isLegacyBanditWeightKey(banditThetaTCP[0]) || isLegacyBanditWeightKey("tcp") {
+		t.Fatal("legacy key classifier is too broad or too narrow")
+	}
+}
+
+func BenchmarkOnlineBanditCompactStateRoundTrip(b *testing.B) {
+	record := &AtomicStatsRecord{weights: lru.New[string, float64](lru.WithSize[string, float64](100))}
+	record.banditUncertaintyTCP.Store(1)
+	state := defaultOnlineBanditState()
+	state.Updates = 64
+	state.Generation = processBanditGeneration
+	for i := range state.Precision {
+		state.Precision[i] = 8
+	}
+	// Allocate the one compact state object before measuring steady-state cost.
+	SaveOnlineBanditState(record, false, state, 0.4)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		got := LoadOnlineBanditState(record, false)
+		SaveOnlineBanditState(record, false, got, 0.4)
 	}
 }
