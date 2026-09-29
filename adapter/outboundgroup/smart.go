@@ -2504,7 +2504,7 @@ func (s *Smart) logConnectionStats(err error, record *smart.StatsRecord, metadat
 
 // data collection
 func (s *Smart) collectConnectionData(input *smart.ModelInput, metadata *C.Metadata,
-	baseWeight float64, proxyName string, ModelPredicted bool, modelError float64) {
+	baseWeight, teacherWeight float64, proxyName string, ModelPredicted bool, modelError float64) {
 
 	// The configured sample rate is a ceiling. Stable mature traffic is
 	// downsampled further; failures/loss/model disagreement keep full priority.
@@ -2521,7 +2521,7 @@ func (s *Smart) collectConnectionData(input *smart.ModelInput, metadata *C.Metad
 		weightSource = "LightGBM"
 	}
 
-	lightgbm.GetCollector().AddSample(input, metadata, baseWeight, weightSource)
+	lightgbm.GetCollector().AddSample(input, metadata, baseWeight, teacherWeight, weightSource)
 }
 
 func updateEMAInt(oldValue int64, newValue int64) int64 {
@@ -2732,6 +2732,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	calculatedWeight = smart.BlendHeuristicAndDistilled(heuristicWeight, distilledWeight, samples)
 	ModelPredicted = false
 	modelError := 0.0
+	teacherSoftWeight := 0.0
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
 	banditState.ObserveEpoch(netstate.CurrentEpoch())
 
@@ -2761,6 +2762,9 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		) {
 			modelWeight, predicted := s.weightModel.PredictWeight(input, priorityFactor)
 			if predicted && calculatedWeight > 0 {
+				if priorityFactor > 0 {
+					teacherSoftWeight = modelWeight / priorityFactor
+				}
 				calKey := smart.ModelCalibrationWeightType(isUDP)
 				oldCalibration := atomicRecord.GetWeight(calKey)
 				var newCalibration, newModelError float64
@@ -2850,7 +2854,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 				}
 			}
 		}
-		s.collectConnectionData(input, metadata, collectedWeight, proxyName, ModelPredicted, modelError)
+		s.collectConnectionData(input, metadata, collectedWeight, teacherSoftWeight, proxyName, ModelPredicted, modelError)
 	}
 
 	if debugEnabled {
