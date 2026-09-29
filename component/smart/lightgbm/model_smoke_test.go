@@ -136,3 +136,19 @@ func TestActiveModelLeaseStaysResident(t *testing.T) {
 		t.Fatalf("unexpected next idle check: %v", next)
 	}
 }
+
+
+func TestCurrentModelPreparedFeatureParity(t *testing.T) {
+	m := loadExternalModel(t)
+	input := externalModelInput()
+	features := prepareFeatures(input)
+
+	fromInput, okInput := m.PredictWeight(input, 1)
+	fromFeatures, okFeatures := m.PredictFeatureVector(features, 1)
+	if !okInput || !okFeatures {
+		t.Fatalf("prediction path failed: input=%v features=%v", okInput, okFeatures)
+	}
+	if math.Abs(fromInput-fromFeatures) > 1e-12 {
+		t.Fatalf("prepared feature path drifted: input=%v features=%v", fromInput, fromFeatures)
+	}
+}
