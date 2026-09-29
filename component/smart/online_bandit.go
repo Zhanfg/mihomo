@@ -86,8 +86,9 @@ type OnlineBanditState struct {
 	Epoch       float64                        `json:"epoch,omitempty"`
 	Generation   float64                        `json:"generation,omitempty"`
 	Uncertainty  float64                        `json:"uncertainty,omitempty"`
-	TeacherRatio float64                        `json:"teacher_ratio,omitempty"`
-	TeacherAt    float64                        `json:"teacher_at,omitempty"`
+	TeacherRatio   float64                        `json:"teacher_ratio,omitempty"`
+	TeacherAt      float64                        `json:"teacher_at,omitempty"`
+	TeacherProbeAt float64                        `json:"teacher_probe_at,omitempty"`
 }
 
 func defaultOnlineBanditState() OnlineBanditState {
@@ -127,6 +128,9 @@ func normalizeOnlineBanditState(state OnlineBanditState) OnlineBanditState {
 	state.TeacherRatio = math.Max(0.75, math.Min(1.25, state.TeacherRatio))
 	if state.TeacherAt < 0 || math.IsNaN(state.TeacherAt) || math.IsInf(state.TeacherAt, 0) {
 		state.TeacherAt = 0
+	}
+	if state.TeacherProbeAt < 0 || math.IsNaN(state.TeacherProbeAt) || math.IsInf(state.TeacherProbeAt, 0) {
+		state.TeacherProbeAt = 0
 	}
 	if state.Updates <= 0 {
 		state.Uncertainty = 1
@@ -255,6 +259,7 @@ func (state *OnlineBanditState) softenForEnvironmentChange(thetaKeep, precisionK
 	}
 	state.TeacherRatio = 1 + (state.TeacherRatio-1)*0.25
 	state.TeacherAt = 0
+	state.TeacherProbeAt = 0
 	// Recompute on the next prediction from the reopened precision rather than
 	// carrying a stale "certain" scalar into the selector.
 	state.Uncertainty = 1
@@ -319,6 +324,14 @@ func (state *OnlineBanditState) ObserveTeacher(teacherWeight, heuristicWeight fl
 	}
 	state.TeacherRatio = math.Max(0.75, math.Min(1.25, state.TeacherRatio))
 	state.TeacherAt = state.Updates + 1
+	state.TeacherProbeAt = state.TeacherAt
+}
+
+func (state *OnlineBanditState) NoteTeacherAttempt() {
+	if state == nil {
+		return
+	}
+	state.TeacherProbeAt = state.Updates + 1
 }
 
 // ShouldRefreshTeacher makes the expensive ensemble demand-driven. A fresh or
@@ -332,7 +345,13 @@ func ShouldRefreshTeacher(input *ModelInput, modelError float64, state OnlineBan
 	if total < DefaultMinSampleCount {
 		return false
 	}
-	if state.TeacherAt <= 0 || state.Updates < 4 {
+	if state.TeacherAt <= 0 {
+		if state.TeacherProbeAt <= 0 {
+			return true
+		}
+		return state.Updates-state.TeacherProbeAt >= 4
+	}
+	if state.Updates < 4 {
 		return true
 	}
 
