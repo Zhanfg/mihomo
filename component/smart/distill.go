@@ -33,7 +33,7 @@ func FitProductionDistillationCalibration(samples []DistillProductionSample) [8]
 		if sample.ActualWeight <= 0 || math.IsNaN(sample.ActualWeight) || math.IsInf(sample.ActualWeight, 0) {
 			continue
 		}
-		prior := DistilledExpertPrior(&sample.Input, 1)
+		prior := DistilledExpertBasePrior(&sample.Input, 1)
 		if prior <= 0 || math.IsNaN(prior) || math.IsInf(prior, 0) {
 			continue
 		}
