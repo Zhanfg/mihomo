@@ -339,6 +339,7 @@ jobs:
           printf 'smart-soak-ok\n' > /tmp/mihomo-soak/www/index.html
           cat > /tmp/mihomo-soak/server.py <<'PY'
           import asyncio
+          import os
 
           BODY = b"smart-soak-ok\n"
           RESPONSE = (
@@ -347,6 +348,9 @@ jobs:
               b"Content-Length: " + str(len(BODY)).encode() + b"\r\n"
               b"Connection: close\r\n\r\n" + BODY
           )
+          CONTROL = "/tmp/mihomo-soak/down"
+          UP = "/tmp/mihomo-soak/listener.up"
+          DOWN = "/tmp/mihomo-soak/listener.down"
 
           async def handle(reader, writer):
               try:
@@ -362,10 +366,34 @@ jobs:
                   except Exception:
                       pass
 
+          async def open_listener():
+              server = await asyncio.start_server(
+                  handle, "127.0.0.1", 18080,
+                  backlog=8192, reuse_address=True
+              )
+              try:
+                  os.remove(DOWN)
+              except FileNotFoundError:
+                  pass
+              open(UP, "w").close()
+              return server
+
           async def main():
-              server = await asyncio.start_server(handle, "127.0.0.1", 18080, backlog=4096)
-              async with server:
-                  await server.serve_forever()
+              server = await open_listener()
+              while True:
+                  want_down = os.path.exists(CONTROL)
+                  if want_down and server is not None:
+                      server.close()
+                      await server.wait_closed()
+                      server = None
+                      try:
+                          os.remove(UP)
+                      except FileNotFoundError:
+                          pass
+                      open(DOWN, "w").close()
+                  elif not want_down and server is None:
+                      server = await open_listener()
+                  await asyncio.sleep(0.02)
 
           asyncio.run(main())
           PY
@@ -432,13 +460,22 @@ jobs:
 
           python3 .github/scripts/smart_extreme_soak.py --count 30000 --concurrency 128 --timeout 4 --label healthy > SOAK_HEALTHY.json
 
-          kill "$HTTP_PID"
-          wait "$HTTP_PID" 2>/dev/null || true
+          touch /tmp/mihomo-soak/down
+          for _ in $(seq 1 100); do
+            [ -f /tmp/mihomo-soak/listener.down ] && break
+            sleep 0.02
+          done
+          [ -f /tmp/mihomo-soak/listener.down ]
           python3 .github/scripts/smart_extreme_soak.py --count 2000 --concurrency 128 --timeout 1.5 --label outage > SOAK_OUTAGE.json || true
           kill -0 "$MIHOMO_PID"
+          kill -0 "$HTTP_PID"
 
-          python3 /tmp/mihomo-soak/server.py >>/tmp/soak-http.log 2>&1 &
-          HTTP_PID=$!
+          rm -f /tmp/mihomo-soak/down
+          for _ in $(seq 1 100); do
+            [ -f /tmp/mihomo-soak/listener.up ] && break
+            sleep 0.02
+          done
+          [ -f /tmp/mihomo-soak/listener.up ]
           RECOVERED=0
           STABLE_WAVES=0
           RECOVERY_ROUNDS=0
