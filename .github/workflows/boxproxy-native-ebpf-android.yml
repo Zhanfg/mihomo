@@ -306,14 +306,16 @@ jobs:
           set -euo pipefail
           TAG="Smart-eBPF-Android"
           SRC="$(ls -1 mihomo-a64-smart-ebpf-*.gz | head -n 1)"
+          BOX_SRC="$(ls -1 mihomo-android-arm64-v8-alpha-smart-*.gz | head -n 1)"
           STABLE="mihomo-android-arm64-smart-ebpf.gz"
           cp "$SRC" "$STABLE"
-          sha256sum "$STABLE" > SHA256SUMS.release
+          sha256sum "$STABLE" "$BOX_SRC" > SHA256SUMS.release
           cp SHA256SUMS.release SHA256SUMS
           {
             echo
             echo "rolling_release_tag=$TAG"
             echo "rolling_release_asset=$STABLE"
+            echo "boxproxy_import_asset=$BOX_SRC"
           } >> BUILD_INFO.txt
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -322,10 +324,12 @@ jobs:
 
           gh release create "$TAG" \
             "$STABLE" \
+            "$BOX_SRC" \
             "SHA256SUMS" \
             "BUILD_INFO.txt" \
+            "BOXPROXY_IMPORT_INFO.txt" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Smart eBPF Android (rolling)" \
-            --notes "Rolling Android arm64 build from integration/boxproxy-native-ebpf. Source: $GITHUB_SHA. Validated by BoxProxy schema, Smart, IP-family, DNS and Android build gates." \
+            --notes "Rolling Android arm64 build from integration/boxproxy-native-ebpf. Source: $GITHUB_SHA. Includes a BoxProxy CoreImport-compatible Mihomo Smart gzip. Validated by BoxProxy schema, Smart, IP-family, DNS and Android build gates." \
             --prerelease
