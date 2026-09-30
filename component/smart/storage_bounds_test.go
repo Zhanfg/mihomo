@@ -99,3 +99,19 @@ func TestSmartStatsRecordSerializedFootprintBounded(t *testing.T) {
 		t.Fatalf("maximal Smart stats record=%d bytes exceeds %d-byte budget", len(data), maxRecordBytes)
 	}
 }
+
+
+func TestSmartV7FinalResourceContract(t *testing.T) {
+	if ExpertMaxPersistBytes != 16*1024 {
+		t.Fatalf("expert snapshot cap drifted: %d", ExpertMaxPersistBytes)
+	}
+	if ExpertCount != 8 {
+		t.Fatalf("expert count drifted: %d", ExpertCount)
+	}
+	if OnlineBanditDimension != 6 {
+		t.Fatalf("student dimension drifted: %d", OnlineBanditDimension)
+	}
+	if MaxTargetsLimit > 5000 {
+		t.Fatalf("target cap exceeds mobile envelope: %d", MaxTargetsLimit)
+	}
+}
