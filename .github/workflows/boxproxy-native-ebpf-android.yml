@@ -233,7 +233,20 @@ jobs:
           strings "$OUT" | grep -q "api6.ipify.org"
           strings "$OUT" | grep -q "country-affinity"
           gzip -9 -c "$OUT" > "$OUT.gz"
-          sha256sum "$OUT" "$OUT.gz" > SHA256SUMS
+
+          # BoxProxy app has a local CoreImport flow and recognizes its Smart
+          # Mihomo release asset naming convention. Ship the same validated
+          # binary under that convention so users can install it from the app
+          # without bypassing BoxProxy's runtime database/control plane.
+          APP_CORE="mihomo-android-arm64-v8-alpha-smart-$HEAD_SHORT"
+          cp "$OUT" "$APP_CORE"
+          chmod 0755 "$APP_CORE"
+          gzip -9 -c "$APP_CORE" > "$APP_CORE.gz"
+          gzip -t "$APP_CORE.gz"
+          cmp "$OUT" "$APP_CORE"
+          gzip -dc "$APP_CORE.gz" | cmp - "$OUT"
+
+          sha256sum "$OUT" "$OUT.gz" "$APP_CORE" "$APP_CORE.gz" > SHA256SUMS
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
@@ -244,7 +257,17 @@ jobs:
             echo "cgo=0"
             echo "android_keepalive_default=idle60s,interval20s"
             echo "country_routing=MMDB reuse,no new database"
+            echo "boxproxy_app_import=mihomo-android-arm64-v8-alpha-smart-$HEAD_SHORT.gz"
+            echo "boxproxy_target_core=mihomo"
           } > BUILD_INFO.txt
+          {
+            echo "BoxProxy local core import"
+            echo "target=mihomo"
+            echo "raw=$APP_CORE"
+            echo "archive=$APP_CORE.gz"
+            echo "source=$HEAD_SHA"
+            echo "note=Import with BoxProxy's local core installer; BoxProxy keeps runtime_profile and restarts through its own control plane."
+          } > BOXPROXY_IMPORT_INFO.txt
 
       - name: Upload Android core
         uses: actions/upload-artifact@v7
@@ -252,8 +275,10 @@ jobs:
           name: smart-ebpf-a64-${{ env.HEAD_SHORT }}
           path: |
             mihomo-a64-smart-ebpf-*
+            mihomo-android-arm64-v8-alpha-smart-*
             SHA256SUMS
             BUILD_INFO.txt
+            BOXPROXY_IMPORT_INFO.txt
             FILE_INFO.txt
             BOXPROXY_SCHEMA_SELFTEST.txt
             IP_FAMILY_SELFTEST.txt
