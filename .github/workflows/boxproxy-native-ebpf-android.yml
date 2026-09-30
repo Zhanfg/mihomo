@@ -204,7 +204,10 @@ jobs:
         run: |
           set -euo pipefail
           sh -n tools/install-smart-v7-box.sh
+          sh -n tools/box-smart-v7-module/customize.sh
           grep -q 'mihomo.smart-prev' tools/install-smart-v7-box.sh
+          grep -q '/data/adb/box' tools/box-smart-v7-module/customize.sh
+          grep -q 'rm -rf "$MODPATH/core"' tools/box-smart-v7-module/customize.sh
           grep -q '配置' tools/install-smart-v7-box.sh
 
       - name: Build Android arm64 core
@@ -239,12 +242,36 @@ jobs:
             echo "country_routing=MMDB reuse,no new database"
           } > BUILD_INFO.txt
 
+      - name: Package BoxProxy install formats
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="mihomo-a64-smart-ebpf-$HEAD_SHORT"
+          BOX_NAME="mihomo-android-arm64-v8-alpha-smart-$HEAD_SHORT.gz"
+          gzip -9 -c "$OUT" > "$BOX_NAME"
+
+          PKG="/tmp/smart-v7-module"
+          rm -rf "$PKG"
+          mkdir -p "$PKG/core"
+          cp tools/box-smart-v7-module/customize.sh "$PKG/customize.sh"
+          sed "s/\${HEAD_SHORT}/$HEAD_SHORT/g" tools/box-smart-v7-module/module.prop > "$PKG/module.prop"
+          cp "$OUT" "$PKG/core/mihomo"
+          chmod 0755 "$PKG/customize.sh" "$PKG/core/mihomo"
+          (cd "$PKG" && zip -q -9 -r "$GITHUB_WORKSPACE/Smart-v7-BoxProxy-$HEAD_SHORT.zip" .)
+          unzip -l "Smart-v7-BoxProxy-$HEAD_SHORT.zip" | tee SMART_V7_INSTALLER_CONTENTS.txt
+          unzip -p "Smart-v7-BoxProxy-$HEAD_SHORT.zip" customize.sh | grep -q '/data/adb/box'
+          unzip -p "Smart-v7-BoxProxy-$HEAD_SHORT.zip" module.prop | grep -q "version=7.0-$HEAD_SHORT"
+          test "$(stat -c%s "Smart-v7-BoxProxy-$HEAD_SHORT.zip")" -gt 1000000
+
       - name: Upload Android core
         uses: actions/upload-artifact@v7
         with:
           name: smart-ebpf-a64-${{ env.HEAD_SHORT }}
           path: |
             mihomo-a64-smart-ebpf-*
+            mihomo-android-arm64-v8-alpha-smart-*.gz
+            Smart-v7-BoxProxy-*.zip
+            SMART_V7_INSTALLER_CONTENTS.txt
             SHA256SUMS
             BUILD_INFO.txt
             FILE_INFO.txt
