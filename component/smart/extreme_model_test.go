@@ -6,9 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/metacubex/bbolt"
 )
 
 func TestSmartExtremeExpertTwoMillionDistillBounded(t *testing.T) {
@@ -224,5 +228,98 @@ func TestSmartExtremeExpertSnapshotSizeDoesNotScaleWithExperience(t *testing.T) 
 	// Numeric digit growth is allowed; structural growth is not.
 	if sizes[len(sizes)-1]-sizes[0] > 2048 {
 		t.Fatalf("snapshot structurally grew with experience: %v", sizes)
+	}
+}
+
+
+func TestSmartExtremeBoltPhysicalGrowthPlateaus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "smart-plateau.db")
+	testDB, err := bbolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousDB := db
+	db = testDB
+	defer func() {
+		db = previousDB
+		_ = testDB.Close()
+	}()
+
+	store := &Store{}
+	const keys = 512
+	const rounds = 240
+	const warmupRound = 60
+	payload := make([]byte, 2048)
+	for i := range payload {
+		payload[i] = byte((i*31 + 17) & 0xff)
+	}
+
+	var warmSize int64
+	for round := 0; round < rounds; round++ {
+		ops := make([]StoreOperation, 0, keys)
+		for i := 0; i < keys; i++ {
+			// Keep the live key set fixed while continuously changing values,
+			// which models long-running Smart stats/model rewrites.
+			data := append([]byte(nil), payload...)
+			data[0] = byte(round)
+			data[1] = byte(i)
+			ops = append(ops, StoreOperation{
+				Type:   OpSaveStats,
+				Group:  "plateau",
+				Config: "cfg",
+				Target: fmt.Sprintf("target-%03d", i),
+				Node:   "node",
+				Data:   data,
+			})
+		}
+		if err := store.BatchSave(ops); err != nil {
+			t.Fatalf("round %d batch save: %v", round, err)
+		}
+
+		if round%12 == 11 {
+			// Delete and recreate a subset to force freelist churn rather than
+			// testing only same-size in-place replacements.
+			prefixes := make([]string, 0, 64)
+			for i := 0; i < 64; i++ {
+				prefixes = append(prefixes, FormatDBKey(KeyTypeStats, "cfg", "plateau", fmt.Sprintf("target-%03d", i), "node"))
+			}
+			if err := store.DBBatchDeletePrefix(prefixes, true); err != nil {
+				t.Fatalf("round %d delete: %v", round, err)
+			}
+		}
+
+		if round == warmupRound {
+			if err := testDB.Sync(); err != nil {
+				t.Fatal(err)
+			}
+			st, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			warmSize = st.Size()
+		}
+	}
+
+	if err := testDB.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finalSize := st.Size()
+	if warmSize <= 0 {
+		t.Fatal("failed to capture bbolt warm high-water mark")
+	}
+
+	// bbolt does not shrink its file on delete, but with a bounded working set
+	// it must recycle free pages and converge. Allow a generous 50% + 4 MiB
+	// allocator margin while rejecting write-amplification that grows forever.
+	limit := warmSize + warmSize/2 + 4*1024*1024
+	if finalSize > limit {
+		t.Fatalf("bbolt Smart file kept growing after warmup: warm=%d final=%d limit=%d", warmSize, finalSize, limit)
+	}
+	if finalSize > 32*1024*1024 {
+		t.Fatalf("bounded 512-record Smart workload produced oversized DB: %d", finalSize)
 	}
 }
