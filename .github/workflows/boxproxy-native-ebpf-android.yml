@@ -36,7 +36,7 @@ on:
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
-      - "tools/install-smart-v7-box.sh"
+      - "docs/boxproxy-core-import.md"
 
 permissions:
   contents: write
