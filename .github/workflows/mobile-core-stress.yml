@@ -337,16 +337,36 @@ jobs:
           mkdir -p /tmp/mihomo-soak/www
           printf 'smart-soak-ok\n' > /tmp/mihomo-soak/www/index.html
           cat > /tmp/mihomo-soak/server.py <<'PY'
-          from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-          import os
-          class S(ThreadingHTTPServer):
-              request_queue_size = 1024
-              daemon_threads = True
-          class H(SimpleHTTPRequestHandler):
-              def log_message(self, *_):
+          import asyncio
+
+          BODY = b"smart-soak-ok\n"
+          RESPONSE = (
+              b"HTTP/1.1 200 OK\r\n"
+              b"Content-Type: text/plain\r\n"
+              b"Content-Length: " + str(len(BODY)).encode() + b"\r\n"
+              b"Connection: close\r\n\r\n" + BODY
+          )
+
+          async def handle(reader, writer):
+              try:
+                  await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+                  writer.write(RESPONSE)
+                  await writer.drain()
+              except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, TimeoutError):
                   pass
-          os.chdir("/tmp/mihomo-soak/www")
-          S(("127.0.0.1", 18080), H).serve_forever()
+              finally:
+                  writer.close()
+                  try:
+                      await writer.wait_closed()
+                  except Exception:
+                      pass
+
+          async def main():
+              server = await asyncio.start_server(handle, "127.0.0.1", 18080, backlog=4096)
+              async with server:
+                  await server.serve_forever()
+
+          asyncio.run(main())
           PY
           cat > /tmp/mihomo-soak/config.yaml <<'YAML'
           mixed-port: 17890
@@ -409,26 +429,35 @@ jobs:
           ) > SOAK_RESOURCE_SAMPLES.txt &
           MON_PID=$!
 
-          python3 .github/scripts/smart_extreme_soak.py --count 15000 --concurrency 96 --timeout 4 --label healthy > SOAK_HEALTHY.json
+          python3 .github/scripts/smart_extreme_soak.py --count 30000 --concurrency 128 --timeout 4 --label healthy > SOAK_HEALTHY.json
 
           kill "$HTTP_PID"
           wait "$HTTP_PID" 2>/dev/null || true
-          python3 .github/scripts/smart_extreme_soak.py --count 2000 --concurrency 96 --timeout 1.5 --label outage > SOAK_OUTAGE.json || true
+          python3 .github/scripts/smart_extreme_soak.py --count 2000 --concurrency 128 --timeout 1.5 --label outage > SOAK_OUTAGE.json || true
           kill -0 "$MIHOMO_PID"
 
           python3 /tmp/mihomo-soak/server.py >>/tmp/soak-http.log 2>&1 &
           HTTP_PID=$!
           RECOVERED=0
-          for _ in $(seq 1 150); do
-            python3 .github/scripts/smart_extreme_soak.py --count 4 --concurrency 2 --timeout 2 --label recovery-probe >/tmp/recovery-probe.json || true
+          STABLE_WAVES=0
+          RECOVERY_ROUNDS=0
+          for round in $(seq 1 150); do
+            RECOVERY_ROUNDS="$round"
+            python3 .github/scripts/smart_extreme_soak.py --count 32 --concurrency 8 --timeout 2 --label recovery-probe >/tmp/recovery-probe.json || true
             if grep -q '"failures":0' /tmp/recovery-probe.json; then
-              RECOVERED=1
-              break
+              STABLE_WAVES=$((STABLE_WAVES + 1))
+              if [ "$STABLE_WAVES" -ge 3 ]; then
+                RECOVERED=1
+                break
+              fi
+            else
+              STABLE_WAVES=0
             fi
             kill -0 "$MIHOMO_PID"
             sleep 0.2
           done
           test "$RECOVERED" -eq 1
+          echo "recovery_probe_rounds=$RECOVERY_ROUNDS" > SOAK_RECOVERY_SUMMARY.txt
 
           python3 .github/scripts/smart_extreme_soak.py --count 30000 --concurrency 128 --timeout 4 --label recovered > SOAK_RECOVERED.json
 
@@ -441,12 +470,15 @@ jobs:
           h=json.load(open("SOAK_HEALTHY.json"))
           o=json.load(open("SOAK_OUTAGE.json"))
           r=json.load(open("SOAK_RECOVERED.json"))
-          assert h["failure_rate"] <= 0.001, h
+          assert h["failure_rate"] <= 0.002, h
           assert o["failure_rate"] >= 0.80, o
           assert r["failure_rate"] <= 0.002, r
+          assert r["failure_rate"] <= h["failure_rate"] + 0.001, (h, r)
+          assert r["latency_ms"]["p99"] <= max(250.0, h["latency_ms"]["p99"] * 2.0), (h, r)
           print("healthy_failure_rate=%.6f" % h["failure_rate"])
           print("outage_failure_rate=%.6f" % o["failure_rate"])
           print("recovered_failure_rate=%.6f" % r["failure_rate"])
+          print("healthy_p99_ms=%.2f" % h["latency_ms"]["p99"])
           print("recovered_p99_ms=%.2f" % r["latency_ms"]["p99"])
           PY
 
@@ -476,6 +508,7 @@ jobs:
             SOAK_RECOVERED.json
             SOAK_RESOURCE_SAMPLES.txt
             SOAK_RESOURCE_SUMMARY.txt
+            SOAK_RECOVERY_SUMMARY.txt
             SOAK_MIHOMO_TAIL.txt
             /tmp/recovery-probe.json
             /tmp/soak-mihomo.log
