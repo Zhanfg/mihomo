@@ -11,6 +11,7 @@ on:
       - opt/smart-learning-v5
       - opt/smart-runtime-v6
       - opt/smart-model-v7
+      - opt/smart-box-v8
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
@@ -37,6 +38,8 @@ on:
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
       - "tools/install-smart-v7-box.sh"
+      - "tools/install-smart-v8-box.sh"
+      - "tools/test-smart-v8-installer.sh"
 
 permissions:
   contents: write
@@ -204,8 +207,12 @@ jobs:
         run: |
           set -euo pipefail
           sh -n tools/install-smart-v7-box.sh
-          grep -q 'mihomo.smart-prev' tools/install-smart-v7-box.sh
-          grep -q '配置' tools/install-smart-v7-box.sh
+          sh -n tools/install-smart-v8-box.sh
+          sh -n tools/test-smart-v8-installer.sh
+          sh tools/test-smart-v8-installer.sh
+          grep -q 'database/box.db' tools/install-smart-v8-box.sh
+          grep -q 'runtime_profile' tools/install-smart-v8-box.sh
+          grep -q 'mihomo.smart-prev' tools/install-smart-v8-box.sh
 
       - name: Build Android arm64 core
         shell: bash
@@ -253,6 +260,7 @@ jobs:
             MOBILE_SELFTEST.txt
             SMART_BENCH.txt
             tools/install-smart-v7-box.sh
+            tools/install-smart-v8-box.sh
             .github/fixtures/boxproxy-ebpf-listener.yaml
             .github/fixtures/ip-family-routing.yaml
             .github/fixtures/mobile-core-opt.yaml
