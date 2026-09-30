@@ -8,6 +8,7 @@ on:
     paths:
       - ".github/workflows/boxproxy-app-core.yml"
       - "tools/build-boxproxy-app-core.sh"
+      - "docs/BOXPROXY_APP.md"
       - "adapter/**"
       - "component/smart/**"
       - "component/linkprofile/**"
@@ -104,5 +105,6 @@ jobs:
             dist/boxproxy-app/BUILD_INFO
             dist/boxproxy-app/IMPORT.txt
             dist/boxproxy-app/FILE_INFO.txt
+            docs/BOXPROXY_APP.md
           if-no-files-found: error
           retention-days: 30
