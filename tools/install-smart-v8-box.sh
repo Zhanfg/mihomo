@@ -155,6 +155,9 @@ WAS_RUNNING=0
 if [ "$WAS_RUNNING" -eq 0 ] && command -v pidof >/dev/null 2>&1; then
   pidof mihomo >/dev/null 2>&1 && WAS_RUNNING=1
 fi
+if [ "${SMART_INSTALL_TEST:-0}" = "1" ] && [ "${SMART_INSTALL_RUNNING_OVERRIDE:-0}" = "1" ]; then
+  WAS_RUNNING=1
+fi
 
 say "[Smart Box v8] Box 目录: $BOX_DIR"
 [ -n "$BOXCTL" ] && [ -n "$DB" ] && say "[Smart Box v8] 控制面: boxctl + $(basename "$DB")"
@@ -272,8 +275,12 @@ if [ "$WAS_RUNNING" -eq 1 ]; then
   say "[Smart Box v8] 由 Box 控制面重启当前服务"
   modern_restart || legacy_restart || rollback
   sleep 2
-  target_is_running || rollback
-  say "[Smart Box v8] 已确认新 inode 正在运行"
+  if [ "${SMART_INSTALL_TEST:-0}" != "1" ] || [ "${SMART_INSTALL_SKIP_RUNNING_VERIFY:-0}" != "1" ]; then
+    target_is_running || rollback
+    say "[Smart Box v8] 已确认新 inode 正在运行"
+  else
+    say "[Smart Box v8] 测试模式：跳过 /proc inode 运行态确认"
+  fi
 else
   say "[Smart Box v8] Box 当前未运行；只更新核心文件，不擅自启动/切换运行配置"
 fi
