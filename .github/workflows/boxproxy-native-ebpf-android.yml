@@ -229,7 +229,11 @@ jobs:
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
-            echo "base=liuran001/mihomo:Alpha"
+            echo "mihomo_upstream=MetaCubeX/mihomo:Alpha"
+            echo "smart_model_upstream=vernesong/mihomo"
+            echo "box_runtime_upstream=boxproxy/box"
+            echo "boxproxy_apk_contract=1e2e00d2b9c1729d4946ed64daf7c3568d8efb70"
+            echo "boxproxy_core_import_regex=mihomo-android-arm64-v8-alpha-smart-[A-Fa-f0-9]+.gz"
             echo "boxproxy_schema=listeners.type=ebpf"
             echo "target=android/arm64"
             echo "tags=with_gvisor with_ebpf"
