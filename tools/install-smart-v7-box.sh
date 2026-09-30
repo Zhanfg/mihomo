@@ -12,12 +12,13 @@ TARGET="$BIN_DIR/mihomo"
 BACKUP="$BIN_DIR/mihomo.smart-prev"
 LOG="$RUN_DIR/smart-v7-install.log"
 
-say() { printf '%s\n' "$*"; }
-fail() { say "[Smart v7] ERROR: $*"; exit 1; }
-
 mkdir -p "$RUN_DIR" 2>/dev/null || true
 : > "$LOG"
-exec >>"$LOG" 2>&1
+exec 3>&1
+say() {
+  printf '%s\n' "$*" | tee -a "$LOG" >&3
+}
+fail() { say "[Smart v7] ERROR: $*"; exit 1; }
 
 if [ "$(id -u 2>/dev/null)" != "0" ]; then
   fail "需要 root 权限。请从 KernelSU/Magisk/APatch 授权的终端执行此脚本。"
