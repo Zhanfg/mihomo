@@ -20,7 +20,7 @@ func TestSmartBoxV8DeliveryContract(t *testing.T) {
 		"database/box.db",
 		"boxctl",
 		"runtime_profile",
-		"mihomo.smart-prev",
+		"BACKUP_SUFFIX=\".smart-prev\"",
 		"modern_restart",
 		"legacy_restart",
 		"BOX_DIR_OVERRIDE",
