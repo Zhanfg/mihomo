@@ -323,3 +323,19 @@ func TestSmartExtremeBoltPhysicalGrowthPlateaus(t *testing.T) {
 		t.Fatalf("bounded 512-record Smart workload produced oversized DB: %d", finalSize)
 	}
 }
+
+
+func TestSmartV7ProductionResourceEnvelope(t *testing.T) {
+	if ExpertCount > 8 {
+		t.Fatalf("expert count=%d exceeds mobile production envelope", ExpertCount)
+	}
+	if ExpertMaxPersistBytes > 16*1024 {
+		t.Fatalf("expert persistence cap=%d exceeds 16 KiB envelope", ExpertMaxPersistBytes)
+	}
+	if MaxTargetsLimit > 5000 {
+		t.Fatalf("target cap=%d exceeds production envelope", MaxTargetsLimit)
+	}
+	if OnlineBanditDimension > 6 {
+		t.Fatalf("student dimension=%d exceeds mobile production envelope", OnlineBanditDimension)
+	}
+}
