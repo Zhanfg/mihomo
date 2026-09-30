@@ -33,3 +33,22 @@ func TestSmartBoxV8DeliveryContract(t *testing.T) {
 		t.Fatal("installer must not mutate BoxProxy runtime_profile directly")
 	}
 }
+
+
+func TestSmartBoxV8AppImportContract(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/boxproxy-native-ebpf-android.yml")
+	if err != nil {
+		t.Fatalf("read Android workflow: %v", err)
+	}
+	workflow := string(data)
+	for _, required := range []string{
+		"mihomo-android-arm64-v8-alpha-smart-$HEAD_SHORT",
+		"BOXPROXY_IMPORT_INFO.txt",
+		"tools/install-smart-v8-box.sh",
+		"sh tools/test-smart-v8-installer.sh",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("Android delivery workflow missing %q", required)
+		}
+	}
+}
