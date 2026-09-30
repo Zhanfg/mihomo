@@ -1,0 +1,6 @@
+id=smart_v7_boxproxy
+name=Smart v7 Core for BoxProxy
+version=7.0-${HEAD_SHORT}
+versionCode=700
+author=Axymorrsen
+description=One-shot installer for the validated Smart v7 Mihomo core. Installs into Box for Root and keeps only tiny installer metadata after installation.
