@@ -36,6 +36,7 @@ on:
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
+      - "tools/install-smart-v7-box.sh"
 
 permissions:
   contents: write
@@ -198,6 +199,14 @@ jobs:
           grep -q 'inbound:"include-uid,omitempty"' listener/config/ebpf.go
           grep -q 'inbound:"ipv6-mode,omitempty"' listener/config/ebpf.go
 
+      - name: Validate Box for Root installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n tools/install-smart-v7-box.sh
+          grep -q 'mihomo.smart-prev' tools/install-smart-v7-box.sh
+          grep -q '配置' tools/install-smart-v7-box.sh
+
       - name: Build Android arm64 core
         shell: bash
         env:
@@ -243,6 +252,7 @@ jobs:
             IP_FAMILY_SELFTEST.txt
             MOBILE_SELFTEST.txt
             SMART_BENCH.txt
+            tools/install-smart-v7-box.sh
             .github/fixtures/boxproxy-ebpf-listener.yaml
             .github/fixtures/ip-family-routing.yaml
             .github/fixtures/mobile-core-opt.yaml
