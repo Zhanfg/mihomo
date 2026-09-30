@@ -52,3 +52,23 @@ func TestSmartBoxV8AppImportContract(t *testing.T) {
 		}
 	}
 }
+
+
+func TestSmartBoxV8ExtremeRecoveryContract(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/mobile-core-stress.yml")
+	if err != nil {
+		t.Fatalf("read stress workflow: %v", err)
+	}
+	workflow := string(data)
+	for _, required := range []string{
+		"backlog=8192",
+		"/tmp/mihomo-soak/listener.up",
+		"/tmp/mihomo-soak/listener.down",
+		"--count 30000 --concurrency 128",
+		"--count 2000 --concurrency 128",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("extreme recovery workflow missing %q", required)
+		}
+	}
+}
