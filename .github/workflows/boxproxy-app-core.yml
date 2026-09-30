@@ -21,7 +21,7 @@ on:
       - "tunnel/statistic/**"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: boxproxy-app-core-${{ github.ref }}
@@ -108,3 +108,27 @@ jobs:
             docs/BOXPROXY_APP.md
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish rolling BoxProxy APK core
+        if: github.ref == 'refs/heads/integration/boxproxy-app'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="BoxProxy-App-Smart"
+          CORE="$(ls -1 dist/boxproxy-app/mihomo-android-arm64-v8-alpha-smart-*.gz | head -n1)"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y
+          fi
+          gh release create "$TAG" \
+            "$CORE" \
+            dist/boxproxy-app/SHA256SUMS \
+            dist/boxproxy-app/BUILD_INFO \
+            dist/boxproxy-app/IMPORT.txt \
+            docs/BOXPROXY_APP.md \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "BoxProxy APK Smart Core" \
+            --notes "Rolling Android arm64 Mihomo Smart core for BoxProxy APK local core import. Source: $GITHUB_SHA. BoxProxy runtime checked at: $BOXPROXY_RUNTIME_SHA." \
+            --prerelease
