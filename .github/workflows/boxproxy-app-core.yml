@@ -1,0 +1,108 @@
+name: BoxProxy APK Smart Core
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - integration/boxproxy-app
+    paths:
+      - ".github/workflows/boxproxy-app-core.yml"
+      - "tools/build-boxproxy-app-core.sh"
+      - "adapter/**"
+      - "component/smart/**"
+      - "component/linkprofile/**"
+      - "component/netstate/**"
+      - "component/netchange/**"
+      - "component/keepalive/**"
+      - "dns/**"
+      - "listener/sing_ebpf/**"
+      - "common/ebpf/**"
+      - "tunnel/statistic/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: boxproxy-app-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build BoxProxy APK local-import core
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout Mihomo Smart
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Resolve BoxProxy runtime upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/boxproxy/boxproxy.git /tmp/boxproxy-runtime
+          BOXPROXY_RUNTIME_SHA="$(git -C /tmp/boxproxy-runtime rev-parse HEAD)"
+          echo "BOXPROXY_RUNTIME_SHA=$BOXPROXY_RUNTIME_SHA" >> "$GITHUB_ENV"
+          echo "HEAD_SHORT=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
+          echo "BoxProxy runtime: $BOXPROXY_RUNTIME_SHA"
+
+      - name: Verify BoxProxy APK runtime contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          CFG=/tmp/boxproxy-runtime/boxctl/src/config.rs
+          CMD=/tmp/boxproxy-runtime/boxctl/src/service/command.rs
+          grep -q '/data/user/0/com.boxproxy.box/files/box' "$CFG"
+          grep -q 'paths.bin.join(&bin_name)' "$CFG"
+          grep -q 'matches!(bin_name, "mihomo"' "$CFG"
+          grep -q '"mihomo" => args.extend' "$CMD"
+          grep -q '"-d".into()' "$CMD"
+          grep -q '"-f".into()' "$CMD"
+
+      - name: Smart regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test ./adapter/outboundgroup ./component/smart/... -count=1
+          CGO_ENABLED=0 go test ./adapter ./component/linkprofile ./component/netstate ./component/netchange ./tunnel/statistic -count=1
+
+      - name: Build BoxProxy import core
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x tools/build-boxproxy-app-core.sh
+          BOXPROXY_RUNTIME_SHA="$BOXPROXY_RUNTIME_SHA" tools/build-boxproxy-app-core.sh
+          file dist/boxproxy-app/mihomo | tee dist/boxproxy-app/FILE_INFO.txt
+          strings dist/boxproxy-app/mihomo | grep -q 'github.com/metacubex/mihomo/component/smart'
+          strings dist/boxproxy-app/mihomo | grep -q 'listener/sing_ebpf'
+          gzip -dc dist/boxproxy-app/mihomo-android-arm64-v8-alpha-smart-*.gz > /tmp/mihomo-import
+          cmp dist/boxproxy-app/mihomo /tmp/mihomo-import
+
+      - name: Verify BoxProxy filename contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(basename "$(ls -1 dist/boxproxy-app/mihomo-android-arm64-v8-alpha-smart-*.gz | head -n1)")"
+          [[ "$name" =~ ^mihomo-android-arm64-v8-alpha-smart-[A-Fa-f0-9]+\.gz$ ]]
+          grep -q 'boxproxy_core_target=bin/mihomo' dist/boxproxy-app/BUILD_INFO
+          grep -q "$BOXPROXY_RUNTIME_SHA" dist/boxproxy-app/BUILD_INFO
+          grep -q 'do not flash' dist/boxproxy-app/IMPORT.txt
+
+      - name: Upload BoxProxy APK import artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: boxproxy-app-smart-a64-${{ env.HEAD_SHORT }}
+          path: |
+            dist/boxproxy-app/mihomo-android-arm64-v8-alpha-smart-*.gz
+            dist/boxproxy-app/SHA256SUMS
+            dist/boxproxy-app/BUILD_INFO
+            dist/boxproxy-app/IMPORT.txt
+            dist/boxproxy-app/FILE_INFO.txt
+          if-no-files-found: error
+          retention-days: 30
