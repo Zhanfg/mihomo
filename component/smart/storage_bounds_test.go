@@ -115,3 +115,6 @@ func TestSmartV7FinalResourceContract(t *testing.T) {
 		t.Fatalf("target cap exceeds mobile envelope: %d", MaxTargetsLimit)
 	}
 }
+
+// Install-head validation marker: runtime-neutral change used to force all Smart
+// CI gates to execute against the exact packaged BoxProxy installer revision.
