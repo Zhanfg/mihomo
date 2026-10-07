@@ -8,12 +8,16 @@ on:
       - 'component/cfir/**'
       - 'tunnel/**'
       - 'adapter/outboundgroup/**'
+      - 'listener/sing_ebpf/**'
+      - 'common/ebpf/**'
       - '.github/workflows/cfir-contract.yml'
   pull_request:
     paths:
       - 'component/cfir/**'
       - 'tunnel/**'
       - 'adapter/outboundgroup/**'
+      - 'listener/sing_ebpf/**'
+      - 'common/ebpf/**'
       - '.github/workflows/cfir-contract.yml'
 
 concurrency:
@@ -124,3 +128,25 @@ jobs:
           mkdir -p /tmp/cfir-shadow
           go test -c -tags with_cfir_shadow ./tunnel -o /tmp/cfir-shadow/tunnel-android-arm64.test
           go test -c -tags with_cfir_shadow ./adapter/outboundgroup -o /tmp/cfir-shadow/outboundgroup-android-arm64.test
+
+
+  ebpf-backend-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test eBPF CFIR projection without privileged probes
+        run: go test -tags with_ebpf ./listener/sing_ebpf -run '^TestCFIR' -count=1
+      - name: Cross-compile Android arm64 eBPF projection
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-ebpf
+          go test -c -tags with_ebpf ./listener/sing_ebpf -o /tmp/cfir-ebpf/sing-ebpf-android-arm64.test
