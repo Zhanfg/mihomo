@@ -1147,12 +1147,17 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 	var observedWriteErr atomic.TypedValue[error]
 
 	needHandshake := N.NeedHandshake(c)
-	// Preserve raw relay/splice fast paths. The all-transfer observer is only
-	// inserted when the writer is not the kernel socket fast path.
-	stop := N.UnwrapWriter(c)
-	if _, isRawRelay := stop.(syscall.Conn); !isRawRelay {
-		if u, ok := stop.(interface{ Upstream() any }); !ok || u.Upstream() != nil {
-			c = callback.NewErrorCallBackConn(c, &observedReadErr, &observedWriteErr)
+	// DIRECT is a local bypass path rather than a remote relay whose quality
+	// Smart needs to attribute. Never put a read/write observer in front of its
+	// splice/raw-copy path merely to collect node-quality evidence.
+	if proxy.Type() != C.Direct {
+		// Preserve raw relay/splice fast paths. The all-transfer observer is only
+		// inserted when the writer is not the kernel socket fast path.
+		stop := N.UnwrapWriter(c)
+		if _, isRawRelay := stop.(syscall.Conn); !isRawRelay {
+			if u, ok := stop.(interface{ Upstream() any }); !ok || u.Upstream() != nil {
+				c = callback.NewErrorCallBackConn(c, &observedReadErr, &observedWriteErr)
+			}
 		}
 	}
 
@@ -1183,7 +1188,9 @@ func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadat
 	var observedReadErr atomic.TypedValue[error]
 	var observedWriteErr atomic.TypedValue[error]
 
-	pc = callback.NewErrorCallBackPacketConn(pc, &observedReadErr, &observedWriteErr)
+	if proxy.Type() != C.Direct {
+		pc = callback.NewErrorCallBackPacketConn(pc, &observedReadErr, &observedWriteErr)
+	}
 	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
 		udpLatency.Store(latency)
 	})
