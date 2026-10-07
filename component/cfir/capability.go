@@ -187,3 +187,14 @@ func (s CapabilitySet) Equal(other CapabilitySet) bool {
 	}
 	return true
 }
+
+
+func (s CapabilitySet) Standards() []StandardCapability {
+	result := make([]StandardCapability, 0)
+	for capability := StandardCapability(1); capability < standardCapabilityLimit; capability++ {
+		if s.HasStandard(capability) {
+			result = append(result, capability)
+		}
+	}
+	return result
+}
