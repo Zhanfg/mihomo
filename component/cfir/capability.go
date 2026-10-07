@@ -33,6 +33,16 @@ const (
 	CapabilityMultiPath
 	CapabilityFlowControlTelemetry
 	CapabilityMemoryPressure
+	CapabilityInterfaceBind
+	CapabilityRouteChangeMonitor
+	CapabilityUIDPolicy
+	CapabilityProcessAttribution
+	CapabilityKernelRedirect
+	CapabilityKernelFlowTelemetry
+	CapabilityPacketRewrite
+	CapabilityTransparentProxy
+	CapabilitySocketAssignment
+	CapabilityBatchPacketIO
 )
 
 const standardCapabilityLimit = 256
