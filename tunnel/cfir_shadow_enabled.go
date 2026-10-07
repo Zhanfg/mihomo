@@ -54,12 +54,14 @@ func observeCFIRDecisionShadow(metadata *C.Metadata, proxy C.ProxyAdapter) {
 			return
 		}
 		log.Warnln(
-			"[CFIR Decision Shadow] mismatch (#%d): mask=0x%x target=%s leaf=%s protocol=%s",
+			"[CFIR Decision Shadow] mismatch (#%d): mask=0x%x target=%s leaf=%s protocol=%s eligible=%d selectedEligible=%v",
 			n,
 			uint64(result.Mismatch),
 			result.Legacy.LogicalTarget,
 			result.Legacy.LeafName,
 			result.Legacy.Protocol,
+			result.EligibleCount,
+			result.SelectedEligible,
 		)
 	}
 }
