@@ -95,3 +95,29 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/cfir-build
           go test -c ./component/cfir -o /tmp/cfir-build/cfir-ios-arm64.test
+
+
+  shadow-data-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test CFIR packages
+        run: go test ./component/cfir/... -count=1
+      - name: Compile production tunnel with zero-cost CFIR hook
+        run: go test ./tunnel -run '^$' -count=1
+      - name: Compile live CFIR shadow tunnel
+        run: go test -tags with_cfir_shadow ./tunnel -run '^$' -count=1
+      - name: Cross-compile Android arm64 live shadow tunnel
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-shadow
+          go test -c -tags with_cfir_shadow ./tunnel -o /tmp/cfir-shadow/tunnel-android-arm64.test
