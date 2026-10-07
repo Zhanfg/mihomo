@@ -223,3 +223,44 @@ func TestNonForwardPlanDoesNotRequireProtocol(t *testing.T) {
 		t.Fatal("direct plan must not carry a wire protocol")
 	}
 }
+
+
+func TestProtocolProjectionCannotSelfApproveImpossibleClaims(t *testing.T) {
+	family := ProtocolDescriptor{
+		ID: "future",
+		MinCFIR: CurrentVersion,
+		Primitives: PrimitiveSet(PrimitiveStream),
+		Capabilities: NewCapabilitySet(CapabilityHalfClose),
+		Security: SecurityProfile{
+			Authentication: AuthenticationServer,
+			Confidentiality: ConfidentialityTransport,
+			Integrity: IntegrityAuthenticated,
+		},
+	}
+	projection := ProtocolProjection{
+		Family: family,
+		Instance: ProtocolCandidate{
+			Protocol: "future",
+			Instance: "node",
+			Capabilities: NewCapabilitySet(CapabilityHalfClose, CapabilityPathMigration),
+			Security: SecurityContext{
+				Profile: family.Security,
+				AttestedByCore: true,
+			},
+		},
+	}
+	if err := projection.Validate(); err == nil {
+		t.Fatal("instance capability outside family declaration must fail")
+	}
+
+	projection.Instance.Capabilities = NewCapabilitySet(CapabilityHalfClose)
+	projection.Instance.Security.AttestedByCore = false
+	if err := projection.Validate(); err == nil {
+		t.Fatal("family minimum security must require core attestation")
+	}
+
+	projection.Instance.Security.AttestedByCore = true
+	if err := projection.Validate(); err != nil {
+		t.Fatal(err)
+	}
+}
