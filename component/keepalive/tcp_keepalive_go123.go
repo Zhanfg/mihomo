@@ -20,6 +20,8 @@ func keepAliveConfig() net.KeepAliveConfig {
 		// it's recommended to set both Idle and Interval to non-negative values in conjunction with a -1
 		// for Count on those old Windows if you intend to customize the TCP keep-alive settings.
 		config.Count = -1
+	} else if count := platformKeepAliveCount(); count > 0 {
+		config.Count = count
 	}
 	return config
 }
