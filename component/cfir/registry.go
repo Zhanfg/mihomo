@@ -50,6 +50,7 @@ type ProtocolDescriptor struct {
 	Capabilities CapabilitySet
 	Security     SecurityProfile
 	Resource     ResourceProfile
+	Composition  []LayerRef
 }
 
 func (d ProtocolDescriptor) Validate() error {
@@ -64,6 +65,9 @@ func (d ProtocolDescriptor) Validate() error {
 	}
 	if d.Primitives == 0 {
 		return fmt.Errorf("cfir: protocol %s declares no primitives", d.ID)
+	}
+	if err := validateComposition(d.Composition); err != nil {
+		return fmt.Errorf("cfir: protocol %s composition: %w", d.ID, err)
 	}
 	return d.Security.Validate()
 }
@@ -148,12 +152,14 @@ type Registry struct {
 	mu        sync.RWMutex
 	protocols map[ProtocolID]ProtocolAdapter
 	backends  map[string]Backend
+	layers    map[LayerID]ProtocolLayer
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		protocols: make(map[ProtocolID]ProtocolAdapter),
 		backends:  make(map[string]Backend),
+		layers:    make(map[LayerID]ProtocolLayer),
 	}
 }
 
@@ -240,4 +246,67 @@ func (r *Registry) Backends(kind BackendKind, platform Platform) []BackendDescri
 		return 0
 	})
 	return result
+}
+
+
+func (r *Registry) RegisterLayer(layer ProtocolLayer) error {
+	if layer == nil {
+		return errors.New("cfir: nil protocol layer")
+	}
+	descriptor := layer.Descriptor()
+	if err := descriptor.Validate(); err != nil {
+		return err
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.layers[descriptor.ID]; exists {
+		return fmt.Errorf("cfir: duplicate protocol layer %s", descriptor.ID)
+	}
+	r.layers[descriptor.ID] = layer
+	return nil
+}
+
+func (r *Registry) Layer(id LayerID) (ProtocolLayer, bool) {
+	r.mu.RLock()
+	layer, ok := r.layers[id]
+	r.mu.RUnlock()
+	return layer, ok
+}
+
+func (r *Registry) Layers(kind LayerKind) []LayerDescriptor {
+	r.mu.RLock()
+	result := make([]LayerDescriptor, 0, len(r.layers))
+	for _, layer := range r.layers {
+		descriptor := layer.Descriptor()
+		if kind == LayerInvalid || descriptor.Kind == kind {
+			result = append(result, descriptor)
+		}
+	}
+	r.mu.RUnlock()
+	sortLayerDescriptors(result)
+	return result
+}
+
+// ResolveComposition proves that every layer referenced by a protocol exists
+// and has the exact semantic role the descriptor claims. Protocol-specific
+// code therefore composes registered building blocks instead of teaching the
+// core protocol-name branches.
+func (r *Registry) ResolveComposition(descriptor ProtocolDescriptor) error {
+	if err := descriptor.Validate(); err != nil {
+		return err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, ref := range descriptor.Composition {
+		layer, ok := r.layers[ref.ID]
+		if !ok {
+			return fmt.Errorf("cfir: protocol %s references missing layer %s", descriptor.ID, ref.ID)
+		}
+		actual := layer.Descriptor()
+		if actual.Kind != ref.Kind {
+			return fmt.Errorf("cfir: protocol %s layer %s kind mismatch: declared=%d actual=%d", descriptor.ID, ref.ID, ref.Kind, actual.Kind)
+		}
+	}
+	return nil
 }
