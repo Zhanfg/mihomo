@@ -132,32 +132,29 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 	if err := intent.Validate(); err != nil {
 		return err
 	}
-	if p.Action != RouteActionForward {
-		if p.Protocol != "" {
-			return errors.New("cfir: non-forward execution plan must not name a wire protocol")
+
+	if p.Action == RouteActionForward {
+		if p.Protocol == "" {
+			return errors.New("cfir: forward execution plan must name a wire protocol")
 		}
-		return nil
-	}
-	if err := p.Requirements.Validate(); err != nil {
-		return err
-	}
-	if err := p.BackendRequirements.Validate(); err != nil {
-		return err
-	}
-	descriptor, err := registry.EffectiveProtocolDescriptor(p.Protocol)
-	if err != nil {
-		return err
-	}
-	if !intent.AcceptsProtocol(descriptor) {
-		if !descriptor.Primitives.Supports(p.Primitive) {
-			return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
+		descriptor, err := registry.EffectiveProtocolDescriptor(p.Protocol)
+		if err != nil {
+			return err
 		}
-		if !p.Requirements.SatisfiedBy(descriptor.Capabilities) {
-			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
-			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+		if !intent.AcceptsProtocol(descriptor) {
+			if !descriptor.Primitives.Supports(p.Primitive) {
+				return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
+			}
+			if !p.Requirements.SatisfiedBy(descriptor.Capabilities) {
+				missing := p.Requirements.MissingFrom(descriptor.Capabilities)
+				return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+			}
+			return fmt.Errorf("cfir: protocol %s violates execution plan security floor", p.Protocol)
 		}
-		return fmt.Errorf("cfir: protocol %s violates execution plan security floor", p.Protocol)
+	} else if p.Protocol != "" {
+		return errors.New("cfir: non-forward execution plan must not name a wire protocol")
 	}
+
 	if p.Backend != "" {
 		backend, ok := registry.Backend(p.Backend)
 		if !ok {
@@ -173,12 +170,6 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		}
 	} else if len(p.BackendRequirements.Standard) > 0 || len(p.BackendRequirements.Extensions) > 0 {
 		return errors.New("cfir: backend capabilities requested without selecting a backend")
-	}
-	if p.Transport.Hedge.MaxAttempts > 8 {
-		return errors.New("cfir: hedge attempt budget exceeds hard safety bound")
-	}
-	if p.Transport.Hedge.Delay < 0 {
-		return errors.New("cfir: negative hedge delay")
 	}
 	return nil
 }
