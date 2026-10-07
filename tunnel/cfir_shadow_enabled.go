@@ -40,6 +40,11 @@ func observeCFIRShadow(metadata *C.Metadata) {
 
 
 func observeCFIRDecisionShadow(metadata *C.Metadata, proxy C.ProxyAdapter) {
+	// Smart is observed inside its real selectProxies() call so the shadow
+	// consumes the exact ranking snapshot and never re-runs Smart selection.
+	if proxy != nil && proxy.Type() == C.Smart {
+		return
+	}
 	result, err := shadow.ObserveDecision(metadata, proxy, cfir.Generation{
 		Network: netstate.CurrentEpoch(),
 	})
