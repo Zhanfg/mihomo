@@ -1,0 +1,65 @@
+name: CFIR Contract
+
+on:
+  push:
+    branches:
+      - 'arch/cfir-*'
+    paths:
+      - 'component/cfir/**'
+      - '.github/workflows/cfir-contract.yml'
+  pull_request:
+    paths:
+      - 'component/cfir/**'
+      - '.github/workflows/cfir-contract.yml'
+
+concurrency:
+  group: cfir-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ['1.25', '1.26']
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+      - name: Test CFIR contract
+        run: go test ./component/cfir -count=1 -race
+
+  five-platform-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: android, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: ios, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Compile CFIR for target
+        shell: bash
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-build
+          go test -c ./component/cfir -o "/tmp/cfir-build/cfir-${GOOS}-${GOARCH}.test"
