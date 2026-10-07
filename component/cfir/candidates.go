@@ -75,3 +75,31 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 	}
 	return descriptor, nil
 }
+
+
+type ProtocolProjection struct {
+	Family   ProtocolDescriptor
+	Instance ProtocolCandidate
+}
+
+func (p ProtocolProjection) Validate() error {
+	if err := p.Family.Validate(); err != nil {
+		return err
+	}
+	if p.Instance.Protocol == "" {
+		return errors.New("cfir: protocol projection instance has no protocol id")
+	}
+	if p.Instance.Protocol != p.Family.ID {
+		return fmt.Errorf(
+			"cfir: protocol projection instance %s does not match family %s",
+			p.Instance.Protocol, p.Family.ID,
+		)
+	}
+	return p.Instance.Security.Profile.Validate()
+}
+
+// ProtocolProjectionProvider lets a new protocol self-describe without adding
+// a protocol-name switch to CFIR or the legacy migration bridge.
+type ProtocolProjectionProvider interface {
+	CFIRProtocolProjection() ProtocolProjection
+}
