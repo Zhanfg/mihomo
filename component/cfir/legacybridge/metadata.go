@@ -2,6 +2,8 @@ package legacybridge
 
 import (
 	"errors"
+	"net"
+	"net/netip"
 
 	"github.com/metacubex/mihomo/component/cfir"
 	C "github.com/metacubex/mihomo/constant"
@@ -12,8 +14,14 @@ const MetadataExtensionID cfir.ExtensionID = "mihomo.legacy.metadata"
 type MetadataExtension struct {
 	Type           C.Type
 	DNSMode        C.DNSMode
+	InIP           netip.Addr
+	InPort         uint16
 	InName         string
 	InUser         string
+	RematchName    string
+	UUID           string
+	RawSrcAddr     net.Addr
+	RawDstAddr     net.Addr
 	UID            uint32
 	Process        string
 	ProcessPath    string
@@ -33,6 +41,15 @@ type MetadataExtension struct {
 
 func (m MetadataExtension) CFIRExtensionID() cfir.ExtensionID {
 	return MetadataExtensionID
+}
+
+func cloneStringsPreserveNil(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	out := make([]string, len(values))
+	copy(out, values)
+	return out
 }
 
 func primitiveFromNetwork(network C.NetWork) (cfir.Primitive, error) {
@@ -84,8 +101,14 @@ func FromMetadata(metadata *C.Metadata, generation cfir.Generation) (cfir.Flow, 
 			MetadataExtension{
 				Type:           metadata.Type,
 				DNSMode:        metadata.DNSMode,
+				InIP:           metadata.InIP,
+				InPort:         metadata.InPort,
 				InName:         metadata.InName,
 				InUser:         metadata.InUser,
+				RematchName:    metadata.RematchName,
+				UUID:           metadata.UUID,
+				RawSrcAddr:     metadata.RawSrcAddr,
+				RawDstAddr:     metadata.RawDstAddr,
 				UID:            metadata.Uid,
 				Process:        metadata.Process,
 				ProcessPath:    metadata.ProcessPath,
@@ -96,8 +119,8 @@ func FromMetadata(metadata *C.Metadata, generation cfir.Generation) (cfir.Flow, 
 				SniffHost:      metadata.SniffHost,
 				SrcIPASN:       metadata.SrcIPASN,
 				DstIPASN:       metadata.DstIPASN,
-				SrcGeoIP:       append([]string(nil), metadata.SrcGeoIP...),
-				DstGeoIP:       append([]string(nil), metadata.DstGeoIP...),
+				SrcGeoIP:       cloneStringsPreserveNil(metadata.SrcGeoIP),
+				DstGeoIP:       cloneStringsPreserveNil(metadata.DstGeoIP),
 				SmartBlock:     metadata.SmartBlock,
 				SmartTarget:    metadata.SmartTarget,
 				WildcardTarget: metadata.WildcardTarget,
@@ -152,8 +175,14 @@ func ToMetadata(flow cfir.Flow) (*C.Metadata, error) {
 	if extension, ok := metadataExtension(flow); ok {
 		metadata.Type = extension.Type
 		metadata.DNSMode = extension.DNSMode
+		metadata.InIP = extension.InIP
+		metadata.InPort = extension.InPort
 		metadata.InName = extension.InName
 		metadata.InUser = extension.InUser
+		metadata.RematchName = extension.RematchName
+		metadata.UUID = extension.UUID
+		metadata.RawSrcAddr = extension.RawSrcAddr
+		metadata.RawDstAddr = extension.RawDstAddr
 		metadata.Uid = extension.UID
 		metadata.Process = extension.Process
 		metadata.ProcessPath = extension.ProcessPath
@@ -164,8 +193,8 @@ func ToMetadata(flow cfir.Flow) (*C.Metadata, error) {
 		metadata.SniffHost = extension.SniffHost
 		metadata.SrcIPASN = extension.SrcIPASN
 		metadata.DstIPASN = extension.DstIPASN
-		metadata.SrcGeoIP = append([]string(nil), extension.SrcGeoIP...)
-		metadata.DstGeoIP = append([]string(nil), extension.DstGeoIP...)
+		metadata.SrcGeoIP = cloneStringsPreserveNil(extension.SrcGeoIP)
+		metadata.DstGeoIP = cloneStringsPreserveNil(extension.DstGeoIP)
 		metadata.SmartBlock = extension.SmartBlock
 		metadata.SmartTarget = extension.SmartTarget
 		metadata.WildcardTarget = extension.WildcardTarget
