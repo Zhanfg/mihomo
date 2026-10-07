@@ -69,3 +69,57 @@ func RankSnapshotThroughCFIR(metadata *C.Metadata, ranked []C.Proxy, generation 
 	}
 	return cfir.RankPreparedCandidates(context.Background(), intent, SnapshotRanker{scores: scores}, candidates)
 }
+
+
+type shadowProtocolAdapter struct {
+	descriptor cfir.ProtocolDescriptor
+}
+
+func (a shadowProtocolAdapter) Descriptor() cfir.ProtocolDescriptor {
+	return a.descriptor
+}
+
+func MaterializeSnapshotPlan(metadata *C.Metadata, ranked []C.Proxy, generation cfir.Generation) (cfir.ExecutionPlan, error) {
+	scored, err := RankSnapshotThroughCFIR(metadata, ranked, generation)
+	if err != nil {
+		return cfir.ExecutionPlan{}, err
+	}
+	if len(scored) == 0 {
+		return cfir.ExecutionPlan{}, nil
+	}
+
+	selected := scored[0].Candidate.Protocol
+	var selectedDecision legacybridge.LegacyDecision
+	for _, proxy := range ranked {
+		decision, err := legacybridge.ProjectProxyDecision(proxy, metadata)
+		if err != nil {
+			return cfir.ExecutionPlan{}, err
+		}
+		if decision.Resolved &&
+			decision.Protocol == selected.Protocol &&
+			decision.LeafName == selected.Instance {
+			selectedDecision = decision
+			break
+		}
+	}
+	if !selectedDecision.Resolved {
+		return cfir.ExecutionPlan{}, fmt.Errorf(
+			"cfir shadow: selected candidate %s/%s has no legacy projection",
+			selected.Protocol, selected.Instance,
+		)
+	}
+
+	intent, err := legacybridge.IntentForLegacyDecision(metadata, generation, cfir.RouteActionForward)
+	if err != nil {
+		return cfir.ExecutionPlan{}, err
+	}
+	if platform, platformErr := cfir.RuntimePlatform(); platformErr == nil {
+		intent.Platform = platform
+	}
+
+	registry := cfir.NewRegistry()
+	if err := registry.RegisterProtocol(shadowProtocolAdapter{descriptor: selectedDecision.Family}); err != nil {
+		return cfir.ExecutionPlan{}, err
+	}
+	return registry.MaterializeExecutionPlan(intent, scored[0])
+}
