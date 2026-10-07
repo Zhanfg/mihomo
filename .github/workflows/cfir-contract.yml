@@ -8,6 +8,7 @@ on:
       - 'component/cfir/**'
       - 'tunnel/**'
       - 'adapter/outboundgroup/**'
+      - 'adapter/outbound/**'
       - 'listener/sing_ebpf/**'
       - 'listener/sing_tun/**'
       - 'common/ebpf/**'
@@ -17,6 +18,7 @@ on:
       - 'component/cfir/**'
       - 'tunnel/**'
       - 'adapter/outboundgroup/**'
+      - 'adapter/outbound/**'
       - 'listener/sing_ebpf/**'
       - 'listener/sing_tun/**'
       - 'common/ebpf/**'
@@ -180,3 +182,34 @@ jobs:
           set -euo pipefail
           mkdir -p /tmp/cfir-tun
           go test -c ./listener/sing_tun -o "/tmp/cfir-tun/sing-tun-${GOOS}-${GOARCH}.test"
+
+
+  protocol-projection-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: android, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test protocol self-description on Linux
+        if: matrix.target.goos == 'linux'
+        run: go test ./adapter/outbound -run '^TestCFIR' -count=1
+      - name: Compile protocol projections for target
+        shell: bash
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-protocol
+          go test -c ./adapter/outbound -o "/tmp/cfir-protocol/outbound-${GOOS}-${GOARCH}.test"
