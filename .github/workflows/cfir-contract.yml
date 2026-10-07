@@ -34,6 +34,19 @@ jobs:
           go-version: ${{ matrix.go-version }}
           cache: true
       - name: Test CFIR contract
+        run: go test ./component/cfir -count=1
+
+  race-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Race-test CFIR registry and contracts
+        env:
+          CGO_ENABLED: '1'
         run: go test ./component/cfir -count=1 -race
 
   five-platform-compile:
