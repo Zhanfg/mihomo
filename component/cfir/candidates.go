@@ -114,6 +114,9 @@ func (p ProtocolProjection) Validate() error {
 	if p.Instance.Protocol == "" {
 		return errors.New("cfir: protocol projection instance has no protocol id")
 	}
+	if p.Instance.Instance == "" {
+		return errors.New("cfir: protocol projection instance has no instance id")
+	}
 	if p.Instance.Protocol != p.Family.ID {
 		return fmt.Errorf(
 			"cfir: protocol projection instance %s does not match family %s",
