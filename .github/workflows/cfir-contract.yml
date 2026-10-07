@@ -1,0 +1,215 @@
+name: CFIR Contract
+
+on:
+  push:
+    branches:
+      - 'arch/cfir-*'
+    paths:
+      - 'component/cfir/**'
+      - 'tunnel/**'
+      - 'adapter/outboundgroup/**'
+      - 'adapter/outbound/**'
+      - 'listener/sing_ebpf/**'
+      - 'listener/sing_tun/**'
+      - 'common/ebpf/**'
+      - '.github/workflows/cfir-contract.yml'
+  pull_request:
+    paths:
+      - 'component/cfir/**'
+      - 'tunnel/**'
+      - 'adapter/outboundgroup/**'
+      - 'adapter/outbound/**'
+      - 'listener/sing_ebpf/**'
+      - 'listener/sing_tun/**'
+      - 'common/ebpf/**'
+      - '.github/workflows/cfir-contract.yml'
+
+concurrency:
+  group: cfir-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        go-version: ['1.25', '1.26']
+    runs-on: ${{ matrix.os }}
+    env:
+      CGO_ENABLED: '0'
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go-version }}
+          cache: true
+      - name: Test CFIR contract
+        run: go test ./component/cfir/... -count=1
+
+  race-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Race-test CFIR packages
+        env:
+          CGO_ENABLED: '1'
+        run: go test ./component/cfir/... -count=1 -race
+
+  five-platform-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: android, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Compile CFIR for target
+        shell: bash
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-build
+          go test -c ./component/cfir -o "/tmp/cfir-build/cfir-${GOOS}-${GOARCH}.test"
+
+  ios-compile:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Compile CFIR for iOS arm64
+        shell: bash
+        env:
+          GOOS: ios
+          GOARCH: arm64
+          CGO_ENABLED: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-build
+          go test -c ./component/cfir -o /tmp/cfir-build/cfir-ios-arm64.test
+
+  shadow-data-plane:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test CFIR packages
+        run: go test ./component/cfir/... -count=1
+      - name: Compile production data plane with zero-cost CFIR hooks
+        run: go test ./tunnel ./adapter/outboundgroup -run '^$' -count=1
+      - name: Compile live CFIR shadow data plane
+        run: go test -tags with_cfir_shadow ./tunnel ./adapter/outboundgroup -run '^$' -count=1
+      - name: Cross-compile Android arm64 live shadow data plane
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-shadow
+          go test -c -tags with_cfir_shadow ./tunnel -o /tmp/cfir-shadow/tunnel-android-arm64.test
+          go test -c -tags with_cfir_shadow ./adapter/outboundgroup -o /tmp/cfir-shadow/outboundgroup-android-arm64.test
+
+
+  ebpf-backend-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test eBPF CFIR projection without privileged probes
+        run: go test -tags with_ebpf ./listener/sing_ebpf -run '^TestCFIR' -count=1
+      - name: Cross-compile Android arm64 eBPF projection
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-ebpf
+          go test -c -tags with_ebpf ./listener/sing_ebpf -o /tmp/cfir-ebpf/sing-ebpf-android-arm64.test
+
+
+  tun-backend-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: android, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Compile TUN backend projection
+        shell: bash
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-tun
+          go test -c ./listener/sing_tun -o "/tmp/cfir-tun/sing-tun-${GOOS}-${GOARCH}.test"
+
+
+  protocol-projection-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { goos: android, goarch: arm64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Test protocol self-description on Linux
+        if: matrix.target.goos == 'linux'
+        run: go test ./adapter/outbound -run '^TestCFIR' -count=1
+      - name: Compile protocol projections for target
+        shell: bash
+        env:
+          GOOS: ${{ matrix.target.goos }}
+          GOARCH: ${{ matrix.target.goarch }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cfir-protocol
+          go test -c ./adapter/outbound -o "/tmp/cfir-protocol/outbound-${GOOS}-${GOARCH}.test"
