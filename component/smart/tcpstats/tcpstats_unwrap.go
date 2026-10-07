@@ -42,7 +42,6 @@ outer:
 			conn = nc.NetConn()
 			continue outer
 		}
-
 		v := reflect.ValueOf(conn)
 		if v.Kind() == reflect.Ptr {
 			v = v.Elem()
