@@ -53,6 +53,9 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 	if intent.Action != RouteActionForward {
 		return ProtocolDescriptor{}, errors.New("cfir: protocol candidate is only valid for forward intents")
 	}
+	if candidate.Instance == "" {
+		return ProtocolDescriptor{}, errors.New("cfir: protocol candidate instance is empty")
+	}
 	descriptor, err := r.EffectiveProtocolDescriptor(candidate.Protocol)
 	if err != nil {
 		return ProtocolDescriptor{}, err
