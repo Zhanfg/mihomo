@@ -310,3 +310,35 @@ func (r *Registry) ResolveComposition(descriptor ProtocolDescriptor) error {
 	}
 	return nil
 }
+
+
+// EffectiveProtocolDescriptor resolves reusable layer capabilities into the
+// protocol's own descriptor. The protocol remains free to declare capabilities
+// unique to its framing/session semantics; reusable transport/security layers
+// contribute theirs automatically.
+func (r *Registry) EffectiveProtocolDescriptor(id ProtocolID) (ProtocolDescriptor, error) {
+	r.mu.RLock()
+	adapter, ok := r.protocols[id]
+	if !ok {
+		r.mu.RUnlock()
+		return ProtocolDescriptor{}, fmt.Errorf("cfir: unknown protocol %s", id)
+	}
+	descriptor := adapter.Descriptor()
+	capabilities := descriptor.Capabilities
+	for _, ref := range descriptor.Composition {
+		layer, exists := r.layers[ref.ID]
+		if !exists {
+			r.mu.RUnlock()
+			return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol %s references missing layer %s", id, ref.ID)
+		}
+		layerDescriptor := layer.Descriptor()
+		if layerDescriptor.Kind != ref.Kind {
+			r.mu.RUnlock()
+			return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol %s layer %s kind mismatch", id, ref.ID)
+		}
+		capabilities = capabilities.Union(layerDescriptor.Capabilities)
+	}
+	r.mu.RUnlock()
+	descriptor.Capabilities = capabilities
+	return descriptor, nil
+}
