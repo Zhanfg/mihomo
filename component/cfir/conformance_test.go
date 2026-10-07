@@ -60,11 +60,20 @@ func TestProviderBundleRegistrationIsAtomic(t *testing.T) {
 		Platforms: Platforms(PlatformAndroid, PlatformLinux),
 		MinCFIR:   CurrentVersion,
 	}}
+	layer := testLayer{descriptor: LayerDescriptor{
+		ID:      "minext-transport",
+		Kind:    LayerTransport,
+		MinCFIR: CurrentVersion,
+		Capabilities: NewCapabilitySet(
+			CapabilityPathMigration,
+		),
+	}}
 
 	err := registry.RegisterProvider(ProviderBundle{
 		Source:    UpstreamSource{Project: "mihomo-next", Revision: "next-1"},
 		Protocols: []ProtocolAdapter{future, conflict},
 		Backends:  []Backend{backend},
+		Layers:    []ProtocolLayer{layer},
 	})
 	if err == nil {
 		t.Fatal("conflicting upstream bundle must be rejected")
@@ -75,11 +84,15 @@ func TestProviderBundleRegistrationIsAtomic(t *testing.T) {
 	if got := registry.Backends(BackendTUN, PlatformAndroid); len(got) != 0 {
 		t.Fatalf("failed provider registration leaked a partial backend: %#v", got)
 	}
+	if _, ok := registry.Layer("minext-transport"); ok {
+		t.Fatal("failed provider registration leaked a partial layer")
+	}
 
 	if err := registry.RegisterProvider(ProviderBundle{
 		Source:    UpstreamSource{Project: "mihomo-next", Revision: "next-2"},
 		Protocols: []ProtocolAdapter{future},
 		Backends:  []Backend{backend},
+		Layers:    []ProtocolLayer{layer},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -88,5 +101,8 @@ func TestProviderBundleRegistrationIsAtomic(t *testing.T) {
 	}
 	if got := registry.Backends(BackendTUN, PlatformLinux); len(got) != 1 || got[0].ID != "minext-stack" {
 		t.Fatalf("valid upstream backend not registered: %#v", got)
+	}
+	if got, ok := registry.Layer("minext-transport"); !ok || got.Descriptor().Kind != LayerTransport {
+		t.Fatal("valid upstream layer not registered")
 	}
 }
