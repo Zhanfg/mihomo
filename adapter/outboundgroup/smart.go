@@ -2865,6 +2865,7 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	lastUsed := time.Now().Unix()
 	atomicRecord.Set("lastUsed", lastUsed)
 	atomicRecord.SetWeight(weightType, newWeight)
+	atomicRecord.SetWeight(smart.RouteEpochWeightType(isUDP), float64(currentEpoch))
 	s.store.TouchActiveTarget(s.Name(), s.configName, target, isUDP, lastUsed)
 	statsSnapshot := atomicRecord.CreateStatsSnapshot(cacheKey)
 	// Queued under the lock: the queue keeps the last write per key, so two
