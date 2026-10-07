@@ -198,3 +198,67 @@ Phase 6: remove legacy protocol-name coupling after differential gates prove
 parity.
 
 At no phase should a CFIR migration require a flag-day rewrite of all protocols.
+
+
+## 11. Static build profiles
+
+Logical plugin architecture does not imply dynamic loading.
+
+CFIR build profiles select protocols and backends for a target platform. The
+resolver automatically computes the closure of reusable layers required by the
+selected protocols. A future registry generator can then emit only those static
+imports, allowing the Go linker to remove unselected implementations.
+
+Examples:
+
+- Universal: all certified protocols + all target-compatible backends
+- Android Lite: selected consumer protocols + VpnService backend
+- Android Root: Lite + eBPF kernel accelerator
+- Windows: selected protocols + Wintun/WFP backends
+- Apple Lite: selected protocols + NetworkExtension backend
+
+A profile cannot select a backend that does not declare support for the target
+platform.
+
+## 12. Semantic upstream manifests
+
+Upstream intake snapshots protocol, layer and backend descriptors independently
+of the upstream source tree.
+
+The semantic diff classifies changes as:
+
+- Additive: a new protocol/layer/backend
+- Review: compatible semantic changes or newly added capabilities
+- Breaking: removed protocols/layers/backends, removed capabilities, removed
+  platform support, raised incompatible CFIR requirements, primitive loss or
+  security-profile regression
+
+This makes a large source rewrite manageable. Renaming packages or replacing an
+implementation without changing its CFIR-visible semantics produces no false
+architecture migration requirement.
+
+## 13. Capability scopes
+
+Protocol capabilities and platform/backend capabilities are separate.
+
+Examples:
+
+- ReliableDatagram, Multiplex and protocol PathMigration are protocol-side.
+- ZeroCopy, kernel flow observation and platform route features can be
+  backend-side.
+
+An ExecutionPlan validates each requirement against the correct scope. A fast
+backend is not allowed to make an otherwise incapable protocol appear to
+support a wire semantic it cannot actually provide.
+
+## 14. Deferred payload ABI
+
+CFIR v1 deliberately does not freeze a new payload buffer or packet I/O ABI.
+
+The live implementation can continue using standard Go connection interfaces
+and existing optimized buffer/splice paths. A dedicated payload ABI will be
+considered only after protocol-corpus and shadow testing prove the requirements
+for QUIC datagrams, MASQUE, packet tunnels, multipath and future session types.
+
+This avoids introducing an unnecessary encode/decode layer or freezing a
+lowest-common-denominator buffer API before the capability model is mature.
