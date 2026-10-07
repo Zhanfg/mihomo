@@ -51,13 +51,15 @@ type TransportPolicy struct {
 // platform backends. It names the selected protocol only at the final edge;
 // all earlier decision stages can operate on capability requirements.
 type ExecutionPlan struct {
-	Protocol      ProtocolID
-	Backend       string
-	Primitive     Primitive
-	Requirements  CapabilityRequirement
-	SecurityFloor SecurityProfile
-	Transport     TransportPolicy
-	Generation    Generation
+	Protocol            ProtocolID
+	Backend             string
+	Platform            Platform
+	Primitive           Primitive
+	Requirements        CapabilityRequirement
+	BackendRequirements CapabilityRequirement
+	SecurityFloor       SecurityProfile
+	Transport           TransportPolicy
+	Generation          Generation
 }
 
 func (p ExecutionPlan) Validate(registry *Registry) error {
@@ -68,6 +70,9 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		return errors.New("cfir: execution plan has invalid primitive")
 	}
 	if err := p.Requirements.Validate(); err != nil {
+		return err
+	}
+	if err := p.BackendRequirements.Validate(); err != nil {
 		return err
 	}
 	descriptor, err := registry.EffectiveProtocolDescriptor(p.Protocol)
@@ -83,6 +88,22 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 	}
 	if !descriptor.Security.Meets(p.SecurityFloor) {
 		return fmt.Errorf("cfir: protocol %s violates execution plan security floor", p.Protocol)
+	}
+	if p.Backend != "" {
+		backend, ok := registry.Backend(p.Backend)
+		if !ok {
+			return fmt.Errorf("cfir: execution plan references unknown backend %s", p.Backend)
+		}
+		backendDescriptor := backend.Descriptor()
+		if p.Platform != PlatformInvalid && !backendDescriptor.Platforms.Supports(p.Platform) {
+			return fmt.Errorf("cfir: backend %s does not support platform %d", p.Backend, p.Platform)
+		}
+		if !p.BackendRequirements.SatisfiedBy(backendDescriptor.Capabilities) {
+			missing := p.BackendRequirements.MissingFrom(backendDescriptor.Capabilities)
+			return fmt.Errorf("cfir: backend %s misses capabilities: standard=%v extensions=%v", p.Backend, missing.Standard, missing.Extensions)
+		}
+	} else if len(p.BackendRequirements.Standard) > 0 || len(p.BackendRequirements.Extensions) > 0 {
+		return errors.New("cfir: backend capabilities requested without selecting a backend")
 	}
 	if p.Transport.Hedge.MaxAttempts > 8 {
 		return errors.New("cfir: hedge attempt budget exceeds hard safety bound")
