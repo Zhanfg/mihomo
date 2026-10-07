@@ -60,6 +60,12 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 	if !intent.AcceptsProtocol(descriptor) {
 		return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol family %s cannot satisfy structural intent", candidate.Protocol)
 	}
+	if !descriptor.Capabilities.ContainsAll(candidate.Capabilities) {
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s claims capabilities outside family declaration",
+			candidate.Protocol, candidate.Instance,
+		)
+	}
 	if !intent.Requirements.SatisfiedBy(candidate.Capabilities) {
 		missing := intent.Requirements.MissingFrom(candidate.Capabilities)
 		return ProtocolDescriptor{}, fmt.Errorf(
@@ -95,7 +101,16 @@ func (p ProtocolProjection) Validate() error {
 			p.Instance.Protocol, p.Family.ID,
 		)
 	}
-	return p.Instance.Security.Profile.Validate()
+	if !p.Family.Capabilities.ContainsAll(p.Instance.Capabilities) {
+		return fmt.Errorf("cfir: protocol instance %s claims capabilities outside family declaration", p.Instance.Instance)
+	}
+	if err := p.Instance.Security.Profile.Validate(); err != nil {
+		return err
+	}
+	if p.Family.Security != (SecurityProfile{}) && !p.Instance.Security.Meets(p.Family.Security) {
+		return fmt.Errorf("cfir: protocol instance %s does not attest family minimum security", p.Instance.Instance)
+	}
+	return nil
 }
 
 // ProtocolProjectionProvider lets a new protocol self-describe without adding
