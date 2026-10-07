@@ -103,6 +103,9 @@ func TestTinyRouterEpochChangeSoftensLearnedBias(t *testing.T) {
 	if state.Uncertainty != 1 {
 		t.Fatalf("epoch change uncertainty=%v want=1", state.Uncertainty)
 	}
+	if state.Updates > 4 {
+		t.Fatalf("epoch change kept stale sample age: updates=%v", state.Updates)
+	}
 	if uint64(state.Epoch) != 8 {
 		t.Fatalf("epoch=%v want=8", state.Epoch)
 	}
