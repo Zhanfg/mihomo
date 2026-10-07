@@ -520,6 +520,7 @@ func handleUDPConn(packet C.PacketAdapter) {
 			}
 
 			_ = preHandleMetadata(metadata) // error was pre-checked
+			observeCFIRShadow(metadata)
 
 			proxy, rule, decidedMode, err := resolveMetadata(metadata)
 			if err != nil {
@@ -609,6 +610,8 @@ func handleTCPConn(connCtx C.ConnContext) {
 			metadata.SourceDetail(), metadata.RemoteAddress())
 		return
 	}
+
+	observeCFIRShadow(metadata)
 
 	peekMutex := sync.Mutex{}
 	if !conn.Peeked() {
