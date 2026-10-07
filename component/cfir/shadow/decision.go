@@ -16,12 +16,15 @@ const (
 	DecisionMismatchPrimitive
 	DecisionMismatchCapability
 	DecisionMismatchSecurity
+	DecisionMismatchSelectedOutsideEligibleSet
 )
 
 type DecisionResult struct {
-	Intent   cfir.ExecutionIntent
-	Legacy   legacybridge.LegacyDecision
-	Mismatch DecisionMismatch
+	Intent           cfir.ExecutionIntent
+	Legacy           legacybridge.LegacyDecision
+	EligibleCount    int
+	SelectedEligible bool
+	Mismatch         DecisionMismatch
 }
 
 func (r DecisionResult) Equal() bool { return r.Mismatch == DecisionMismatchNone }
@@ -55,6 +58,32 @@ func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir
 	}
 	if !legacy.Instance.Security.Meets(intent.SecurityFloor) {
 		result.Mismatch |= DecisionMismatchSecurity
+	}
+
+	candidates, err := legacybridge.ProjectProxyCandidateSet(proxy, metadata)
+	if err != nil {
+		return result, err
+	}
+	for _, candidate := range candidates {
+		if candidate.Action != cfir.RouteActionForward || !candidate.Resolved {
+			continue
+		}
+		if !intent.AcceptsProtocol(candidate.Family) {
+			continue
+		}
+		if !intent.Requirements.SatisfiedBy(candidate.Instance.Capabilities) {
+			continue
+		}
+		if !candidate.Instance.Security.Meets(intent.SecurityFloor) {
+			continue
+		}
+		result.EligibleCount++
+		if candidate.LeafName == legacy.LeafName && candidate.Protocol == legacy.Protocol {
+			result.SelectedEligible = true
+		}
+	}
+	if !result.SelectedEligible {
+		result.Mismatch |= DecisionMismatchSelectedOutsideEligibleSet
 	}
 	return result, nil
 }
