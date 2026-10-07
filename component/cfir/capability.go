@@ -139,3 +139,33 @@ func (b ExtensionBag) Find(id ExtensionID) (Extension, bool) {
 	}
 	return nil, false
 }
+
+
+func (s CapabilitySet) Union(other CapabilitySet) CapabilitySet {
+	result := s
+	for i := range result.standard {
+		result.standard[i] |= other.standard[i]
+	}
+	for _, extension := range other.extensions {
+		if !result.HasExtension(extension) {
+			result.extensions = append(result.extensions, extension)
+		}
+	}
+	slices.Sort(result.extensions)
+	result.extensions = slices.Compact(result.extensions)
+	return result
+}
+
+func (s CapabilitySet) ContainsAll(other CapabilitySet) bool {
+	for i := range s.standard {
+		if s.standard[i]&other.standard[i] != other.standard[i] {
+			return false
+		}
+	}
+	for _, extension := range other.extensions {
+		if !s.HasExtension(extension) {
+			return false
+		}
+	}
+	return true
+}
