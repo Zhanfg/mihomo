@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dlclark/regexp2"
@@ -571,29 +572,33 @@ func (s *Smart) GetConfigFilename() string {
 // weak networks still obtain a fallback before a full timeout.
 func (s *Smart) smartHedgeDelay(metadata *C.Metadata, proxies []C.Proxy) time.Duration {
 	const (
-		defaultDelay = 250 * time.Millisecond
-		minDelay     = 120 * time.Millisecond
-		maxDelay     = 450 * time.Millisecond
+		defaultDelay = 160 * time.Millisecond
+		minDelay     = 80 * time.Millisecond
+		maxDelay     = 300 * time.Millisecond
 	)
+	clamp := func(delay time.Duration) time.Duration {
+		if delay < minDelay {
+			return minDelay
+		}
+		if delay > maxDelay {
+			return maxDelay
+		}
+		return delay
+	}
 	if len(proxies) == 0 {
 		return defaultDelay
 	}
 	assessment := adapter.TunnelPathAssessmentForProxy(proxies[0])
 	if assessment.Condition != linkprofile.ConditionUnknown && assessment.HedgeDelay > 0 {
-		return assessment.HedgeDelay
+		return clamp(assessment.HedgeDelay)
 	}
 	history := s.getHistoryConnectStats(metadata, proxies[0])
 	if history <= 0 {
 		return defaultDelay
 	}
-	delay := time.Duration(history/2) * time.Millisecond
-	if delay < minDelay {
-		return minDelay
-	}
-	if delay > maxDelay {
-		return maxDelay
-	}
-	return delay
+	// Start the backup before a slow first path consumes a full historical RTT
+	// budget. Fast paths finish before this timer and pay no second dial.
+	return clamp(time.Duration(history/3) * time.Millisecond)
 }
 
 // ref: component/dialer/dialer.go:314
@@ -771,15 +776,16 @@ func smartDialBatchBounds(total, iteration int, pinned bool) (begin, end int) {
 	return begin, end
 }
 
-func smartDialBatchBoundsForLink(total, iteration int, pinned, weak bool) (begin, end int) {
-	if !weak || pinned {
-		return smartDialBatchBounds(total, iteration, pinned)
+func smartDialBatchBoundsForLink(total, iteration int, pinned, _ bool) (begin, end int) {
+	if pinned {
+		return smartDialBatchBounds(total, iteration, true)
 	}
 	if total <= 0 {
 		return 0, 0
 	}
-	// On a weak path, race only the best two candidates first. ParallelDialContext
-	// staggers them, so we gain failover latency without a socket/radio stampede.
+	// Every unpinned target gets a two-candidate hedged first attempt. Candidate
+	// two is not opened immediately: ParallelDialContext starts it only when
+	// the hedge timer expires, so sub-hedge healthy paths still use one socket.
 	if iteration == 0 {
 		end = 2
 		if end > total {
@@ -1135,16 +1141,30 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	start := time.Now()
 
-	var firstWriteErr atomic.TypedValue[error]
 	var firstReadErr atomic.TypedValue[error]
 	var firstReadLatency atomic.Int64
+	var observedReadErr atomic.TypedValue[error]
+	var observedWriteErr atomic.TypedValue[error]
 
-	if N.NeedHandshake(c) {
-		c = callback.NewFirstWriteCallBackConn(c, func(err error) {
-			if err != nil {
-				firstWriteErr.Store(err)
+	needHandshake := N.NeedHandshake(c)
+	// DIRECT is a local bypass path rather than a remote relay whose quality
+	// Smart needs to attribute. Never put a read/write observer in front of its
+	// splice/raw-copy path merely to collect node-quality evidence.
+	if proxy.Type() != C.Direct {
+		// Preserve raw relay/splice fast paths. The all-transfer observer is only
+		// inserted when the writer is not the kernel socket fast path.
+		stop := N.UnwrapWriter(c)
+		if _, isRawRelay := stop.(syscall.Conn); !isRawRelay {
+			if u, ok := stop.(interface{ Upstream() any }); !ok || u.Upstream() != nil {
+				c = callback.NewErrorCallBackConn(c, &observedReadErr, &observedWriteErr)
 			}
-		})
+		}
+	}
+
+	if needHandshake {
+		// The transfer observer owns write-error attribution. This wrapper is
+		// retained only to preserve the pre-handshake replacement contract.
+		c = callback.NewFirstWriteCallBackConn(c, nil)
 	}
 
 	c = callback.NewFirstReadCallBackConn(c, func(err error) {
@@ -1156,7 +1176,8 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 
 	return s.registerClosureMetricsCallback(
 		c, proxy, metadata, connectTime,
-		&firstReadLatency, &firstReadErr, &firstWriteErr,
+		&firstReadLatency, &firstReadErr,
+		&observedReadErr, &observedWriteErr,
 	)
 }
 
@@ -1164,12 +1185,20 @@ func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadat
 	pc.AppendToChains(s)
 
 	var udpLatency atomic.Int64
+	var observedReadErr atomic.TypedValue[error]
+	var observedWriteErr atomic.TypedValue[error]
 
+	if proxy.Type() != C.Direct {
+		pc = callback.NewErrorCallBackPacketConn(pc, &observedReadErr, &observedWriteErr)
+	}
 	pc = callback.NewFirstReadCallBackPacketConn(pc, func(latency int64) {
 		udpLatency.Store(latency)
 	})
 
-	return s.registerPacketClosureMetricsCallback(pc, proxy, metadata, connectTime, &udpLatency)
+	return s.registerPacketClosureMetricsCallback(
+		pc, proxy, metadata, connectTime, &udpLatency,
+		&observedReadErr, &observedWriteErr,
+	)
 }
 
 func (s *Smart) Set(name string) error {
@@ -2732,8 +2761,21 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	calculatedWeight = smart.BlendHeuristicAndDistilled(heuristicWeight, distilledWeight, samples)
 	ModelPredicted = false
 	modelError := 0.0
+	currentEpoch := netstate.CurrentEpoch()
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
-	banditState.ObserveEpoch(netstate.CurrentEpoch())
+	banditState.ObserveEpoch(currentEpoch)
+	tinyRouterState := smart.LoadTinyRouterState(atomicRecord, isUDP)
+	tinyRouterState.ObserveEpoch(currentEpoch)
+
+	transportContext := smart.TinyRouterTransport{}
+	if tcpStats != nil {
+		transportContext = smart.TinyRouterTransport{
+			RTTVarMs: float64(tcpStats.RTTVarUsec) / 1000.0,
+			Unacked:  tcpStats.Unacked,
+			Lost:     tcpStats.Lost,
+			Cwnd:     tcpStats.Cwnd,
+		}
+	}
 
 	expertDisagreement := 0.0
 	if smart.ShouldConsultExpert(input, banditState) {
@@ -2784,8 +2826,11 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// reward, preventing expert/teacher self-confirmation.
 	teacherPrior := calculatedWeight
 	banditFeatures := smart.OnlineBanditFeatures(input)
+	tinyRouterFeatures := smart.TinyRouterFeatures(input, transportContext)
+	banditPrior := teacherPrior
 	if teacherPrior > 0 {
-		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
+		banditPrior, _ = banditState.Predict(teacherPrior, banditFeatures)
+		calculatedWeight, _ = tinyRouterState.Predict(banditPrior, tinyRouterFeatures)
 	}
 
 	if calculatedWeight > 0 && linkFactor > 0 {
@@ -2813,14 +2858,21 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		if isDegraded || failedBlock {
 			reward *= 0.15
 		}
-		_, uncertainty := banditState.Update(teacherPrior, reward, banditFeatures, sampleScale)
+		updatedBanditWeight, uncertainty := banditState.Update(teacherPrior, reward, banditFeatures, sampleScale)
 		smart.SaveOnlineBanditState(atomicRecord, isUDP, banditState, uncertainty)
+
+		// The tiny nonlinear head learns only the residual the linear contextual
+		// student still misses. Training happens after completion, never on the
+		// dial path, and uses the same real reward rather than its own prediction.
+		_, _ = tinyRouterState.Update(updatedBanditWeight, reward, tinyRouterFeatures, sampleScale)
+		smart.SaveTinyRouterState(atomicRecord, isUDP, tinyRouterState)
 	}
 
 	newWeight := updateEMAFloat(oldWeight, adjWeight)
 	lastUsed := time.Now().Unix()
 	atomicRecord.Set("lastUsed", lastUsed)
 	atomicRecord.SetWeight(weightType, newWeight)
+	atomicRecord.SetWeight(smart.RouteEpochWeightType(isUDP), float64(currentEpoch))
 	s.store.TouchActiveTarget(s.Name(), s.configName, target, isUDP, lastUsed)
 	statsSnapshot := atomicRecord.CreateStatsSnapshot(cacheKey)
 	// Queued under the lock: the queue keeps the last write per key, so two
@@ -2942,58 +2994,76 @@ func (s *Smart) waitBackgroundWork() {
 	s.workWG.Wait()
 }
 
-func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], firstWriteErr *atomic.TypedValue[error]) C.Conn {
+func (s *Smart) registerClosureMetricsCallback(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, firstReadLatency *atomic.Int64, firstReadErr *atomic.TypedValue[error], observedReadErr *atomic.TypedValue[error], observedWriteErr *atomic.TypedValue[error]) C.Conn {
 	return callback.NewCloseCallbackConn(c, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
-		if tracker != nil {
-			info := tracker.Info()
-			uploadTotal := info.UploadTotal.Load()
-			downloadTotal := info.DownloadTotal.Load()
-			connectionDuration := time.Since(info.Start).Milliseconds()
-			maxUploadRate := info.MaxUploadRate.Load()
-			maxDownloadRate := info.MaxDownloadRate.Load()
-
-			latency := firstReadLatency.Load()
-			readErr := firstReadErr.Load()
-			writeErr := firstWriteErr.Load()
-
-			var tcpStats *tcpstats.Stats
-			if trackerConn, ok := tracker.(net.Conn); ok {
-				tcpStats = tcpstats.GetTCPStats(trackerConn)
-			}
-
-			var closeErr error
-			if readErr != nil {
-				if readErr == io.EOF {
-					if writeErr != nil && writeErr != io.EOF {
-						closeErr = writeErr
-					}
-				} else {
-					closeErr = readErr
-				}
-			}
-
-			s.submitConnectionStats(metadata, proxy, connectTime, latency, uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, tcpStats, closeErr, true)
+		if tracker == nil {
 			return
 		}
+		info := tracker.Info()
+		uploadTotal := info.UploadTotal.Load()
+		downloadTotal := info.DownloadTotal.Load()
+		connectionDuration := time.Since(info.Start).Milliseconds()
+		maxUploadRate := info.MaxUploadRate.Load()
+		maxDownloadRate := info.MaxDownloadRate.Load()
+
+		latency := firstReadLatency.Load()
+		readErr := firstReadErr.Load()
+		if err := observedReadErr.Load(); err != nil {
+			readErr = err
+		}
+		writeErr := observedWriteErr.Load()
+
+		var tcpStats *tcpstats.Stats
+		if trackerConn, ok := tracker.(net.Conn); ok {
+			tcpStats = tcpstats.GetTCPStats(trackerConn)
+		}
+
+		var closeErr error
+		switch {
+		case readErr != nil && readErr != io.EOF:
+			closeErr = readErr
+		case writeErr != nil && writeErr != io.EOF:
+			closeErr = writeErr
+		}
+
+		// Reaping a connection after a network epoch change, or closing a
+		// connection that Smart itself judged stale, is not evidence against
+		// the selected node.
+		if metadata.SmartBlock == "degraded" {
+			closeErr = nil
+		}
+
+		s.submitConnectionStats(metadata, proxy, connectTime, latency,
+			uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+			connectionDuration, tcpStats, closeErr, true)
 	})
 }
 
-func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, udpLatency *atomic.Int64) C.PacketConn {
+func (s *Smart) registerPacketClosureMetricsCallback(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64, udpLatency *atomic.Int64, observedReadErr *atomic.TypedValue[error], observedWriteErr *atomic.TypedValue[error]) C.PacketConn {
 	return callback.NewCloseCallbackPacketConn(pc, func() {
 		tracker := statistic.DefaultManager.Get(metadata.UUID)
-		if tracker != nil {
-			info := tracker.Info()
-			uploadTotal := info.UploadTotal.Load()
-			downloadTotal := info.DownloadTotal.Load()
-			connectionDuration := time.Since(info.Start).Milliseconds()
-			maxUploadRate := info.MaxUploadRate.Load()
-			maxDownloadRate := info.MaxDownloadRate.Load()
-
-			s.submitConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
-				uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate, connectionDuration, nil, nil, false)
+		if tracker == nil {
 			return
 		}
+		info := tracker.Info()
+		uploadTotal := info.UploadTotal.Load()
+		downloadTotal := info.DownloadTotal.Load()
+		connectionDuration := time.Since(info.Start).Milliseconds()
+		maxUploadRate := info.MaxUploadRate.Load()
+		maxDownloadRate := info.MaxDownloadRate.Load()
+
+		closeErr := observedReadErr.Load()
+		if closeErr == nil {
+			closeErr = observedWriteErr.Load()
+		}
+		if metadata.SmartBlock == "degraded" {
+			closeErr = nil
+		}
+
+		s.submitConnectionStats(metadata, proxy, connectTime, udpLatency.Load(),
+			uploadTotal, downloadTotal, maxUploadRate, maxDownloadRate,
+			connectionDuration, nil, closeErr, closeErr != nil)
 	})
 }
 

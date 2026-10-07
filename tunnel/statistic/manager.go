@@ -72,6 +72,43 @@ func (m *Manager) Range(f func(c Tracker) bool) {
 	})
 }
 
+func shouldCloseForNetworkEpoch(info *TrackerInfo, current uint64) bool {
+	return info != nil && info.NetworkEpoch != 0 && current != 0 && info.NetworkEpoch < current
+}
+
+// CloseBeforeNetworkEpoch reaps sockets created on a previous default-network
+// epoch. A TCP/UDP socket cannot migrate its source address or carrier NAT
+// mapping after Wi-Fi/5G/hotspot handover; leaving it registered makes the
+// application wait for kernel retransmission timeouts even though new dials
+// already use the new path.
+func (m *Manager) CloseBeforeNetworkEpoch(current uint64) int {
+	if current == 0 {
+		return 0
+	}
+
+	stale := make([]Tracker, 0)
+	m.Range(func(c Tracker) bool {
+		if c != nil && shouldCloseForNetworkEpoch(c.Info(), current) {
+			stale = append(stale, c)
+		}
+		return true
+	})
+
+	closed := 0
+	for _, c := range stale {
+		if info := c.Info(); info != nil && info.Metadata != nil {
+			// A forced epoch migration is local lifecycle management, not node
+			// quality evidence. Smart understands this marker and will not
+			// penalize the relay when the close callback runs.
+			info.Metadata.SmartBlock = "degraded"
+		}
+		if err := c.Close(); err == nil {
+			closed++
+		}
+	}
+	return closed
+}
+
 func (m *Manager) PushUploaded(size int64) {
 	m.uploadTemp.Add(size)
 	m.uploadTotal.Add(size)

@@ -6,16 +6,21 @@ import (
 	"syscall"
 )
 
+const maxUnwrapSteps = 256
+
 func getTCPStats(conn net.Conn) *Stats {
-	seen := make(map[uintptr]bool, 12)
+	var seenBuf [16]uintptr
+	seen := seenBuf[:0]
 outer:
-	for depth := 0; depth < 32; depth++ {
+	for depth := 0; depth < maxUnwrapSteps; depth++ {
 		if rv := reflect.ValueOf(conn); rv.Kind() == reflect.Ptr {
 			ptr := rv.Pointer()
-			if seen[ptr] {
-				return nil
+			for _, prev := range seen {
+				if prev == ptr {
+					return nil
+				}
 			}
-			seen[ptr] = true
+			seen = append(seen, ptr)
 		}
 
 		if sc, ok := conn.(interface {
@@ -32,28 +37,25 @@ outer:
 				conn = next
 				continue outer
 			}
-			// fall through to other unwrap methods
 		}
 		if nc, ok := conn.(interface{ NetConn() net.Conn }); ok {
 			conn = nc.NetConn()
 			continue outer
 		}
-		{
-			v := reflect.ValueOf(conn)
-			if v.Kind() == reflect.Ptr {
-				v = v.Elem()
-			}
-			if v.Kind() == reflect.Struct {
-				t := v.Type()
-				for i := 0; i < v.NumField(); i++ {
-					f := v.Field(i)
-					if !t.Field(i).IsExported() || !f.CanInterface() {
-						continue
-					}
-					if inner, ok := f.Interface().(net.Conn); ok {
-						conn = inner
-						continue outer
-					}
+		v := reflect.ValueOf(conn)
+		if v.Kind() == reflect.Ptr {
+			v = v.Elem()
+		}
+		if v.Kind() == reflect.Struct {
+			t := v.Type()
+			for i := 0; i < v.NumField(); i++ {
+				field := v.Field(i)
+				if !t.Field(i).IsExported() || !field.CanInterface() {
+					continue
+				}
+				if inner, ok := field.Interface().(net.Conn); ok {
+					conn = inner
+					continue outer
 				}
 			}
 		}

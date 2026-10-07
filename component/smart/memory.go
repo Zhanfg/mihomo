@@ -45,6 +45,7 @@ type (
 		Proxies []string `json:"proxies,omitempty"`
 		Ref     string   `json:"ref,omitempty"`
 		Country string   `json:"country,omitempty"`
+		Epoch   uint64   `json:"epoch,omitempty"`
 	}
 
 	NodesWithWeights struct {
@@ -61,6 +62,7 @@ type (
 		TCP         NodesWithWeights `json:"tcp,omitempty"`
 		UDP         NodesWithWeights `json:"udp,omitempty"`
 		UpdatedTime int64            `json:"updated_time,omitempty"`
+		Epoch       uint64           `json:"epoch,omitempty"`
 	}
 )
 
@@ -128,6 +130,7 @@ func (s *Store) StorePrefetchResult(group, config string, target string, isUDP b
 		pm.TCP = nodeWeight
 	}
 	pm.UpdatedTime = time.Now().Unix()
+	pm.Epoch = currentRouteEpoch()
 
 	data, err := json.Marshal(pm)
 	if err != nil {
@@ -164,6 +167,9 @@ func (s *Store) GetPrefetchResult(group, config string, target string, isUDP boo
 	}
 
 	pick := func(pm PrefetchMap) ([]string, []float64) {
+		if !routeEvidenceCurrent(pm.Epoch) {
+			return nil, nil
+		}
 		var res NodesWithWeights
 		if isUDP {
 			res = pm.UDP
@@ -205,7 +211,7 @@ func (s *Store) StoreUnwrapResultWithCountry(group, config string, target string
 
 	targetKey := FormatDBKey(config, group, target)
 	existing, expireTime, found := unwrapCache.GetWithExpire(targetKey)
-	if found && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
+	if found && routeEvidenceCurrent(existing.Epoch) && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
 		// Do not rewrite a live winner merely to add metadata. If the caller is
 		// refreshing the same winner, enrich the cached entry in place.
 		if len(names) == len(existing.Proxies) {
@@ -218,12 +224,13 @@ func (s *Store) StoreUnwrapResultWithCountry(group, config string, target string
 			}
 			if same && country != "" && existing.Country != country {
 				existing.Country = country
+				existing.Epoch = currentRouteEpoch()
 				unwrapCache.Set(targetKey, existing)
 			}
 		}
 		return
 	}
-	unwrapCache.Set(targetKey, UnwrapMap{Proxies: names, Country: country})
+	unwrapCache.Set(targetKey, UnwrapMap{Proxies: names, Country: country, Epoch: currentRouteEpoch()})
 }
 
 func (s *Store) GetUnwrapAffinity(group, config, target string) (proxies []string, country string, expired bool) {
@@ -233,6 +240,10 @@ func (s *Store) GetUnwrapAffinity(group, config, target string) (proxies []strin
 
 	targetKey := FormatDBKey(config, group, target)
 	if value, expireTime, found := unwrapCache.GetWithExpire(targetKey); found {
+		if !routeEvidenceCurrent(value.Epoch) {
+			unwrapCache.Delete(targetKey)
+			return nil, "", true
+		}
 		if len(value.Proxies) > 0 {
 			return value.Proxies, value.Country, expireTime.Before(time.Now())
 		}

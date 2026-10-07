@@ -6,6 +6,7 @@ on:
     branches:
       - opt/smart-expert-v8
       - opt/smart-production-v9
+      - 'sync/**'
     paths:
       - ".github/workflows/smart-extreme.yml"
       - "adapter/outboundgroup/**"

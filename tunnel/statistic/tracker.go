@@ -11,6 +11,7 @@ import (
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/health"
+	"github.com/metacubex/mihomo/component/netstate"
 	C "github.com/metacubex/mihomo/constant"
 
 	"github.com/gofrs/uuid/v5"
@@ -49,6 +50,7 @@ type TrackerInfo struct {
 	RulePayload     string       `json:"rulePayload"`
 	MaxUploadRate   atomic.Int64 `json:"maxUploadRate"`
 	MaxDownloadRate atomic.Int64 `json:"maxDownloadRate"`
+	NetworkEpoch    uint64       `json:"networkEpoch,omitempty"`
 
 	// When payload last moved each way, in Unix nanoseconds; zero if it never
 	// has. Kept out of the API: they exist for AwaitingReply.
@@ -252,6 +254,7 @@ func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.R
 			Chain:         conn.Chains(),
 			ProviderChain: conn.ProviderChains(),
 			Rule:          "",
+			NetworkEpoch:  netstate.CurrentEpoch(),
 			UploadTotal:   atomic.NewInt64(uploadTotal),
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
@@ -367,6 +370,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 			Chain:         conn.Chains(),
 			ProviderChain: conn.ProviderChains(),
 			Rule:          "",
+			NetworkEpoch:  netstate.CurrentEpoch(),
 			UploadTotal:   atomic.NewInt64(uploadTotal),
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},

@@ -75,6 +75,18 @@ func TestSmartDialBatchBoundsForWeakLink(t *testing.T) {
 	}
 }
 
+func TestSmartDialBatchBoundsHedgesNominalFirstPath(t *testing.T) {
+	begin, end := smartDialBatchBoundsForLink(6, 0, false, false)
+	if begin != 0 || end != 2 {
+		t.Fatalf("nominal first batch=(%d,%d), want (0,2)", begin, end)
+	}
+
+	begin, end = smartDialBatchBoundsForLink(6, 1, false, false)
+	if begin != 2 {
+		t.Fatalf("nominal second batch begins at %d, want 2", begin)
+	}
+}
+
 func TestSmartDialBatchBoundsPinnedRemainsSerial(t *testing.T) {
 	begin, end := smartDialBatchBoundsForLink(5, 2, true, true)
 	if begin != 2 || end != 3 {
@@ -109,5 +121,13 @@ func TestSwitchMarginCommonModeNeverMakesWinnerLessStable(t *testing.T) {
 		if common < normal {
 			t.Fatalf("condition=%s common=%v normal=%v", assessment.Condition, common, normal)
 		}
+	}
+}
+
+
+func TestSmartDialBatchBoundsHealthyLinkAlsoHedges(t *testing.T) {
+	begin, end := smartDialBatchBoundsForLink(6, 0, false, false)
+	if begin != 0 || end != 2 {
+		t.Fatalf("healthy first batch=(%d,%d), want hedged (0,2)", begin, end)
 	}
 }

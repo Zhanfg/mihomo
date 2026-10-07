@@ -9,3 +9,5 @@ import "time"
 // Explicit config always wins through EffectiveKeepAlive*.
 func platformKeepAliveIdle() time.Duration     { return 60 * time.Second }
 func platformKeepAliveInterval() time.Duration { return 20 * time.Second }
+
+func platformKeepAliveCount() int { return 3 }

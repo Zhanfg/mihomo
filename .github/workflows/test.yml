@@ -7,11 +7,16 @@ on:
       - ".github/ISSUE_TEMPLATE/**"
     branches:
       - Alpha
+      - 'sync/**'
     tags:
       - "v*"
   pull_request:
     branches:
       - Alpha
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
