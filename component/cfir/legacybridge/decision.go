@@ -235,3 +235,49 @@ func IntentForLegacyDecision(metadata *C.Metadata, generation cfir.Generation, a
 	}
 	return intent, nil
 }
+
+
+type proxySetProvider interface {
+	GetProxies(touch bool) []C.Proxy
+}
+
+func ProjectProxyCandidateSet(proxy C.ProxyAdapter, metadata *C.Metadata) ([]LegacyDecision, error) {
+	if proxy == nil {
+		return nil, errors.New("cfir legacy decision: nil candidate source")
+	}
+	if metadata == nil {
+		return nil, errors.New("cfir legacy decision: nil candidate metadata")
+	}
+
+	children := []C.Proxy(nil)
+	if source, ok := proxy.(proxySetProvider); ok {
+		children = source.GetProxies(false)
+	}
+
+	if len(children) == 0 {
+		decision, err := ProjectProxyDecision(proxy, metadata)
+		if err != nil {
+			return nil, err
+		}
+		return []LegacyDecision{decision}, nil
+	}
+
+	result := make([]LegacyDecision, 0, len(children))
+	seen := make(map[string]struct{}, len(children))
+	for _, child := range children {
+		if child == nil {
+			continue
+		}
+		decision, err := ProjectProxyDecision(child, metadata)
+		if err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf("%d\x00%s\x00%s", decision.Action, decision.Protocol, decision.LeafName)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, decision)
+	}
+	return result, nil
+}
