@@ -42,6 +42,7 @@ func (r *Registry) CandidateProtocols(intent ExecutionIntent) ([]ProtocolDescrip
 type ProtocolCandidate struct {
 	Protocol     ProtocolID
 	Instance     string
+	Primitives   PrimitiveMask
 	Capabilities CapabilitySet
 	Security     SecurityContext
 }
@@ -62,6 +63,21 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 	}
 	if !intent.AcceptsProtocol(descriptor) {
 		return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol family %s cannot satisfy structural intent", candidate.Protocol)
+	}
+	if candidate.Primitives == 0 {
+		return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol instance %s/%s declares no primitives", candidate.Protocol, candidate.Instance)
+	}
+	if descriptor.Primitives&candidate.Primitives != candidate.Primitives {
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s claims primitives outside family declaration",
+			candidate.Protocol, candidate.Instance,
+		)
+	}
+	if !candidate.Primitives.Supports(intent.Primitive) {
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s does not support %s",
+			candidate.Protocol, candidate.Instance, intent.Primitive,
+		)
 	}
 	if !descriptor.Capabilities.ContainsAll(candidate.Capabilities) {
 		return ProtocolDescriptor{}, fmt.Errorf(
@@ -103,6 +119,12 @@ func (p ProtocolProjection) Validate() error {
 			"cfir: protocol projection instance %s does not match family %s",
 			p.Instance.Protocol, p.Family.ID,
 		)
+	}
+	if p.Instance.Primitives == 0 {
+		return fmt.Errorf("cfir: protocol instance %s declares no primitives", p.Instance.Instance)
+	}
+	if p.Family.Primitives&p.Instance.Primitives != p.Instance.Primitives {
+		return fmt.Errorf("cfir: protocol instance %s claims primitives outside family declaration", p.Instance.Instance)
 	}
 	if !p.Family.Capabilities.ContainsAll(p.Instance.Capabilities) {
 		return fmt.Errorf("cfir: protocol instance %s claims capabilities outside family declaration", p.Instance.Instance)
