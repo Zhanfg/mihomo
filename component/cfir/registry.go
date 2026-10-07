@@ -177,6 +177,9 @@ func (r *Registry) RegisterProtocol(adapter ProtocolAdapter) error {
 	if _, exists := r.protocols[descriptor.ID]; exists {
 		return fmt.Errorf("cfir: duplicate protocol %s", descriptor.ID)
 	}
+	if err := r.validateProtocolCompositionLocked(descriptor, nil); err != nil {
+		return err
+	}
 	r.protocols[descriptor.ID] = adapter
 	return nil
 }
@@ -298,17 +301,7 @@ func (r *Registry) ResolveComposition(descriptor ProtocolDescriptor) error {
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	for _, ref := range descriptor.Composition {
-		layer, ok := r.layers[ref.ID]
-		if !ok {
-			return fmt.Errorf("cfir: protocol %s references missing layer %s", descriptor.ID, ref.ID)
-		}
-		actual := layer.Descriptor()
-		if actual.Kind != ref.Kind {
-			return fmt.Errorf("cfir: protocol %s layer %s kind mismatch: declared=%d actual=%d", descriptor.ID, ref.ID, ref.Kind, actual.Kind)
-		}
-	}
-	return nil
+	return r.validateProtocolCompositionLocked(descriptor, nil)
 }
 
 
@@ -341,4 +334,36 @@ func (r *Registry) EffectiveProtocolDescriptor(id ProtocolID) (ProtocolDescripto
 	r.mu.RUnlock()
 	descriptor.Capabilities = capabilities
 	return descriptor, nil
+}
+
+
+// RegisterModule is the strict Protocol SDK entrypoint for new integrations.
+// RegisterProtocol remains available only as a migration bridge for legacy
+// adapters that predate CFIR conformance declarations.
+func (r *Registry) RegisterModule(module ProtocolModule) error {
+	if module == nil {
+		return errors.New("cfir: nil protocol module")
+	}
+	descriptor := module.Descriptor()
+	if err := module.Conformance().ValidateFor(descriptor); err != nil {
+		return err
+	}
+	return r.RegisterProtocol(module)
+}
+
+func (r *Registry) validateProtocolCompositionLocked(descriptor ProtocolDescriptor, pending map[LayerID]ProtocolLayer) error {
+	for _, ref := range descriptor.Composition {
+		layer, ok := r.layers[ref.ID]
+		if !ok && pending != nil {
+			layer, ok = pending[ref.ID]
+		}
+		if !ok {
+			return fmt.Errorf("cfir: protocol %s references missing layer %s", descriptor.ID, ref.ID)
+		}
+		actual := layer.Descriptor()
+		if actual.Kind != ref.Kind {
+			return fmt.Errorf("cfir: protocol %s layer %s kind mismatch: declared=%d actual=%d", descriptor.ID, ref.ID, ref.Kind, actual.Kind)
+		}
+	}
+	return nil
 }
