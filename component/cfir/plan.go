@@ -148,6 +148,9 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
 			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
 		}
+		if !descriptor.Capabilities.ContainsAll(p.Capabilities) {
+			return fmt.Errorf("cfir: protocol instance %s/%s claims capabilities outside family declaration", p.Protocol, p.Instance)
+		}
 		if !p.Requirements.SatisfiedBy(p.Capabilities) {
 			missing := p.Requirements.MissingFrom(p.Capabilities)
 			return fmt.Errorf(
