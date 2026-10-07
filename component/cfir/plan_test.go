@@ -33,8 +33,9 @@ func TestExecutionPlanSelectsByCapabilityNotProtocolSpecialCase(t *testing.T) {
 	plan := ExecutionPlan{
 		Action:       RouteActionForward,
 		Protocol:     "future-quic",
-		Instance:     "node-a",
-		Capabilities: caps,
+		Instance:            "node-a",
+		InstancePrimitives:  PrimitiveSet(PrimitiveStream, PrimitiveDatagram, PrimitiveSession),
+		Capabilities:        caps,
 		Security:     SecurityContext{Profile: security, AttestedByCore: true},
 		Primitive:    PrimitiveSession,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
@@ -107,8 +108,9 @@ func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
 	valid := ExecutionPlan{
 		Action:       RouteActionForward,
 		Protocol:     "stream-only",
-		Instance:     "node-a",
-		Capabilities: NewCapabilitySet(CapabilityHalfClose),
+		Instance:            "node-a",
+		InstancePrimitives:  PrimitiveSet(PrimitiveStream),
+		Capabilities:        NewCapabilitySet(CapabilityHalfClose),
 		Backend:             "linux-fast",
 		BackendInstance:     "kernel-current",
 		BackendCapabilities: NewCapabilitySet(CapabilityZeroCopy),
@@ -195,6 +197,7 @@ func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
 	if _, err := registry.ValidateProtocolCandidate(intent, ProtocolCandidate{
 		Protocol: "weak-quic",
 		Instance: "plain-node",
+		Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
 		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
 		Security: SecurityContext{},
 	}); err == nil {
@@ -204,6 +207,7 @@ func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
 	if _, err := registry.ValidateProtocolCandidate(intent, ProtocolCandidate{
 		Protocol: "fast-quic",
 		Instance: "secure-node",
+		Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
 		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
 		Security: SecurityContext{Profile: strong, AttestedByCore: true},
 	}); err != nil {
@@ -244,6 +248,7 @@ func TestProtocolProjectionCannotSelfApproveImpossibleClaims(t *testing.T) {
 		Instance: ProtocolCandidate{
 			Protocol: "future",
 			Instance: "node",
+			Primitives: PrimitiveSet(PrimitiveStream),
 			Capabilities: NewCapabilitySet(CapabilityHalfClose, CapabilityPathMigration),
 			Security: SecurityContext{
 				Profile: family.Security,
