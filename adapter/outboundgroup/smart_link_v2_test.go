@@ -123,3 +123,11 @@ func TestSwitchMarginCommonModeNeverMakesWinnerLessStable(t *testing.T) {
 		}
 	}
 }
+
+
+func TestSmartDialBatchBoundsHealthyLinkAlsoHedges(t *testing.T) {
+	begin, end := smartDialBatchBoundsForLink(6, 0, false, false)
+	if begin != 0 || end != 2 {
+		t.Fatalf("healthy first batch=(%d,%d), want hedged (0,2)", begin, end)
+	}
+}
