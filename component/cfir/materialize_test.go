@@ -31,6 +31,7 @@ func TestMaterializeExecutionPlanSealsRankedInstanceEvidence(t *testing.T) {
 			Protocol: ProtocolCandidate{
 				Protocol: "future",
 				Instance: "node-a",
+				Primitives: PrimitiveSet(PrimitiveStream),
 				Capabilities: caps,
 				Security: SecurityContext{Profile: security, AttestedByCore: true},
 			},
