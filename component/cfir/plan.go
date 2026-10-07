@@ -111,6 +111,8 @@ type ExecutionPlan struct {
 	Capabilities        CapabilitySet
 	Security            SecurityContext
 	Backend             string
+	BackendInstance     string
+	BackendCapabilities CapabilitySet
 	Platform            Platform
 	Primitive           Primitive
 	Requirements        CapabilityRequirement
@@ -174,9 +176,12 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		if p.Platform != PlatformInvalid && !backendDescriptor.Platforms.Supports(p.Platform) {
 			return fmt.Errorf("cfir: backend %s does not support platform %d", p.Backend, p.Platform)
 		}
-		if !p.BackendRequirements.SatisfiedBy(backendDescriptor.Capabilities) {
-			missing := p.BackendRequirements.MissingFrom(backendDescriptor.Capabilities)
-			return fmt.Errorf("cfir: backend %s misses capabilities: standard=%v extensions=%v", p.Backend, missing.Standard, missing.Extensions)
+		if !p.BackendRequirements.SatisfiedBy(p.BackendCapabilities) {
+			missing := p.BackendRequirements.MissingFrom(p.BackendCapabilities)
+			return fmt.Errorf(
+				"cfir: backend instance %s/%s misses capabilities: standard=%v extensions=%v",
+				p.Backend, p.BackendInstance, missing.Standard, missing.Extensions,
+			)
 		}
 	} else if len(p.BackendRequirements.Standard) > 0 || len(p.BackendRequirements.Extensions) > 0 {
 		return errors.New("cfir: backend capabilities requested without selecting a backend")
