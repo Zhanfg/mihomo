@@ -31,6 +31,7 @@ func TestExecutionPlanSelectsByCapabilityNotProtocolSpecialCase(t *testing.T) {
 	}
 
 	plan := ExecutionPlan{
+		Action:   RouteActionForward,
 		Protocol:  "future-quic",
 		Primitive: PrimitiveSession,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
@@ -101,6 +102,7 @@ func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
 	}
 
 	valid := ExecutionPlan{
+		Action:   RouteActionForward,
 		Protocol:  "stream-only",
 		Backend:   "linux-fast",
 		Platform:  PlatformLinux,
@@ -126,5 +128,75 @@ func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
 	wrongPlatform.Platform = PlatformWindows
 	if err := wrongPlatform.Validate(registry); err == nil {
 		t.Fatal("platform-incompatible backend must be rejected")
+	}
+}
+
+
+func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
+	registry := NewRegistry()
+	strong := SecurityProfile{
+		Authentication: AuthenticationServer,
+		Confidentiality: ConfidentialityTransport,
+		Integrity: IntegrityAuthenticated,
+		ForwardSecrecy: true,
+	}
+	for _, descriptor := range []ProtocolDescriptor{
+		{
+			ID: "fast-quic", MinCFIR: CurrentVersion,
+			Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
+			Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
+			Security: strong,
+		},
+		{
+			ID: "tcp-only", MinCFIR: CurrentVersion,
+			Primitives: PrimitiveSet(PrimitiveStream),
+			Capabilities: NewCapabilitySet(CapabilityMultiplex),
+			Security: strong,
+		},
+		{
+			ID: "weak-quic", MinCFIR: CurrentVersion,
+			Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
+			Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
+			Security: SecurityProfile{},
+		},
+	} {
+		if err := registry.RegisterProtocol(testProtocol{descriptor: descriptor}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	intent := ExecutionIntent{
+		Action: RouteActionForward,
+		Primitive: PrimitiveDatagram,
+		Requirements: CapabilityRequirement{Standard: []StandardCapability{
+			CapabilityPathMigration,
+		}},
+		SecurityFloor: SecurityProfile{
+			Authentication: AuthenticationServer,
+			Confidentiality: ConfidentialityTransport,
+			Integrity: IntegrityAuthenticated,
+		},
+	}
+	got, err := registry.CandidateProtocols(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != "fast-quic" {
+		t.Fatalf("candidates=%#v want only fast-quic", got)
+	}
+}
+
+func TestNonForwardPlanDoesNotRequireProtocol(t *testing.T) {
+	registry := NewRegistry()
+	plan := ExecutionPlan{
+		Action: RouteActionDirect,
+		Primitive: PrimitiveStream,
+	}
+	if err := plan.Validate(registry); err != nil {
+		t.Fatal(err)
+	}
+	plan.Protocol = "vless"
+	if err := plan.Validate(registry); err == nil {
+		t.Fatal("direct plan must not carry a wire protocol")
 	}
 }
