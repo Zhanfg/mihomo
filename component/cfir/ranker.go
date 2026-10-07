@@ -148,3 +148,17 @@ func RankPreparedCandidates(ctx context.Context, intent ExecutionIntent, ranker 
 	})
 	return scored, nil
 }
+
+
+// RankCandidates is the preferred planning entrypoint. It makes legality
+// filtering non-optional: the ranker never receives rejected candidates.
+func (r *Registry) RankCandidates(ctx context.Context, intent ExecutionIntent, ranker Ranker, candidates []PlanCandidate) ([]ScoredCandidate, error) {
+	prepared, err := r.PreparePlanCandidates(intent, candidates)
+	if err != nil {
+		return nil, err
+	}
+	if len(prepared) == 0 {
+		return nil, nil
+	}
+	return RankPreparedCandidates(ctx, intent, ranker, prepared)
+}
