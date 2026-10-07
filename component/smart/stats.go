@@ -884,10 +884,6 @@ func (s *Store) rankTargetStatsWithExploration(group, config, target string, sta
 				if !routeEvidenceCurrent(routeEpoch) {
 					continue
 				}
-				routeEpoch := uint64(record.Weights[RouteEpochWeightType(isUDP)])
-				if !routeEvidenceCurrent(routeEpoch) {
-					continue
-				}
 				weight = record.Weights[weightType]
 				uncertainty = record.banditUncertainty(isUDP)
 				lastUsed = record.LastUsed
@@ -895,6 +891,10 @@ func (s *Store) rankTargetStatsWithExploration(group, config, target string, sta
 		} else {
 			var record StatsRecord
 			if json.Unmarshal(data, &record) != nil || record.Weights == nil {
+				continue
+			}
+			routeEpoch := uint64(record.Weights[RouteEpochWeightType(isUDP)])
+			if !routeEvidenceCurrent(routeEpoch) {
 				continue
 			}
 			weight = record.Weights[weightType]
