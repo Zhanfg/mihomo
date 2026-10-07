@@ -134,3 +134,54 @@ func TestUnknownFutureProtocolSelfDescribesWithoutCoreSwitch(t *testing.T) {
 		t.Fatalf("future protocol did not self-describe: %#v", result.Legacy)
 	}
 }
+
+
+type fakeGroup struct {
+	*fakeProxy
+	children []C.Proxy
+}
+
+func (g *fakeGroup) GetProxies(bool) []C.Proxy {
+	return append([]C.Proxy(nil), g.children...)
+}
+
+func TestDecisionShadowFiltersGroupCandidatesBeforeAcceptingWinner(t *testing.T) {
+	good := &fakeProxy{name: "hy2-good", kind: C.Hysteria2, udp: true}
+	tcpOnly := &fakeProxy{name: "vless-tcp-only", kind: C.Vless, udp: false}
+	group := &fakeGroup{
+		fakeProxy: &fakeProxy{name: "smart", kind: C.Smart, next: good},
+		children: []C.Proxy{tcpOnly, good},
+	}
+
+	result, err := ObserveDecision(decisionMetadata(C.UDP), group, cfir.Generation{Network: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Equal() {
+		t.Fatalf("unexpected mismatch=0x%x", uint64(result.Mismatch))
+	}
+	if result.EligibleCount != 1 || !result.SelectedEligible {
+		t.Fatalf("eligible=%d selected=%v", result.EligibleCount, result.SelectedEligible)
+	}
+}
+
+func TestDecisionShadowDetectsWinnerOutsideEligibleCandidateSet(t *testing.T) {
+	selected := &fakeProxy{name: "tcp-selected", kind: C.Vless, udp: false}
+	good := &fakeProxy{name: "hy2-good", kind: C.Hysteria2, udp: true}
+	group := &fakeGroup{
+		fakeProxy: &fakeProxy{name: "smart", kind: C.Smart, next: selected},
+		children: []C.Proxy{selected, good},
+	}
+
+	result, err := ObserveDecision(decisionMetadata(C.UDP), group, cfir.Generation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Mismatch&DecisionMismatchPrimitive == 0 ||
+		result.Mismatch&DecisionMismatchSelectedOutsideEligibleSet == 0 {
+		t.Fatalf("expected primitive + eligibility mismatch, got 0x%x", uint64(result.Mismatch))
+	}
+	if result.EligibleCount != 1 || result.SelectedEligible {
+		t.Fatalf("eligible=%d selected=%v", result.EligibleCount, result.SelectedEligible)
+	}
+}
