@@ -22,7 +22,7 @@ const (
 	DefaultTCPTimeout = 5 * time.Second
 	DefaultUDPTimeout = DefaultTCPTimeout
 
-	dualStackFallbackTimeout = 300 * time.Millisecond
+	dualStackFallbackTimeout = 150 * time.Millisecond
 )
 
 var (
@@ -159,6 +159,9 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 	dialer := netDialer.(*net.Dialer)
 	keepalive.SetNetDialer(dialer)
 	mptcp.SetNetDialer(dialer, opt.mpTcp)
+	// Install the transport liveness policy before vendor socket hooks and
+	// bind/mark controls so every outbound TCP socket receives it.
+	addControlToDialer(dialer, defaultTransportControl)
 
 	if DefaultSocketHook != nil { // ignore interfaceName, routingMark and tfo when DefaultSocketHook not null (in CMFA)
 		socketHookToToDialer(dialer)
@@ -171,9 +174,6 @@ func dialContext(ctx context.Context, network string, destination netip.Addr, po
 				opt.interfaceName = finder.FindInterfaceName(destination)
 			}
 		}
-		// Always install the control chain so the socket-protect hook runs on
-		// every socket, even when no bind/routing-mark/tfo is configured.
-		addControlToDialer(dialer, func(context.Context, string, string, syscall.RawConn) error { return nil })
 		if opt.interfaceName != "" {
 			bind := bindIfaceToDialer
 			if opt.fallbackBind {
