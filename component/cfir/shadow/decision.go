@@ -29,6 +29,19 @@ type DecisionResult struct {
 
 func (r DecisionResult) Equal() bool { return r.Mismatch == DecisionMismatchNone }
 
+func decisionEligible(intent cfir.ExecutionIntent, candidate legacybridge.LegacyDecision) bool {
+	if candidate.Action != cfir.RouteActionForward || !candidate.Resolved {
+		return false
+	}
+	if !intent.AcceptsProtocol(candidate.Family) {
+		return false
+	}
+	if !intent.Requirements.SatisfiedBy(candidate.Instance.Capabilities) {
+		return false
+	}
+	return candidate.Instance.Security.Meets(intent.SecurityFloor)
+}
+
 func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir.Generation) (DecisionResult, error) {
 	legacy, err := legacybridge.ProjectProxyDecision(proxy, metadata)
 	if err != nil {
@@ -65,16 +78,7 @@ func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir
 		return result, err
 	}
 	for _, candidate := range candidates {
-		if candidate.Action != cfir.RouteActionForward || !candidate.Resolved {
-			continue
-		}
-		if !intent.AcceptsProtocol(candidate.Family) {
-			continue
-		}
-		if !intent.Requirements.SatisfiedBy(candidate.Instance.Capabilities) {
-			continue
-		}
-		if !candidate.Instance.Security.Meets(intent.SecurityFloor) {
+		if !decisionEligible(intent, candidate) {
 			continue
 		}
 		result.EligibleCount++
