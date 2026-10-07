@@ -18,12 +18,16 @@ func TestNetworkSettleDelayPolicy(t *testing.T) {
 func TestSettleWindowCoalescesFlappingChanges(t *testing.T) {
 	r := &recorder{}
 	n := newTestNotifier(r, nil)
-	n.settleDelay = 20 * time.Millisecond
+
+	// Do not make correctness depend on sub-20ms scheduler precision. Windows
+	// ARM hosted runners can oversleep a 5ms wall-clock delay by more than the
+	// old 20ms settle window under matrix load, turning three legitimately
+	// separated events into a test-only failure. Back-to-back notifications
+	// exercise the same supersede/debounce contract deterministically.
+	n.settleDelay = 100 * time.Millisecond
 
 	first := n.notify()
-	time.Sleep(5 * time.Millisecond)
 	second := n.notify()
-	time.Sleep(5 * time.Millisecond)
 	third := n.notify()
 
 	waitDone(t, first)
