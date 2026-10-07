@@ -1,6 +1,9 @@
 package cfir
 
-import "slices"
+import (
+	"fmt"
+	"slices"
+)
 
 // CandidateBackends filters platform implementations before any performance
 // ranking. An optimization layer must never select a backend that cannot exist
@@ -37,4 +40,36 @@ func (r *Registry) CandidateBackends(intent ExecutionIntent, kind BackendKind) (
 		result = append(result, descriptor)
 	}
 	return result, nil
+}
+
+
+type BackendCandidate struct {
+	Backend      string
+	Instance     string
+	Capabilities CapabilitySet
+}
+
+func (r *Registry) ValidateBackendCandidate(intent ExecutionIntent, candidate BackendCandidate) (BackendDescriptor, error) {
+	if err := intent.Validate(); err != nil {
+		return BackendDescriptor{}, err
+	}
+	backend, ok := r.Backend(candidate.Backend)
+	if !ok {
+		return BackendDescriptor{}, fmt.Errorf("cfir: unknown backend %s", candidate.Backend)
+	}
+	descriptor := backend.Descriptor()
+	if intent.Platform != PlatformInvalid && !descriptor.Platforms.Supports(intent.Platform) {
+		return BackendDescriptor{}, fmt.Errorf(
+			"cfir: backend %s does not support platform %d",
+			candidate.Backend, intent.Platform,
+		)
+	}
+	if !intent.BackendRequirements.SatisfiedBy(candidate.Capabilities) {
+		missing := intent.BackendRequirements.MissingFrom(candidate.Capabilities)
+		return BackendDescriptor{}, fmt.Errorf(
+			"cfir: backend instance %s/%s misses capabilities: standard=%v extensions=%v",
+			candidate.Backend, candidate.Instance, missing.Standard, missing.Extensions,
+		)
+	}
+	return descriptor, nil
 }
