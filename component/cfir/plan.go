@@ -139,6 +139,9 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		if p.Protocol == "" {
 			return errors.New("cfir: forward execution plan must name a wire protocol")
 		}
+		if p.Instance == "" {
+			return errors.New("cfir: forward execution plan must name a protocol instance")
+		}
 		descriptor, err := registry.EffectiveProtocolDescriptor(p.Protocol)
 		if err != nil {
 			return err
@@ -173,8 +176,17 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 			return fmt.Errorf("cfir: execution plan references unknown backend %s", p.Backend)
 		}
 		backendDescriptor := backend.Descriptor()
+		if p.BackendInstance == "" {
+			return fmt.Errorf("cfir: backend %s has no concrete instance identity", p.Backend)
+		}
 		if p.Platform != PlatformInvalid && !backendDescriptor.Platforms.Supports(p.Platform) {
 			return fmt.Errorf("cfir: backend %s does not support platform %d", p.Backend, p.Platform)
+		}
+		if !backendDescriptor.Capabilities.ContainsAll(p.BackendCapabilities) {
+			return fmt.Errorf(
+				"cfir: backend instance %s/%s claims capabilities outside family declaration",
+				p.Backend, p.BackendInstance,
+			)
 		}
 		if !p.BackendRequirements.SatisfiedBy(p.BackendCapabilities) {
 			missing := p.BackendRequirements.MissingFrom(p.BackendCapabilities)
