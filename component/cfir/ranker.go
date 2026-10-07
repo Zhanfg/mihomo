@@ -10,12 +10,13 @@ import (
 
 type PlanCandidate struct {
 	Protocol  ProtocolCandidate
-	Backend   string
+	Backend   BackendCandidate
 	Transport TransportPolicy
 }
 
 func (c PlanCandidate) Key() string {
-	return string(c.Protocol.Protocol) + "\x00" + c.Protocol.Instance + "\x00" + c.Backend
+	return string(c.Protocol.Protocol) + "\x00" + c.Protocol.Instance + "\x00" +
+		c.Backend.Backend + "\x00" + c.Backend.Instance
 }
 
 type CandidateScore struct {
@@ -63,16 +64,8 @@ func (r *Registry) PreparePlanCandidates(intent ExecutionIntent, candidates []Pl
 		if _, err := r.ValidateProtocolCandidate(intent, candidate.Protocol); err != nil {
 			continue
 		}
-		if candidate.Backend != "" {
-			backend, ok := r.Backend(candidate.Backend)
-			if !ok {
-				continue
-			}
-			descriptor := backend.Descriptor()
-			if intent.Platform != PlatformInvalid && !descriptor.Platforms.Supports(intent.Platform) {
-				continue
-			}
-			if !intent.BackendRequirements.SatisfiedBy(descriptor.Capabilities) {
+		if candidate.Backend.Backend != "" {
+			if _, err := r.ValidateBackendCandidate(intent, candidate.Backend); err != nil {
 				continue
 			}
 		} else if len(intent.BackendRequirements.Standard) > 0 || len(intent.BackendRequirements.Extensions) > 0 {
