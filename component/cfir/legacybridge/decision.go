@@ -16,7 +16,8 @@ type LegacyDecision struct {
 	LeafName      string
 	LeafType      C.AdapterType
 	Protocol      cfir.ProtocolID
-	Candidate     cfir.ProtocolDescriptor
+	Family        cfir.ProtocolDescriptor
+	Instance      cfir.ProtocolCandidate
 	Resolved      bool
 	Depth         uint8
 }
@@ -180,6 +181,21 @@ func ProjectProxyDecision(proxy C.ProxyAdapter, metadata *C.Metadata) (LegacyDec
 		return decision, nil
 	}
 
+	if provider, ok := current.(cfir.ProtocolProjectionProvider); ok {
+		projection := provider.CFIRProtocolProjection()
+		if err := projection.Validate(); err != nil {
+			return LegacyDecision{}, fmt.Errorf("cfir legacy decision: self-described protocol %s: %w", current.Name(), err)
+		}
+		if projection.Instance.Instance == "" {
+			projection.Instance.Instance = current.Name()
+		}
+		decision.Protocol = projection.Family.ID
+		decision.Family = projection.Family
+		decision.Instance = projection.Instance
+		decision.Resolved = true
+		return decision, nil
+	}
+
 	descriptor, ok := DescriptorForLegacyLeaf(
 		current.Type(),
 		current.SupportUDP(),
@@ -188,12 +204,18 @@ func ProjectProxyDecision(proxy C.ProxyAdapter, metadata *C.Metadata) (LegacyDec
 		current.ProxyInfo(),
 	)
 	if !ok {
-		// A future or control adapter is representable as an unresolved forward
-		// target without teaching CFIR a protocol-name branch.
+		// A future adapter can become fully representable by implementing
+		// ProtocolProjectionProvider; no central protocol switch is required.
 		return decision, nil
 	}
 	decision.Protocol = descriptor.ID
-	decision.Candidate = descriptor
+	decision.Family = descriptor
+	decision.Instance = cfir.ProtocolCandidate{
+		Protocol: descriptor.ID,
+		Instance: current.Name(),
+		Capabilities: descriptor.Capabilities,
+		Security: cfir.SecurityContext{},
+	}
 	decision.Resolved = true
 	return decision, nil
 }
