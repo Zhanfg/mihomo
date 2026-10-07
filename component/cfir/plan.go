@@ -110,6 +110,7 @@ type ExecutionPlan struct {
 	Instance            string
 	InstancePrimitives  PrimitiveMask
 	Capabilities        CapabilitySet
+	SecurityOffer       SecurityProfile
 	Security            SecurityContext
 	Backend             string
 	BackendInstance     string
@@ -173,8 +174,11 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 				p.Protocol, p.Instance, missing.Standard, missing.Extensions,
 			)
 		}
-		if !p.Security.Meets(p.SecurityFloor) {
-			return fmt.Errorf("cfir: protocol instance %s/%s violates or cannot attest execution-plan security floor", p.Protocol, p.Instance)
+		if descriptor.Security != (SecurityProfile{}) && !p.SecurityOffer.Meets(descriptor.Security) {
+			return fmt.Errorf("cfir: protocol instance %s/%s security offer is below family minimum", p.Protocol, p.Instance)
+		}
+		if err := validateSecurityOfferAndEvidence(p.SecurityOffer, p.SecurityFloor, p.Security); err != nil {
+			return fmt.Errorf("cfir: protocol instance %s/%s security validation failed: %w", p.Protocol, p.Instance, err)
 		}
 	} else if p.Protocol != "" {
 		return errors.New("cfir: non-forward execution plan must not name a wire protocol")
@@ -209,4 +213,22 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		return errors.New("cfir: backend capabilities requested without selecting a backend")
 	}
 	return nil
+}
+
+
+// WithSecurityAttestation seals post-handshake security evidence into an
+// already selected plan. Application payload must not treat a non-empty
+// SecurityFloor as satisfied until this succeeds.
+func (p ExecutionPlan) WithSecurityAttestation(evidence SecurityContext) (ExecutionPlan, error) {
+	if p.Action != RouteActionForward {
+		return ExecutionPlan{}, errors.New("cfir: security attestation applies only to forward plans")
+	}
+	if !evidence.AttestedByCore {
+		return ExecutionPlan{}, errors.New("cfir: runtime security evidence is not core-attested")
+	}
+	if err := validateSecurityOfferAndEvidence(p.SecurityOffer, p.SecurityFloor, evidence); err != nil {
+		return ExecutionPlan{}, err
+	}
+	p.Security = evidence
+	return p, nil
 }
