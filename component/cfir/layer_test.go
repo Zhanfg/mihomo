@@ -41,3 +41,48 @@ func TestCompositionAllowsProtocolReuseWithoutCoreChanges(t *testing.T) {
 		t.Fatal("unregistered layer must fail composition resolution")
 	}
 }
+
+
+func TestEffectiveDescriptorInheritsLayerCapabilities(t *testing.T) {
+	registry := NewRegistry()
+	quic := testLayer{descriptor: LayerDescriptor{
+		ID:      "quic",
+		Kind:    LayerTransport,
+		MinCFIR: CurrentVersion,
+		Capabilities: NewCapabilitySet(
+			CapabilityPathMigration,
+			CapabilityPMTUFeedback,
+			CapabilityNativeCongestionTelemetry,
+		),
+	}}
+	if err := registry.RegisterLayer(quic); err != nil {
+		t.Fatal(err)
+	}
+	protocol := testProtocol{descriptor: ProtocolDescriptor{
+		ID:         "future-over-quic",
+		MinCFIR:    CurrentVersion,
+		Primitives: PrimitiveSet(PrimitiveDatagram, PrimitiveSession),
+		Capabilities: NewCapabilitySet(
+			CapabilityReliableDatagram,
+		),
+		Composition: []LayerRef{{ID: "quic", Kind: LayerTransport}},
+	}}
+	if err := registry.RegisterProtocol(protocol); err != nil {
+		t.Fatal(err)
+	}
+
+	effective, err := registry.EffectiveProtocolDescriptor("future-over-quic")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range []StandardCapability{
+		CapabilityReliableDatagram,
+		CapabilityPathMigration,
+		CapabilityPMTUFeedback,
+		CapabilityNativeCongestionTelemetry,
+	} {
+		if !effective.Capabilities.HasStandard(capability) {
+			t.Fatalf("effective descriptor lost capability %d", capability)
+		}
+	}
+}
