@@ -572,29 +572,33 @@ func (s *Smart) GetConfigFilename() string {
 // weak networks still obtain a fallback before a full timeout.
 func (s *Smart) smartHedgeDelay(metadata *C.Metadata, proxies []C.Proxy) time.Duration {
 	const (
-		defaultDelay = 250 * time.Millisecond
-		minDelay     = 120 * time.Millisecond
-		maxDelay     = 450 * time.Millisecond
+		defaultDelay = 160 * time.Millisecond
+		minDelay     = 80 * time.Millisecond
+		maxDelay     = 300 * time.Millisecond
 	)
+	clamp := func(delay time.Duration) time.Duration {
+		if delay < minDelay {
+			return minDelay
+		}
+		if delay > maxDelay {
+			return maxDelay
+		}
+		return delay
+	}
 	if len(proxies) == 0 {
 		return defaultDelay
 	}
 	assessment := adapter.TunnelPathAssessmentForProxy(proxies[0])
 	if assessment.Condition != linkprofile.ConditionUnknown && assessment.HedgeDelay > 0 {
-		return assessment.HedgeDelay
+		return clamp(assessment.HedgeDelay)
 	}
 	history := s.getHistoryConnectStats(metadata, proxies[0])
 	if history <= 0 {
 		return defaultDelay
 	}
-	delay := time.Duration(history/2) * time.Millisecond
-	if delay < minDelay {
-		return minDelay
-	}
-	if delay > maxDelay {
-		return maxDelay
-	}
-	return delay
+	// Start the backup before a slow first path consumes a full historical RTT
+	// budget. Fast paths finish before this timer and pay no second dial.
+	return clamp(time.Duration(history/3) * time.Millisecond)
 }
 
 // ref: component/dialer/dialer.go:314
@@ -772,15 +776,16 @@ func smartDialBatchBounds(total, iteration int, pinned bool) (begin, end int) {
 	return begin, end
 }
 
-func smartDialBatchBoundsForLink(total, iteration int, pinned, weak bool) (begin, end int) {
-	if !weak || pinned {
-		return smartDialBatchBounds(total, iteration, pinned)
+func smartDialBatchBoundsForLink(total, iteration int, pinned, _ bool) (begin, end int) {
+	if pinned {
+		return smartDialBatchBounds(total, iteration, true)
 	}
 	if total <= 0 {
 		return 0, 0
 	}
-	// On a weak path, race only the best two candidates first. ParallelDialContext
-	// staggers them, so we gain failover latency without a socket/radio stampede.
+	// Every unpinned target gets a two-candidate hedged first attempt. Candidate
+	// two is not opened immediately: ParallelDialContext starts it only when
+	// the hedge timer expires, so sub-hedge healthy paths still use one socket.
 	if iteration == 0 {
 		end = 2
 		if end > total {
