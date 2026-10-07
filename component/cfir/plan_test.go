@@ -109,8 +109,10 @@ func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
 		Protocol:     "stream-only",
 		Instance:     "node-a",
 		Capabilities: NewCapabilitySet(CapabilityHalfClose),
-		Backend:      "linux-fast",
-		Platform:  PlatformLinux,
+		Backend:             "linux-fast",
+		BackendInstance:     "kernel-current",
+		BackendCapabilities: NewCapabilitySet(CapabilityZeroCopy),
+		Platform:            PlatformLinux,
 		Primitive: PrimitiveStream,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
 			CapabilityHalfClose,
