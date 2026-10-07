@@ -184,7 +184,6 @@ func (i *Inbound) currentDefaultInterfaceName() string {
 func (i *Inbound) setDefaultInterfaceName(interfaceName string) {
 	state := &i.interfaceMonitor
 	state.access.Lock()
-	changed := state.defaultInterfaceName != interfaceName
 	state.defaultInterfaceName = interfaceName
 	netstate.SetDefaultInterface(interfaceName)
 	state.backgroundNetwork.SetAvailable(interfaceName != "")
@@ -192,9 +191,10 @@ func (i *Inbound) setDefaultInterfaceName(interfaceName string) {
 	active := state.network != nil && updates != nil
 	state.access.Unlock()
 	if active {
-		if changed {
-			netchange.Notify()
-		}
+		// DefaultInterfaceMonitor can report a meaningful route/NAT change
+		// while keeping the same interface name. Treat every callback as a
+		// network epoch edge, matching the regular sing-tun path.
+		netchange.Notify()
 		notifyTCInterfaceUpdate(updates)
 	}
 }
