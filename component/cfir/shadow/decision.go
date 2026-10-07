@@ -45,14 +45,15 @@ func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir
 		return result, nil
 	}
 
-	descriptor := legacy.Candidate
+	descriptor := legacy.Family
 	if !descriptor.Primitives.Supports(intent.Primitive) {
 		result.Mismatch |= DecisionMismatchPrimitive
 	}
-	if !intent.Requirements.SatisfiedBy(descriptor.Capabilities) {
+	if !intent.Requirements.SatisfiedBy(descriptor.Capabilities) ||
+		!intent.Requirements.SatisfiedBy(legacy.Instance.Capabilities) {
 		result.Mismatch |= DecisionMismatchCapability
 	}
-	if !descriptor.Security.Meets(intent.SecurityFloor) {
+	if !legacy.Instance.Security.Meets(intent.SecurityFloor) {
 		result.Mismatch |= DecisionMismatchSecurity
 	}
 	return result, nil
