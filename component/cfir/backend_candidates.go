@@ -73,3 +73,35 @@ func (r *Registry) ValidateBackendCandidate(intent ExecutionIntent, candidate Ba
 	}
 	return descriptor, nil
 }
+
+
+type BackendProjection struct {
+	Family   BackendDescriptor
+	Instance BackendCandidate
+}
+
+func (p BackendProjection) Validate() error {
+	if err := p.Family.Validate(); err != nil {
+		return err
+	}
+	if p.Instance.Backend == "" {
+		return fmt.Errorf("cfir: backend projection instance has no backend id")
+	}
+	if p.Instance.Backend != p.Family.ID {
+		return fmt.Errorf(
+			"cfir: backend projection instance %s does not match family %s",
+			p.Instance.Backend, p.Family.ID,
+		)
+	}
+	if !p.Family.Capabilities.ContainsAll(p.Instance.Capabilities) {
+		return fmt.Errorf(
+			"cfir: backend instance %s claims capabilities outside family declaration",
+			p.Instance.Instance,
+		)
+	}
+	return nil
+}
+
+type BackendProjectionProvider interface {
+	CFIRBackendProjection() BackendProjection
+}
