@@ -31,9 +31,12 @@ func TestExecutionPlanSelectsByCapabilityNotProtocolSpecialCase(t *testing.T) {
 	}
 
 	plan := ExecutionPlan{
-		Action:   RouteActionForward,
-		Protocol:  "future-quic",
-		Primitive: PrimitiveSession,
+		Action:       RouteActionForward,
+		Protocol:     "future-quic",
+		Instance:     "node-a",
+		Capabilities: caps,
+		Security:     SecurityContext{Profile: security, AttestedByCore: true},
+		Primitive:    PrimitiveSession,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
 			CapabilityMultiplex,
 			CapabilityPathMigration,
@@ -102,9 +105,11 @@ func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
 	}
 
 	valid := ExecutionPlan{
-		Action:   RouteActionForward,
-		Protocol:  "stream-only",
-		Backend:   "linux-fast",
+		Action:       RouteActionForward,
+		Protocol:     "stream-only",
+		Instance:     "node-a",
+		Capabilities: NewCapabilitySet(CapabilityHalfClose),
+		Backend:      "linux-fast",
 		Platform:  PlatformLinux,
 		Primitive: PrimitiveStream,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
@@ -181,8 +186,26 @@ func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].ID != "fast-quic" {
-		t.Fatalf("candidates=%#v want only fast-quic", got)
+	if len(got) != 2 || got[0].ID != "fast-quic" || got[1].ID != "weak-quic" {
+		t.Fatalf("family candidates=%#v want structurally capable QUIC families", got)
+	}
+
+	if _, err := registry.ValidateProtocolCandidate(intent, ProtocolCandidate{
+		Protocol: "weak-quic",
+		Instance: "plain-node",
+		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
+		Security: SecurityContext{},
+	}); err == nil {
+		t.Fatal("unattested weak instance must be rejected by security floor")
+	}
+
+	if _, err := registry.ValidateProtocolCandidate(intent, ProtocolCandidate{
+		Protocol: "fast-quic",
+		Instance: "secure-node",
+		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
+		Security: SecurityContext{Profile: strong, AttestedByCore: true},
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
