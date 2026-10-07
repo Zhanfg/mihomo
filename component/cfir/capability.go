@@ -169,3 +169,21 @@ func (s CapabilitySet) ContainsAll(other CapabilitySet) bool {
 	}
 	return true
 }
+
+
+func (s CapabilitySet) Equal(other CapabilitySet) bool {
+	for i := range s.standard {
+		if s.standard[i] != other.standard[i] {
+			return false
+		}
+	}
+	if len(s.extensions) != len(other.extensions) {
+		return false
+	}
+	for i := range s.extensions {
+		if s.extensions[i] != other.extensions[i] {
+			return false
+		}
+	}
+	return true
+}
