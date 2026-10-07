@@ -92,3 +92,45 @@ func TestDecisionShadowModelsDirectAsRouteActionNotProtocol(t *testing.T) {
 	}
 }
 
+
+
+type selfDescribingProxy struct {
+	*fakeProxy
+	projection cfir.ProtocolProjection
+}
+
+func (p *selfDescribingProxy) CFIRProtocolProjection() cfir.ProtocolProjection {
+	return p.projection
+}
+
+func TestUnknownFutureProtocolSelfDescribesWithoutCoreSwitch(t *testing.T) {
+	family := cfir.ProtocolDescriptor{
+		ID: "foo-next",
+		DisplayName: "FooNext",
+		MinCFIR: cfir.CurrentVersion,
+		Primitives: cfir.PrimitiveSet(cfir.PrimitiveStream, cfir.PrimitiveDatagram),
+		Capabilities: cfir.NewCapabilitySet(cfir.CapabilityPathMigration),
+	}
+	leaf := &selfDescribingProxy{
+		fakeProxy: &fakeProxy{name: "foo-node", kind: C.AdapterType(999), udp: true},
+		projection: cfir.ProtocolProjection{
+			Family: family,
+			Instance: cfir.ProtocolCandidate{
+				Protocol: "foo-next",
+				Instance: "foo-node",
+				Capabilities: cfir.NewCapabilitySet(cfir.CapabilityPathMigration),
+				Security: cfir.SecurityContext{},
+			},
+		},
+	}
+	result, err := ObserveDecision(decisionMetadata(C.UDP), leaf, cfir.Generation{Network: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Equal() {
+		t.Fatalf("future protocol mismatch=0x%x", uint64(result.Mismatch))
+	}
+	if result.Legacy.Protocol != "foo-next" || result.Legacy.Instance.Instance != "foo-node" {
+		t.Fatalf("future protocol did not self-describe: %#v", result.Legacy)
+	}
+}
