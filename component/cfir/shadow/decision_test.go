@@ -2,11 +2,10 @@ package shadow
 
 import (
 	"context"
-	"net"
 	"net/netip"
 	"testing"
 
-	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/utils"
 	"github.com/metacubex/mihomo/component/cfir"
 	C "github.com/metacubex/mihomo/constant"
 )
@@ -39,7 +38,7 @@ func (p *fakeProxy) DelayHistory() []C.DelayHistory { return nil }
 func (p *fakeProxy) DelayHistoryForTestUrl(string) []C.DelayHistory { return nil }
 func (p *fakeProxy) ExtraDelayHistories() map[string]C.ProxyState { return nil }
 func (p *fakeProxy) LastDelayForTestUrl(string) uint16 { return 0 }
-func (p *fakeProxy) URLTest(context.Context, string, N.IntRanges[uint16]) (uint16, error) { return 0, C.ErrNotSupport }
+func (p *fakeProxy) URLTest(context.Context, string, utils.IntRanges[uint16]) (uint16, error) { return 0, C.ErrNotSupport }
 func (p *fakeProxy) StatusTest(context.Context, string) (uint16, bool, error) { return 0, false, C.ErrNotSupport }
 
 var _ C.Proxy = (*fakeProxy)(nil)
@@ -93,6 +92,3 @@ func TestDecisionShadowModelsDirectAsRouteActionNotProtocol(t *testing.T) {
 	}
 }
 
-// Keep net imported here so fake-proxy evolution can validate signatures that
-// depend on net types without changing test package shape.
-var _ net.Addr
