@@ -42,9 +42,10 @@ func (r *Registry) CandidateProtocols(intent ExecutionIntent) ([]ProtocolDescrip
 type ProtocolCandidate struct {
 	Protocol     ProtocolID
 	Instance     string
-	Primitives   PrimitiveMask
-	Capabilities CapabilitySet
-	Security     SecurityContext
+	Primitives    PrimitiveMask
+	Capabilities  CapabilitySet
+	SecurityOffer SecurityProfile
+	Security      SecurityContext
 }
 
 func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate ProtocolCandidate) (ProtocolDescriptor, error) {
@@ -92,10 +93,16 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 			candidate.Protocol, candidate.Instance, missing.Standard, missing.Extensions,
 		)
 	}
-	if !candidate.Security.Meets(intent.SecurityFloor) {
+	if descriptor.Security != (SecurityProfile{}) && !candidate.SecurityOffer.Meets(descriptor.Security) {
 		return ProtocolDescriptor{}, fmt.Errorf(
-			"cfir: protocol instance %s/%s violates or cannot attest security floor",
+			"cfir: protocol instance %s/%s security offer is below family minimum",
 			candidate.Protocol, candidate.Instance,
+		)
+	}
+	if err := validateSecurityOfferAndEvidence(candidate.SecurityOffer, intent.SecurityFloor, candidate.Security); err != nil {
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s security admission failed: %w",
+			candidate.Protocol, candidate.Instance, err,
 		)
 	}
 	return descriptor, nil
@@ -132,11 +139,17 @@ func (p ProtocolProjection) Validate() error {
 	if !p.Family.Capabilities.ContainsAll(p.Instance.Capabilities) {
 		return fmt.Errorf("cfir: protocol instance %s claims capabilities outside family declaration", p.Instance.Instance)
 	}
-	if err := p.Instance.Security.Profile.Validate(); err != nil {
+	if err := p.Instance.SecurityOffer.Validate(); err != nil {
 		return err
 	}
-	if p.Family.Security != (SecurityProfile{}) && !p.Instance.Security.Meets(p.Family.Security) {
-		return fmt.Errorf("cfir: protocol instance %s does not attest family minimum security", p.Instance.Instance)
+	if p.Family.Security != (SecurityProfile{}) && !p.Instance.SecurityOffer.Meets(p.Family.Security) {
+		return fmt.Errorf("cfir: protocol instance %s security offer is below family minimum", p.Instance.Instance)
+	}
+	if err := p.Instance.Security.Validate(); err != nil {
+		return err
+	}
+	if p.Instance.Security.AttestedByCore && !p.Instance.Security.Profile.Meets(p.Instance.SecurityOffer) {
+		return fmt.Errorf("cfir: protocol instance %s attested security is weaker than its offer", p.Instance.Instance)
 	}
 	return nil
 }
