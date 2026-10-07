@@ -16,6 +16,7 @@ import (
 	"github.com/metacubex/mihomo/adapter/inbound"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/netchange"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/power"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
@@ -368,12 +369,15 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		l.backgroundNetwork = backgroundNetwork
 		defaultInterfaceMonitor.RegisterCallback(func(defaultInterface *control.Interface, event int) {
 			backgroundNetwork.SetAvailable(defaultInterface != nil)
+			interfaceName := ""
 			if defaultInterface != nil {
-				log.Warnln("[TUN] default interface changed by monitor, => %s", defaultInterface.Name)
+				interfaceName = defaultInterface.Name
+				log.Warnln("[TUN] default interface changed by monitor, => %s", interfaceName)
 			} else {
 				log.Errorln("[TUN] default interface lost by monitor")
 			}
-			netchange.Notify() // flush caches, reset resolver connections and re-probe providers
+			netstate.SetDefaultInterface(interfaceName)
+			netchange.Notify() // advance epoch, migrate stale flows, reset resolver and re-probe
 		})
 		err = defaultInterfaceMonitor.Start()
 		if err != nil {
