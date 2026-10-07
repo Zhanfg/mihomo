@@ -43,3 +43,29 @@ func TestSnapshotRankerNeverReintroducesIllegalCandidate(t *testing.T) {
 		t.Fatalf("illegal candidate survived CFIR rank bridge: %#v", got)
 	}
 }
+
+
+func TestMaterializeSnapshotPlanCarriesSelectedInstance(t *testing.T) {
+	illegal := &fakeProxy{name: "tcp-only", kind: C.Vless, udp: false}
+	selected := &fakeProxy{name: "hy2-a", kind: C.Hysteria2, udp: true}
+	backup := &fakeProxy{name: "hy2-b", kind: C.Hysteria2, udp: true}
+	generation := cfir.Generation{Network: 9, Path: 3, Socket: 2}
+
+	plan, err := MaterializeSnapshotPlan(
+		decisionMetadata(C.UDP),
+		[]C.Proxy{illegal, selected, backup},
+		generation,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Protocol != "hysteria2" || plan.Instance != "hy2-a" {
+		t.Fatalf("unexpected plan target: %#v", plan)
+	}
+	if plan.Primitive != cfir.PrimitiveDatagram || plan.Generation != generation {
+		t.Fatalf("unexpected plan semantics: %#v", plan)
+	}
+	if plan.Action != cfir.RouteActionForward {
+		t.Fatalf("unexpected action: %v", plan.Action)
+	}
+}
