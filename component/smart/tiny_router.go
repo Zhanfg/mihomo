@@ -94,6 +94,10 @@ func (state *TinyRouterState) softenForEnvironmentChange(keep float64) {
 		state.Output[i] *= keep
 	}
 	state.Bias *= keep
+	// Reopen the effective sample age as well as the weights. Otherwise an old
+	// high Updates count would keep the post-handover learning rate tiny even
+	// though confidence was reset.
+	state.Updates = math.Min(4, state.Updates*keep)
 	if state.ErrorEWMA < 0.18 {
 		state.ErrorEWMA = 0.18
 	}
