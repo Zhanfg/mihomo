@@ -384,7 +384,11 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 			err = E.Cause(err, "start DefaultInterfaceMonitor")
 			return
 		}
-		l.backgroundNetwork.SetAvailable(defaultInterfaceMonitor.DefaultInterface() != nil)
+		currentDefaultInterface := defaultInterfaceMonitor.DefaultInterface()
+		l.backgroundNetwork.SetAvailable(currentDefaultInterface != nil)
+		if currentDefaultInterface != nil {
+			netstate.SetDefaultInterface(currentDefaultInterface.Name)
+		}
 
 		if options.AutoDetectInterface {
 			l.cDialerInterfaceFinder = &cDialerInterfaceFinder{
