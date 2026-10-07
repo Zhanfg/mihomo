@@ -124,11 +124,13 @@ func TestRegistryRankCandidatesNeverExposesRejectedCandidate(t *testing.T) {
 	valid := PlanCandidate{Protocol: ProtocolCandidate{
 		Protocol: "quic-ok",
 		Instance: "good",
+		Primitives: PrimitiveSet(PrimitiveDatagram),
 		Capabilities: caps,
 	}}
 	invalid := PlanCandidate{Protocol: ProtocolCandidate{
 		Protocol: "tcp-only",
 		Instance: "bad",
+		Primitives: PrimitiveSet(PrimitiveStream),
 		Capabilities: caps,
 	}}
 
