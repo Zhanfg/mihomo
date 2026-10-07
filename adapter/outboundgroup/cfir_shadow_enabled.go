@@ -18,6 +18,7 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 	generation := cfir.Generation{Network: netstate.CurrentEpoch()}
 	result, err := shadow.ObserveRankedCandidates(metadata, ranked, generation)
 	bridged, bridgeErr := shadow.RankSnapshotThroughCFIR(metadata, ranked, generation)
+	plan, planErr := shadow.MaterializeSnapshotPlan(metadata, ranked, generation)
 
 	bridgeMatches := false
 	if bridgeErr == nil {
@@ -30,7 +31,20 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 		}
 	}
 
-	if err == nil && result.Equal() && bridgeErr == nil && bridgeMatches {
+	planMatches := false
+	if planErr == nil {
+		if len(bridged) == 0 {
+			planMatches = plan.Protocol == "" && plan.Instance == ""
+		} else {
+			planMatches =
+				plan.Protocol == bridged[0].Candidate.Protocol.Protocol &&
+				plan.Instance == bridged[0].Candidate.Protocol.Instance &&
+				plan.Primitive == result.Intent.Primitive &&
+				plan.Generation == generation
+		}
+	}
+
+	if err == nil && result.Equal() && bridgeErr == nil && bridgeMatches && planErr == nil && planMatches {
 		return
 	}
 	n := cfirSmartRankingReports.Add(1)
@@ -43,6 +57,10 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 			log.Warnln("[CFIR Smart Shadow] ranker bridge failed (#%d): %v", n, bridgeErr)
 			return
 		}
+		if planErr != nil {
+			log.Warnln("[CFIR Smart Shadow] plan materialization failed (#%d): %v", n, planErr)
+			return
+		}
 		bridgeLeaf := ""
 		bridgeProtocol := cfir.ProtocolID("")
 		if len(bridged) > 0 {
@@ -50,7 +68,7 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 			bridgeProtocol = bridged[0].Candidate.Protocol.Protocol
 		}
 		log.Warnln(
-			"[CFIR Smart Shadow] ranking mismatch (#%d): mask=0x%x ranked=%d eligible=%d legacy=%s/%s planner=%s/%s ranker=%s/%s",
+			"[CFIR Smart Shadow] ranking mismatch (#%d): mask=0x%x ranked=%d eligible=%d legacy=%s/%s planner=%s/%s ranker=%s/%s plan=%s/%s",
 			n,
 			uint64(result.Mismatch),
 			result.RankedCount,
@@ -61,6 +79,8 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 			result.PlannerFirst.Protocol,
 			bridgeLeaf,
 			bridgeProtocol,
+			plan.Instance,
+			plan.Protocol,
 		)
 	}
 }
