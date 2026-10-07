@@ -18,8 +18,12 @@ func routeEvidenceCurrentAt(stored, current uint64) bool {
 	return stored == current
 }
 
+func currentRouteEpoch() uint64 {
+	return netstate.CurrentEpoch()
+}
+
 func routeEvidenceCurrent(stored uint64) bool {
-	return routeEvidenceCurrentAt(stored, netstate.CurrentEpoch())
+	return routeEvidenceCurrentAt(stored, currentRouteEpoch())
 }
 
 func RouteEpochWeightType(isUDP bool) string {
