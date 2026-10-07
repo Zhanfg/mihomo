@@ -47,10 +47,68 @@ type TransportPolicy struct {
 	Hedge             HedgePolicy
 }
 
+type RouteAction uint8
+
+const (
+	RouteActionInvalid RouteAction = iota
+	RouteActionForward
+	RouteActionDirect
+	RouteActionReject
+	RouteActionDNS
+	RouteActionInternal
+)
+
+type ExecutionIntent struct {
+	Action              RouteAction
+	Platform            Platform
+	Primitive           Primitive
+	Requirements        CapabilityRequirement
+	BackendRequirements CapabilityRequirement
+	SecurityFloor       SecurityProfile
+	Transport           TransportPolicy
+	Generation          Generation
+}
+
+func (i ExecutionIntent) Validate() error {
+	if i.Action <= RouteActionInvalid || i.Action > RouteActionInternal {
+		return errors.New("cfir: execution intent has invalid route action")
+	}
+	if !i.Primitive.Valid() {
+		return errors.New("cfir: execution intent has invalid primitive")
+	}
+	if err := i.Requirements.Validate(); err != nil {
+		return err
+	}
+	if err := i.BackendRequirements.Validate(); err != nil {
+		return err
+	}
+	if i.Transport.Hedge.MaxAttempts > 8 {
+		return errors.New("cfir: hedge attempt budget exceeds hard safety bound")
+	}
+	if i.Transport.Hedge.Delay < 0 {
+		return errors.New("cfir: negative hedge delay")
+	}
+	return i.SecurityFloor.Validate()
+}
+
+func (i ExecutionIntent) AcceptsProtocol(descriptor ProtocolDescriptor) bool {
+	if i.Action != RouteActionForward {
+		return false
+	}
+	if !descriptor.Primitives.Supports(i.Primitive) {
+		return false
+	}
+	if !i.Requirements.SatisfiedBy(descriptor.Capabilities) {
+		return false
+	}
+	return descriptor.Security.Meets(i.SecurityFloor)
+}
+
 // ExecutionPlan is the stable handoff from Smart/Planner to protocol and
 // platform backends. It names the selected protocol only at the final edge;
 // all earlier decision stages can operate on capability requirements.
 type ExecutionPlan struct {
+	Action              RouteAction
 	Protocol            ProtocolID
 	Backend             string
 	Platform            Platform
@@ -66,8 +124,19 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 	if registry == nil {
 		return errors.New("cfir: nil registry")
 	}
-	if !p.Primitive.Valid() {
-		return errors.New("cfir: execution plan has invalid primitive")
+	intent := ExecutionIntent{
+		Action: p.Action, Platform: p.Platform, Primitive: p.Primitive,
+		Requirements: p.Requirements, BackendRequirements: p.BackendRequirements,
+		SecurityFloor: p.SecurityFloor, Transport: p.Transport, Generation: p.Generation,
+	}
+	if err := intent.Validate(); err != nil {
+		return err
+	}
+	if p.Action != RouteActionForward {
+		if p.Protocol != "" {
+			return errors.New("cfir: non-forward execution plan must not name a wire protocol")
+		}
+		return nil
 	}
 	if err := p.Requirements.Validate(); err != nil {
 		return err
@@ -79,14 +148,14 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 	if err != nil {
 		return err
 	}
-	if !descriptor.Primitives.Supports(p.Primitive) {
-		return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
-	}
-	if !p.Requirements.SatisfiedBy(descriptor.Capabilities) {
-		missing := p.Requirements.MissingFrom(descriptor.Capabilities)
-		return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
-	}
-	if !descriptor.Security.Meets(p.SecurityFloor) {
+	if !intent.AcceptsProtocol(descriptor) {
+		if !descriptor.Primitives.Supports(p.Primitive) {
+			return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
+		}
+		if !p.Requirements.SatisfiedBy(descriptor.Capabilities) {
+			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
+			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+		}
 		return fmt.Errorf("cfir: protocol %s violates execution plan security floor", p.Protocol)
 	}
 	if p.Backend != "" {
