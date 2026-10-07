@@ -2754,8 +2754,21 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	calculatedWeight = smart.BlendHeuristicAndDistilled(heuristicWeight, distilledWeight, samples)
 	ModelPredicted = false
 	modelError := 0.0
+	currentEpoch := netstate.CurrentEpoch()
 	banditState := smart.LoadOnlineBanditState(atomicRecord, isUDP)
-	banditState.ObserveEpoch(netstate.CurrentEpoch())
+	banditState.ObserveEpoch(currentEpoch)
+	tinyRouterState := smart.LoadTinyRouterState(atomicRecord, isUDP)
+	tinyRouterState.ObserveEpoch(currentEpoch)
+
+	transportContext := smart.TinyRouterTransport{}
+	if tcpStats != nil {
+		transportContext = smart.TinyRouterTransport{
+			RTTVarMs: float64(tcpStats.RTTVarUsec) / 1000.0,
+			Unacked:  tcpStats.Unacked,
+			Lost:     tcpStats.Lost,
+			Cwnd:     tcpStats.Cwnd,
+		}
+	}
 
 	expertDisagreement := 0.0
 	if smart.ShouldConsultExpert(input, banditState) {
@@ -2806,8 +2819,11 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	// reward, preventing expert/teacher self-confirmation.
 	teacherPrior := calculatedWeight
 	banditFeatures := smart.OnlineBanditFeatures(input)
+	tinyRouterFeatures := smart.TinyRouterFeatures(input, transportContext)
+	banditPrior := teacherPrior
 	if teacherPrior > 0 {
-		calculatedWeight, _ = banditState.Predict(teacherPrior, banditFeatures)
+		banditPrior, _ = banditState.Predict(teacherPrior, banditFeatures)
+		calculatedWeight, _ = tinyRouterState.Predict(banditPrior, tinyRouterFeatures)
 	}
 
 	if calculatedWeight > 0 && linkFactor > 0 {
@@ -2835,8 +2851,14 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 		if isDegraded || failedBlock {
 			reward *= 0.15
 		}
-		_, uncertainty := banditState.Update(teacherPrior, reward, banditFeatures, sampleScale)
+		updatedBanditWeight, uncertainty := banditState.Update(teacherPrior, reward, banditFeatures, sampleScale)
 		smart.SaveOnlineBanditState(atomicRecord, isUDP, banditState, uncertainty)
+
+		// The tiny nonlinear head learns only the residual the linear contextual
+		// student still misses. Training happens after completion, never on the
+		// dial path, and uses the same real reward rather than its own prediction.
+		_, _ = tinyRouterState.Update(updatedBanditWeight, reward, tinyRouterFeatures, sampleScale)
+		smart.SaveTinyRouterState(atomicRecord, isUDP, tinyRouterState)
 	}
 
 	newWeight := updateEMAFloat(oldWeight, adjWeight)
