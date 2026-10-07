@@ -36,7 +36,8 @@ func TestExecutionPlanSelectsByCapabilityNotProtocolSpecialCase(t *testing.T) {
 		Instance:            "node-a",
 		InstancePrimitives:  PrimitiveSet(PrimitiveStream, PrimitiveDatagram, PrimitiveSession),
 		Capabilities:        caps,
-		Security:     SecurityContext{Profile: security, AttestedByCore: true},
+		SecurityOffer:       security,
+		Security:            SecurityContext{},
 		Primitive:    PrimitiveSession,
 		Requirements: CapabilityRequirement{Standard: []StandardCapability{
 			CapabilityMultiplex,
@@ -199,6 +200,7 @@ func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
 		Instance: "plain-node",
 		Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
 		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
+		SecurityOffer: SecurityProfile{},
 		Security: SecurityContext{},
 	}); err == nil {
 		t.Fatal("unattested weak instance must be rejected by security floor")
@@ -209,7 +211,8 @@ func TestCandidateProtocolsFilterBeforeRanking(t *testing.T) {
 		Instance: "secure-node",
 		Primitives: PrimitiveSet(PrimitiveStream, PrimitiveDatagram),
 		Capabilities: NewCapabilitySet(CapabilityPathMigration, CapabilityMultiplex),
-		Security: SecurityContext{Profile: strong, AttestedByCore: true},
+		SecurityOffer: strong,
+		Security: SecurityContext{},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -261,13 +264,84 @@ func TestProtocolProjectionCannotSelfApproveImpossibleClaims(t *testing.T) {
 	}
 
 	projection.Instance.Capabilities = NewCapabilitySet(CapabilityHalfClose)
-	projection.Instance.Security.AttestedByCore = false
+	projection.Instance.SecurityOffer = SecurityProfile{}
 	if err := projection.Validate(); err == nil {
-		t.Fatal("family minimum security must require core attestation")
+		t.Fatal("family minimum security must require a matching preflight offer")
 	}
 
-	projection.Instance.Security.AttestedByCore = true
+	projection.Instance.SecurityOffer = family.Security
+	projection.Instance.Security = SecurityContext{}
 	if err := projection.Validate(); err != nil {
 		t.Fatal(err)
+	}
+
+	projection.Instance.Security = SecurityContext{
+		Profile: SecurityProfile{
+			Authentication: AuthenticationNone,
+			Confidentiality: ConfidentialityTransport,
+			Integrity: IntegrityAuthenticated,
+		},
+		AttestedByCore: true,
+	}
+	if err := projection.Validate(); err == nil {
+		t.Fatal("attested runtime security weaker than the offer must fail")
+	}
+}
+
+func TestExecutionPlanSecurityOfferRequiresPostHandshakeAttestation(t *testing.T) {
+	registry := NewRegistry()
+	offer := SecurityProfile{
+		Authentication: AuthenticationServer,
+		Confidentiality: ConfidentialityTransport,
+		Integrity: IntegrityAuthenticated,
+		ForwardSecrecy: true,
+	}
+	if err := registry.RegisterProtocol(testProtocol{descriptor: ProtocolDescriptor{
+		ID: "secure-stream",
+		MinCFIR: CurrentVersion,
+		Primitives: PrimitiveSet(PrimitiveStream),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := ExecutionPlan{
+		Action: RouteActionForward,
+		Protocol: "secure-stream",
+		Instance: "node-a",
+		InstancePrimitives: PrimitiveSet(PrimitiveStream),
+		SecurityOffer: offer,
+		Primitive: PrimitiveStream,
+		SecurityFloor: SecurityProfile{
+			Authentication: AuthenticationServer,
+			Confidentiality: ConfidentialityTransport,
+			Integrity: IntegrityAuthenticated,
+		},
+	}
+	if err := plan.Validate(registry); err != nil {
+		t.Fatalf("preflight offer should admit the plan: %v", err)
+	}
+	if _, err := plan.WithSecurityAttestation(SecurityContext{Profile: offer}); err == nil {
+		t.Fatal("unattested runtime evidence must fail")
+	}
+	if _, err := plan.WithSecurityAttestation(SecurityContext{
+		Profile: SecurityProfile{
+			Authentication: AuthenticationNone,
+			Confidentiality: ConfidentialityTransport,
+			Integrity: IntegrityAuthenticated,
+		},
+		AttestedByCore: true,
+	}); err == nil {
+		t.Fatal("weaker attested security must fail closed")
+	}
+	sealed, err := plan.WithSecurityAttestation(SecurityContext{
+		Profile: offer,
+		PeerIdentity: "server.example",
+		AttestedByCore: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sealed.Security.AttestedByCore || sealed.Security.PeerIdentity != "server.example" {
+		t.Fatalf("runtime security not sealed into plan: %#v", sealed.Security)
 	}
 }
