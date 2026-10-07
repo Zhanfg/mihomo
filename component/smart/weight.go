@@ -1,0 +1,658 @@
+package smart
+
+import (
+	"math"
+	"time"
+
+	"github.com/metacubex/mihomo/component/linkprofile"
+)
+
+type sceneKind int
+
+const (
+	sceneWeb         sceneKind = iota // 0
+	sceneInteractive                  // 1
+	sceneStreaming                    // 2
+	sceneTransfer                     // 3
+)
+
+var presetSceneParams = [4]SceneParams{
+	sceneWeb:         {0.5, 0.1, 0.4, 0.8, 0.6, 1.0, 0.3, 0.2},
+	sceneInteractive: {0.6, 0.1, 0.3, 1.2, 1.0, 1.3, 0.5, 0.3},
+	sceneStreaming:   {0.5, 0.2, 0.3, 1.5, 0.8, 1.2, 0.8, 0.2},
+	sceneTransfer:    {0.5, 0.2, 0.3, 1.8, 0.7, 0.9, 1.0, 0.1},
+}
+
+const (
+	WeightTypeModelCalibrationTCP = "model-cal:tcp"
+	WeightTypeModelCalibrationUDP = "model-cal:udp"
+	WeightTypeModelErrorTCP       = "model-err:tcp"
+	WeightTypeModelErrorUDP       = "model-err:udp"
+)
+
+// LinkQualityFactor is kept as a compatibility wrapper for existing Smart
+// callers/tests. The implementation lives in component/linkprofile so transient
+// path evidence is not coupled to Smart persistence.
+func LinkQualityFactor(rttMs, rttVarMs, lossRate float64, unacked, lost, cwnd uint32) float64 {
+	return linkprofile.QualityFactor(linkprofile.TunnelMetrics{
+		RTTMs: rttMs, RTTVarMs: rttVarMs, LossRate: lossRate,
+		Unacked: unacked, Lost: lost, Cwnd: cwnd,
+	})
+}
+
+// ModelCalibrationWeightType returns the persistent online-calibration slot for
+// a transport. It is stored in the existing StatsRecord weights map, so the
+// loaded LightGBM model gains per-target/node adaptation without a second model
+// file, a new database, or an unbounded in-memory learner.
+func ModelCalibrationWeightType(isUDP bool) string {
+	if isUDP {
+		return WeightTypeModelCalibrationUDP
+	}
+	return WeightTypeModelCalibrationTCP
+}
+
+
+func ModelErrorWeightType(isUDP bool) string {
+	if isUDP {
+		return WeightTypeModelErrorUDP
+	}
+	return WeightTypeModelErrorTCP
+}
+
+
+func SampleCount(success, failure int64) int64 {
+	if success < 0 {
+		success = 0
+	}
+	if failure < 0 {
+		failure = 0
+	}
+	if success > math.MaxInt64-failure {
+		return math.MaxInt64
+	}
+	return success + failure
+}
+
+// ShouldInvokeModel is the inference gate for the heavy global ensemble.
+// Failures and fresh loss always get a full prediction. Mature, stable records
+// are checked only at prime-numbered evidence intervals so weighted sampling
+// strides (commonly powers of two) cannot phase-lock into "always infer".
+func ShouldInvokeModel(input *ModelInput, modelError float64) bool {
+	if input == nil {
+		return false
+	}
+	total := SampleCount(input.Success, input.Failure)
+	if total < DefaultMinSampleCount {
+		return false
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 {
+		return true
+	}
+	if total < 16 {
+		return true
+	}
+
+	stride := int64(7)
+	switch {
+	case modelError >= 0.20:
+		stride = 3
+	case total < 64:
+		stride = 3
+	case modelError > 0 && modelError < 0.06 && total >= 256:
+		stride = 13
+	}
+	return total%stride == 0
+}
+
+
+// ShouldInvokeTeacher lets the compact online student decide when the heavy
+// global ensemble is worth consulting. Failures and fresh loss always escalate
+// immediately. A cold or uncertain student consults frequently; a mature,
+ // low-error student stretches the cadence to a large prime interval so
+// weighted sampling cannot phase-lock into always invoking the teacher.
+func ShouldInvokeTeacher(input *ModelInput, modelError, studentUncertainty, studentError, studentUpdates float64) bool {
+	if input == nil {
+		return false
+	}
+	total := SampleCount(input.Success, input.Failure)
+	if total < DefaultMinSampleCount {
+		return false
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 {
+		return true
+	}
+	if studentUpdates < 8 {
+		return true
+	}
+
+	studentUncertainty = clamp01(studentUncertainty)
+	if studentError < 0 || math.IsNaN(studentError) || math.IsInf(studentError, 0) {
+		studentError = 1
+	}
+	if modelError < 0 || math.IsNaN(modelError) || math.IsInf(modelError, 0) {
+		modelError = 1
+	}
+
+	stride := int64(11)
+	switch {
+	case studentError >= 0.25 || studentUncertainty >= 0.55:
+		stride = 3
+	case studentError >= 0.15 || studentUncertainty >= 0.35 || modelError >= 0.20:
+		stride = 5
+	case total < 64:
+		stride = 7
+	case studentError < 0.08 && studentUncertainty < 0.18 && modelError < 0.08 && total >= 256:
+		stride = 29
+	case studentError < 0.12 && studentUncertainty < 0.28 && modelError < 0.12 && total >= 128:
+		stride = 17
+	}
+	return total%stride == 0
+}
+
+func ShouldInvokeTeacherWithExperts(input *ModelInput, modelError, studentUncertainty, studentError, studentUpdates, expertDisagreement float64) bool {
+	if expertDisagreement >= 0.10 {
+		return true
+	}
+	return ShouldInvokeTeacher(input, modelError, studentUncertainty, studentError, studentUpdates)
+}
+
+
+
+// TrainingSampleRate treats the configured rate as a ceiling, then spends it
+// where samples carry information. Failures/loss and model disagreement are
+// retained densely; mature stable traffic is downsampled because thousands of
+// near-identical healthy rows improve neither retraining nor diagnosis.
+func TrainingSampleRate(input *ModelInput, modelError, configured float64) float64 {
+	if input == nil || configured <= 0 {
+		return 0
+	}
+	if configured > 1 {
+		configured = 1
+	}
+	if input.ConnectionFailed || input.LossRate >= 0.01 || modelError >= 0.20 {
+		return configured
+	}
+	total := SampleCount(input.Success, input.Failure)
+	switch {
+	case total < 32:
+		return configured
+	case modelError > 0 && modelError < 0.06 && total >= 256:
+		return configured * 0.125
+	default:
+		return configured * 0.25
+	}
+}
+
+// AdaptModelPrediction turns the static LightGBM score into a small online
+// ensemble. The model remains the primary signal; the traditional scorer acts
+// as a continuously observed residual target. A bounded EWMA calibration is
+// persisted with the normal Smart stats, so restarts retain what the core
+// learned while RAM stays O(existing records).
+func AdaptModelPrediction(modelWeight, observedWeight, oldCalibration float64, samples int64) (weight, calibration float64) {
+	weight, calibration, _ = AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibration, 0, samples)
+	// Preserve the historical wrapper's tighter calibration contract for
+	// callers that have not opted into reliability-aware adaptation.
+	calibration = math.Max(0.65, math.Min(1.35, calibration))
+	return weight, calibration
+}
+
+// AdaptModelPredictionWithReliability is a tiny persistent online residual
+// learner. It learns both a multiplicative bias and the model's recent error.
+// The latter controls model share, so a globally useful model can gracefully
+// defer to local evidence for one target/node pair without another resident
+// model or retraining job.
+func AdaptModelPredictionWithReliability(modelWeight, observedWeight, oldCalibration, oldError float64, samples int64) (weight, calibration, modelError float64) {
+	if math.IsNaN(modelWeight) || math.IsInf(modelWeight, 0) || modelWeight <= 0 ||
+		math.IsNaN(observedWeight) || math.IsInf(observedWeight, 0) || observedWeight <= 0 {
+		if oldCalibration <= 0 {
+			oldCalibration = 1
+		}
+		if oldError < 0 || math.IsNaN(oldError) || math.IsInf(oldError, 0) {
+			oldError = 0
+		}
+		return modelWeight, oldCalibration, oldError
+	}
+	if oldCalibration <= 0 || math.IsNaN(oldCalibration) || math.IsInf(oldCalibration, 0) {
+		oldCalibration = 1
+	}
+	if oldError < 0 || math.IsNaN(oldError) || math.IsInf(oldError, 0) {
+		oldError = 0
+	}
+
+	ratio := observedWeight / modelWeight
+	target := math.Max(0.55, math.Min(1.45, ratio))
+	instantError := math.Abs(math.Log(ratio))
+	instantError = math.Min(1.0, instantError)
+
+	errorAlpha := 0.12
+	if oldError == 0 {
+		modelError = instantError
+	} else {
+		modelError = oldError*(1-errorAlpha) + instantError*errorAlpha
+	}
+	modelError = math.Max(0, math.Min(1, modelError))
+
+	evidence := math.Min(1, math.Log1p(float64(max(int64(0), samples)))/math.Log(65))
+	alpha := 0.06 + 0.12*evidence + math.Min(0.08, instantError*0.10)
+	calibration = oldCalibration*(1-alpha) + target*alpha
+	calibration = math.Max(0.60, math.Min(1.40, calibration))
+
+	// Persistent model error lowers trust; the current disagreement adds a
+	// short-term brake so one obviously wrong prediction cannot dominate until
+	// the EWMA catches up.
+	reliability := math.Exp(-2.2 * modelError)
+	currentReliability := math.Exp(-1.2 * instantError)
+	modelShare := (0.55 + 0.30*evidence) * reliability * currentReliability
+	modelShare = math.Max(0.15, math.Min(0.85, modelShare))
+
+	adaptedModel := modelWeight * calibration
+	weight = adaptedModel*modelShare + observedWeight*(1-modelShare)
+
+	// The heavy teacher is advisory. A valid-but-corrupted model must not be
+	// able to drag the route score arbitrarily far from the compact expert
+	// prior that is continuously checked by real connection reward.
+	lower := observedWeight * 0.55
+	upper := observedWeight * 1.45
+	weight = math.Max(lower, math.Min(upper, weight))
+	return weight, calibration, modelError
+}
+
+type (
+	SceneParams struct {
+		successRateWeight float64
+		connectTimeWeight float64
+		latencyWeight     float64
+		trafficWeight     float64
+		durationWeight    float64
+		qualityWeight     float64
+		lossWeight        float64
+		minDecayFactor    float64
+	}
+)
+
+type ModelInput struct {
+	// 节点历史性能指标
+	Success                    int64    // 成功次数
+	Failure                    int64    // 失败次数
+	ConnectTime                int64    // 连接时间(毫秒)
+	Latency                    int64    // 延迟(毫秒)
+
+	// 上传相关特征
+	UploadTotal                float64  // 上传流量(字节)
+	HistoryUploadTotal         float64  // 历史上传流量(字节)
+	MaxuploadRate              float64  // 最大上传速率(字节/秒)
+	HistoryMaxUploadRate       float64  // 历史最大上传速率(字节/秒)
+
+	// 下载相关特征
+	DownloadTotal              float64  // 下载流量(字节)
+	HistoryDownloadTotal       float64  // 历史下载流量(字节)
+	MaxdownloadRate            float64  // 最大下载速率(字节/秒)
+	HistoryMaxDownloadRate     float64  // 历史最大下载速率(字节/秒)
+
+	ConnectionDuration         float64  // 连接持续时间(分钟)
+	HistoryConnectionDuration  float64  // 历史平均连接持续时间(分钟)
+	LastUsed                   int64    // 上次使用时间
+
+	// 连接特征
+	IsUDP                      bool      // 是否UDP连接
+	IsTCP                      bool      // 是否TCP连接
+	ConnectionFailed           bool      // 本次连接是否失败（用于区分是复用还是连接失败）
+	LossRate                   float64   // 单次连接丢包率 0.0~1.0, 0=无丢包/不支持/UDP
+	CumulLossRate              float64   // 历史累计丢包率 cumulRetrans/cumulSent
+	EmaLossRate                float64   // 历史EMA丢包率, 自动衰减反映近期趋势
+
+	// 元数据特征
+	DestIPASN                  string    // 目标IP的ASN信息
+	Host                       string    // 域名信息
+	DestIP                     string    // 目标IP地址
+	DestPort                   uint16    // 目标端口
+	DestGeoIP                  []string  // 目标IP的地理位置信息
+
+	GroupName                  string    // 策略组名称
+	NodeName                   string    // 节点名称
+}
+
+// 计算权重
+func CalculateWeight(input *ModelInput, priorityFactor float64) (float64, bool) {
+	// 1. 数据准备
+	success := input.Success
+	failure := input.Failure
+	connectTime := input.ConnectTime
+	latency := input.Latency
+	isUDP := input.IsUDP
+	uploadMB := input.UploadTotal
+	historyUploadTotal := input.HistoryUploadTotal
+	downloadMB := input.DownloadTotal
+	historyDownloadTotal := input.HistoryDownloadTotal
+	maxUploadRateKB := input.MaxuploadRate
+	historyMaxUploadRate := input.HistoryMaxUploadRate
+	maxDownloadRateKB := input.MaxdownloadRate
+	historyMaxDownloadRate := input.HistoryMaxDownloadRate
+	durationMinutes := input.ConnectionDuration
+	historyConnectionDuration := input.HistoryConnectionDuration
+	lastConnectTimestamp := input.LastUsed
+	
+	// 2. 检查样本数量. Persisted/corrupted counters must not wrap the
+	// scorer back into a cold-start path at int64 extremes.
+	total := SampleCount(success, failure)
+	if total < DefaultMinSampleCount {
+		return 0, false
+	}
+
+	// 3. 场景识别和参数获取
+	scene := identifyConnectionScene(isUDP, latency, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes)
+	params := presetSceneParams[scene]
+
+	// 4. 计算时间衰减因子
+	timeFactor := 1.0
+	if lastConnectTimestamp > 0 {
+		timeFactor = GetTimeDecayWithCache(lastConnectTimestamp, time.Now().Unix(), params.minDecayFactor)
+	}
+
+	// 5. 对所有历史数据应用时间衰减
+	decayedSuccess := float64(success) * timeFactor
+	decayedFailure := float64(failure) * timeFactor
+	decayedTotal := decayedSuccess + decayedFailure
+
+	if decayedTotal < 1.0 {
+		decayedSuccess = math.Max(0.5, decayedSuccess)
+		decayedFailure = math.Max(0.5, decayedFailure)
+		decayedTotal = decayedSuccess + decayedFailure
+	}
+
+	// 6. 基础指标计算
+	if connectTime == 0 {
+		if !input.ConnectionFailed {
+			connectTime = 1
+		} else {
+			connectTime = 2000
+		}
+	}
+
+	if latency == 0 {
+		if !input.ConnectionFailed {
+			latency = 1
+		} else {
+			latency = 2000
+		}
+	}
+
+	successRate := decayedSuccess / decayedTotal
+	connectScore := math.Exp(-float64(connectTime)/1500.0) * timeFactor
+	latencyScore := math.Exp(-float64(latency)/1500.0) * timeFactor
+
+	connectScore = math.Min(0.8, math.Max(0.3, connectScore))
+	latencyScore = math.Min(0.8, math.Max(0.3, latencyScore))
+
+	// 7. UDP协议调整
+	if isUDP {
+		params.latencyWeight = math.Min(0.5, params.latencyWeight*1.2)
+		params.successRateWeight = math.Min(0.6, params.successRateWeight*1.1)
+		params.connectTimeWeight = 1.0 - params.successRateWeight - params.latencyWeight
+	}
+
+	// 8. 连接类型判断
+	isShortConnection := durationMinutes <= 1
+	isLongConnection := durationMinutes > 10
+
+	// 9. 基础权重计算
+	baseWeight := (successRate * params.successRateWeight) +
+		(connectScore * params.connectTimeWeight) +
+		(latencyScore * params.latencyWeight)
+
+	// 10. 流量因子计算
+	var trafficFactor float64 = 0
+	if uploadMB > 0 || downloadMB > 0 {
+		uploadFactor := calculateTrafficFactor(uploadMB, maxUploadRateKB, durationMinutes, historyMaxUploadRate, historyUploadTotal, historyConnectionDuration, isShortConnection)
+		downloadFactor := calculateTrafficFactor(downloadMB, maxDownloadRateKB, durationMinutes, historyMaxDownloadRate, historyDownloadTotal, historyConnectionDuration, isShortConnection)
+
+		// 根据场景调整上下行权重
+		var uploadWeight, downloadWeight float64
+		if scene == sceneStreaming {
+			uploadWeight, downloadWeight = 0.2, 0.8
+		} else if scene == sceneTransfer && uploadMB > downloadMB*2 {
+			uploadWeight, downloadWeight = 0.7, 0.3
+		} else {
+			uploadWeight, downloadWeight = 0.4, 0.6
+		}
+
+		trafficFactor = (uploadFactor * uploadWeight) + (downloadFactor * downloadWeight)
+	}
+
+	// 11. 持续时间因子计算
+	var durationFactor float64 = 0.1
+	if durationMinutes > 0 {
+		if isShortConnection {
+			durationFactor = math.Min(0.3, 0.1+math.Log1p(durationMinutes)*0.08)
+		} else if isLongConnection {
+			durationFactor = math.Min(0.5, 0.2+math.Log1p(durationMinutes)*0.1)
+		} else {
+			durationFactor = math.Min(0.4, 0.15+math.Log1p(durationMinutes)*0.09)
+		}
+	}
+
+	// 12. 质量加成计算
+	var qualityBonus float64 = 0
+
+	if latency > 0 && latency < 100 {
+		qualityBonus += 0.1
+	}
+	if connectTime > 0 && connectTime < 10 {
+		qualityBonus += 0.1
+	}
+	if (scene == sceneStreaming || scene == sceneTransfer) && downloadMB > 20 {
+		qualityBonus += 0.1
+	}
+	if scene == sceneInteractive && latency > 0 && latency < 100 && successRate > 0.9 {
+		qualityBonus += 0.1
+	}
+
+	qualityBonus = math.Min(0.3, qualityBonus)
+
+	// 13. 丢包率衰减
+	// currentPenalty:  单次连接丢包，敏感但易波动
+	// cumulPenalty:    历史累计丢包，稳定但永不衰减
+	// emaPenalty:      EMA丢包，自动衰减反映近期趋势
+	// improvementFactor: EMA < 累计 → 质量在改善，降低累计的惩罚权重
+	lossFactor := 0.0
+	if input.LossRate > 0 || input.CumulLossRate > 0 {
+		currentPenalty := 0.0
+		if input.LossRate > 0 {
+			currentPenalty = 1.0 - math.Exp(-input.LossRate*10.0)
+		}
+
+		cumulPenalty := 0.0
+		if input.CumulLossRate > 0 {
+			cumulPenalty = 1.0 - math.Exp(-input.CumulLossRate*50.0)
+		}
+
+		emaPenalty := 0.0
+		if input.EmaLossRate > 0 {
+			emaPenalty = 1.0 - math.Exp(-input.EmaLossRate*50.0)
+		}
+
+		// trustCumul ∈ [0,1]: 累计丢包率越高，越采纳历史判断
+		trustCumul := math.Min(1.0, cumulPenalty*5.0)
+
+		// EMA趋势修正: 当EMA < 累计时说明近期质量改善，按比例降低惩罚
+		improvementFactor := 1.0
+		if cumulPenalty > 0 && emaPenalty > 0 && emaPenalty < cumulPenalty {
+			improvementFactor = emaPenalty / cumulPenalty
+		}
+
+		// 累计可信 → max(当前,累计) * 趋势修正，确认性处罚
+		// 累计不可信 → 当前×0.3 疑似瞬态波动，减轻
+		lossFactor = trustCumul*math.Max(currentPenalty, cumulPenalty)*improvementFactor +
+			(1.0-trustCumul)*currentPenalty*0.3
+	}
+
+	return baseWeight * (1 +
+		trafficFactor*params.trafficWeight +
+		durationFactor*params.durationWeight +
+		qualityBonus*params.qualityWeight -
+		lossFactor*params.lossWeight) * priorityFactor, false
+}
+
+// 识别连接的使用场景类型
+func identifyConnectionScene(isUDP bool, latency int64, uploadMB, downloadMB, maxUploadRateKB, maxDownloadRateKB, durationMinutes float64) sceneKind {
+	totalRate := (uploadMB + downloadMB) / durationMinutes
+
+	// 游戏/互动场景特征：低延迟，持续连接，流量相对平衡
+	if (isUDP && latency < 150 && durationMinutes > 3 &&
+		uploadMB > 0.2 && downloadMB > 0.2 &&
+		maxUploadRateKB > 200 && maxDownloadRateKB > 200 &&
+		totalRate > 0.1 && totalRate < 10) ||
+		(!isUDP && latency < 250 && durationMinutes > 3 &&
+			uploadMB > 0.1 && downloadMB > 0.1 &&
+			uploadMB < 150 && downloadMB < 150 &&
+			(uploadMB/downloadMB > 0.2) && (uploadMB/downloadMB < 5) &&
+			maxUploadRateKB > 150 && maxDownloadRateKB > 150 &&
+			totalRate > 0.05 && totalRate < 15) {
+		return sceneInteractive
+	}
+
+	// 大流量传输场景
+	if (uploadMB > 100 || downloadMB > 100 || maxUploadRateKB > 5000) && durationMinutes > 0.5 {
+		if totalRate > 5 {
+			return sceneTransfer
+		}
+	}
+
+	// 流媒体场景
+	if durationMinutes > 1 {
+		downloadThroughput := downloadMB / durationMinutes
+		if ((downloadMB > 60 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 2000 && maxDownloadRateKB/maxUploadRateKB > 4 && downloadThroughput > 5) ||
+			(downloadMB > 15 && downloadMB/uploadMB > 3 && maxDownloadRateKB > 1000 && maxDownloadRateKB/maxUploadRateKB > 3 && downloadThroughput > 2)) {
+			return sceneStreaming
+		}
+	}
+
+	// 默认为Web场景
+	return sceneWeb
+}
+
+// 计算流量因子
+func calculateTrafficFactor(trafficMB, maxRateKB, durationMinutes, historyMaxRateKB, historyTotalMB, historyConnDuration float64, isShort bool) float64 {
+	if trafficMB <= 0 || durationMinutes <= 0 {
+		return 0.0
+	}
+
+	var baseFactor float64
+	switch {
+	case trafficMB < 0.005: // <5KB
+		baseFactor = 0.10 + 0.05*math.Log10(trafficMB/0.001)
+	case trafficMB < 0.01:
+		baseFactor = 0.18 + 0.08*math.Log10(trafficMB/0.005)
+	case trafficMB < 0.05:
+		baseFactor = 0.35 + 0.10*math.Log10(trafficMB/0.01)
+	case trafficMB < 0.1:
+		baseFactor = 0.53 + 0.15*math.Log10(trafficMB/0.05)
+	case trafficMB < 0.5:
+		baseFactor = 0.72 + 0.18*math.Log10(trafficMB/0.1)
+	case trafficMB < 1:
+		baseFactor = 0.98 + 0.15*math.Log10(trafficMB/0.5)
+	case trafficMB < 5:
+		baseFactor = 1.18 + 0.10*math.Log10(trafficMB/1)
+	case trafficMB < 20:
+		baseFactor = 1.32 + 0.08*math.Log10(trafficMB/5)
+	case trafficMB < 100:
+		baseFactor = 1.45 + 0.06*math.Log10(trafficMB/20)
+	case trafficMB < 500:
+		baseFactor = 1.56 + 0.05*math.Log10(trafficMB/100)
+	case trafficMB < 3000:
+		baseFactor = 1.66 + 0.04*math.Log10(trafficMB/500)
+	default:
+		baseFactor = 1.74 + 0.02*math.Log10(trafficMB/3000)
+	}
+
+	var rateBonus float64
+	switch {
+	case maxRateKB < 20:
+		rateBonus = 1.0 + 0.05*(maxRateKB/20.0)
+	case maxRateKB < 100:
+		rateBonus = 1.05 + 0.05*((maxRateKB-20)/80.0)
+	case maxRateKB < 500:
+		rateBonus = 1.10 + 0.05*((maxRateKB-100)/400.0)
+	case maxRateKB < 2000:
+		rateBonus = 1.15 + 0.05*((maxRateKB-500)/1500.0)
+	case maxRateKB < 5000:
+		rateBonus = 1.20 + 0.04*((maxRateKB-2000)/3000.0)
+	case maxRateKB < 20000:
+		rateBonus = 1.24 + 0.04*((maxRateKB-5000)/15000.0)
+	case maxRateKB < 100000:
+		rateBonus = 1.28 + 0.03*math.Log10(maxRateKB/20000.0)
+		rateBonus = math.Min(rateBonus, 1.32)
+	default:
+		rateBonus = 1.32 + 0.02*math.Log10(maxRateKB/100000.0)
+		rateBonus = math.Min(rateBonus, 1.36)
+	}
+
+	throughputKBs := (trafficMB * 1024.0) / math.Max(1.0, durationMinutes*60.0)
+
+	accelBonus := 1.0
+	if throughputKBs > 0 {
+		ratio := maxRateKB / throughputKBs
+		if ratio > 2.0 {
+			accelBonus = 1.0 + math.Min(0.12, 0.02*(ratio-2.0))
+		}
+	}
+
+	historyPenalty := 1.0
+	if historyMaxRateKB > 0 {
+		r := maxRateKB / historyMaxRateKB
+		if r < 0.5 {
+			historyPenalty = 0.6 + (1.0-0.6)*r
+		} else if r < 0.9 {
+			historyPenalty = 0.85 + 0.15*r
+		} else if r > 1.2 {
+			historyPenalty = 1.0 + math.Min(0.05, 0.02*(r-1.2))
+		}
+	}
+
+	combinedRate := rateBonus * accelBonus * historyPenalty
+
+	if historyMaxRateKB > 0 {
+		historyRatio := maxRateKB / historyMaxRateKB
+		historyAvgKBs := 0.0
+		if historyTotalMB > 0 && historyConnDuration > 0 {
+			historyAvgKBs = (historyTotalMB * 1024.0) / math.Max(1.0, historyConnDuration*60.0)
+		}
+
+		lowThroughput := false
+		if historyAvgKBs > 0 {
+			lowThroughput = throughputKBs < 0.3*historyAvgKBs
+		} else {
+			lowThroughput = throughputKBs < 10.0
+		}
+
+		if historyRatio < 0.1 && lowThroughput {
+			evidence := 0.0
+			if historyConnDuration > 0 && durationMinutes > 0 {
+				ratio := historyConnDuration / durationMinutes
+				evidence = math.Min(1.0, math.Max(0.0, (ratio-1.0)/4.0))
+			}
+
+			penalty := 1.0 - 0.5*evidence
+			combinedRate *= penalty
+		}
+	}
+
+	if combinedRate > 1.25 {
+		combinedRate = 1.25
+	}
+
+	var connectionFactor float64
+	throughput := trafficMB / math.Max(1.0, durationMinutes)
+	if isShort {
+		connectionFactor = 1.0 + 0.06*math.Min(1, throughput/25.0)
+	} else {
+		connectionFactor = 1.0
+		if throughput > 5 {
+			connectionFactor += 0.05 * math.Min(1, (throughput-5)/80.0)
+		}
+	}
+
+	factor := baseFactor * combinedRate * connectionFactor
+
+	return math.Min(1.25, factor)
+}

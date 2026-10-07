@@ -1,0 +1,767 @@
+package adapter
+
+import (
+	"context"
+	"encoding/binary"
+	"net/netip"
+	"testing"
+	"time"
+
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/netstate"
+	C "github.com/metacubex/mihomo/constant"
+)
+
+type capabilityProbeProxy struct {
+	C.Proxy
+	statusCalled bool
+	statusCalls  int
+	urlCalled    bool
+	fail         bool
+	failFirst    bool
+}
+
+func (p *capabilityProbeProxy) Name() string { return "probe" }
+func (p *capabilityProbeProxy) StatusTest(context.Context, string) (uint16, bool, error) {
+	p.statusCalled = true
+	p.statusCalls++
+	if p.fail || (p.failFirst && p.statusCalls == 1) {
+		return 599, false, nil
+	}
+	return 204, true, nil
+}
+func (p *capabilityProbeProxy) URLTest(context.Context, string, utils.IntRanges[uint16]) (uint16, error) {
+	p.urlCalled = true
+	return 0, nil
+}
+
+func TestIPv6CapabilityProbeDoesNotMutateHealth(t *testing.T) {
+	p := &capabilityProbeProxy{}
+	entry := &capabilityEntry{}
+	probeCapability(p, capabilityIPv6, entry)
+	if !p.statusCalled {
+		t.Fatal("IPv6 capability probe must use StatusTest")
+	}
+	if p.urlCalled {
+		t.Fatal("IPv6 capability probe must not call URLTest")
+	}
+	entry.mu.Lock()
+	ok := entry.known && entry.ok
+	entry.mu.Unlock()
+	if !ok {
+		t.Fatal("successful status probe should cache a positive capability")
+	}
+}
+
+// seed 直接写入能力缓存，避免测试真的发起网络探测
+func seed(name string, udp, ipv6 *bool) {
+	// Keep the legacy entry populated for direct cache tests, and populate the
+	// production identity used by CapabilityPenalty as well.
+	states := []*capabilityState{capabilityStateFor(name), capabilityStateForProxy(stub(name))}
+	set := func(e *capabilityEntry, v *bool) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if v == nil {
+			e.known, e.probing = false, true // 标记探测中，防止测试触发真实探测
+			return
+		}
+		e.known, e.ok, e.expire, e.probing, e.epoch = true, *v, time.Now().Add(time.Hour), false, netstate.CurrentEpoch()
+	}
+	for _, st := range states {
+		set(&st.udp, udp)
+		set(&st.ipv6, ipv6)
+	}
+}
+
+func TestCapabilityPenaltyDemotesWithoutFiltering(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	yes, no := true, false
+
+	mk := func(name string, udp, v6 *bool) C.Proxy {
+		seed(name, udp, v6)
+		return stub(name)
+	}
+	both := mk("both", &yes, &yes)
+	udpOnly := mk("udpOnly", &yes, &no)
+	unprobed := mk("unprobed", nil, nil)
+	neither := mk("neither", &no, &no)
+
+	cases := []struct {
+		proxy C.Proxy
+		want  uint16
+		why   string
+	}{
+		{both, 0, "两项能力都确认具备的节点不应被惩罚"},
+		{udpOnly, capabilityMissingPenalty, "仅缺 IPv6 应只计一份缺失惩罚"},
+		{unprobed, 2 * capabilityUnknownPenalty, "尚未探明应计轻微惩罚"},
+		{neither, 2 * capabilityMissingPenalty, "两项都缺应计两份缺失惩罚"},
+	}
+	for _, c := range cases {
+		if got := CapabilityPenalty(c.proxy, true, true); got != c.want {
+			t.Errorf("%s: CapabilityPenalty(%s) = %d, want %d", c.why, c.proxy.Name(), got, c.want)
+		}
+	}
+
+	// 惩罚必须是相对的：缺能力的快节点仍应排在具备能力的慢节点之前，
+	// 这正是「降优先级而非移出候选池」的核心区别。
+	fastMissing := AddCapabilityPenalty(100, neither, true, true)
+	slowCapable := AddCapabilityPenalty(2000, both, true, true)
+	if fastMissing >= slowCapable {
+		t.Errorf("缺能力的快节点(%d)不应输给具备能力的慢节点(%d)", fastMissing, slowCapable)
+	}
+
+	// 未开启偏好时不得有任何惩罚，也不得触发探测
+	for _, p := range []C.Proxy{both, neither, unprobed} {
+		if got := CapabilityPenalty(p, false, false); got != 0 {
+			t.Errorf("未开启偏好时 %s 的惩罚应为 0，得到 %d", p.Name(), got)
+		}
+	}
+	if got := CapabilityPenalty(nil, true, true); got != 0 {
+		t.Errorf("空节点的惩罚应为 0，得到 %d", got)
+	}
+
+	// 只开启单项偏好时只计该项
+	if got := CapabilityPenalty(udpOnly, true, false); got != 0 {
+		t.Errorf("仅要求 UDP 时具备 UDP 的节点不应被惩罚，得到 %d", got)
+	}
+	if got := CapabilityPenalty(udpOnly, false, true); got != capabilityMissingPenalty {
+		t.Errorf("仅要求 IPv6 时缺 IPv6 的节点应被惩罚 %d，得到 %d", capabilityMissingPenalty, got)
+	}
+}
+
+func TestAddCapabilityPenaltySaturates(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	no := false
+	seed("saturate", &no, &no)
+	p := stub("saturate")
+
+	// 已经不可用（0xFFFF）的节点加惩罚后不得回绕成一个很小的延迟，
+	// 否则一个死节点会因为溢出而排到最前面。
+	if got := AddCapabilityPenalty(0xFFFF, p, true, true); got != 0xFFFF {
+		t.Errorf("惩罚应饱和在 0xFFFF，得到 %d", got)
+	}
+	if got := AddCapabilityPenalty(0xFFFF-10, p, true, true); got != 0xFFFF {
+		t.Errorf("接近上限时惩罚应饱和在 0xFFFF，得到 %d", got)
+	}
+	if got := AddCapabilityPenalty(300, p, true, true); got != 300+2*capabilityMissingPenalty {
+		t.Errorf("未溢出时应正常累加，得到 %d", got)
+	}
+}
+
+func TestValidSTUNBindingSuccess(t *testing.T) {
+	txid := make([]byte, 12)
+	for i := range txid {
+		txid[i] = byte(i + 1)
+	}
+	msg := make([]byte, 20)
+	binary.BigEndian.PutUint16(msg[0:2], 0x0101)
+	binary.BigEndian.PutUint16(msg[2:4], 0)
+	binary.BigEndian.PutUint32(msg[4:8], 0x2112A442)
+	copy(msg[8:20], txid)
+	if !validSTUNBindingSuccess(msg, txid) {
+		t.Fatal("expected valid STUN success response")
+	}
+	msg[0] = 0x00
+	if validSTUNBindingSuccess(msg, txid) {
+		t.Fatal("invalid STUN type must be rejected")
+	}
+	msg[0] = 0x01
+	msg[1] = 0x01
+	msg[2] = 0
+	msg[3] = 1
+	if validSTUNBindingSuccess(msg, txid) {
+		t.Fatal("STUN length mismatch must be rejected")
+	}
+	msg[3] = 0
+	msg[19]++
+	if validSTUNBindingSuccess(msg, txid) {
+		t.Fatal("wrong STUN transaction ID must be rejected")
+	}
+}
+
+func TestCapabilityProbeSemaphoreSkipsWhenBusy(t *testing.T) {
+	for i := 0; i < cap(capabilityProbeSem); i++ {
+		capabilityProbeSem <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < cap(capabilityProbeSem); i++ {
+			<-capabilityProbeSem
+		}
+	}()
+	entry := &capabilityEntry{probing: true}
+	probeCapability(&capabilityProbeProxy{}, capabilityIPv6, entry)
+	entry.mu.Lock()
+	probing := entry.probing
+	entry.mu.Unlock()
+	if probing {
+		t.Fatal("probe skipped due to saturation must clear probing for a later retry")
+	}
+}
+
+func TestCapabilityCacheSeparatesProxyIdentity(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	yes := true
+	a := stubProxy{name: "same", type_: C.Http, provider: "one"}
+	b := stubProxy{name: "same", type_: C.Http, provider: "two"}
+	stateA := capabilityStateForProxy(a)
+	stateA.udp.mu.Lock()
+	stateA.udp.known, stateA.udp.ok, stateA.udp.expire, stateA.udp.epoch = true, yes, time.Now().Add(time.Hour), netstate.CurrentEpoch()
+	stateA.udp.mu.Unlock()
+	stateB := capabilityStateForProxy(b)
+	stateB.udp.mu.Lock()
+	known := stateB.udp.known
+	stateB.udp.mu.Unlock()
+	if known {
+		t.Fatal("same-named proxies from different providers must not share capability state")
+	}
+}
+
+func TestProxyIdentitySeparatesDelimiterCollisions(t *testing.T) {
+	a := stubProxy{name: "same", type_: C.Http, provider: "provider|segment", addr: "endpoint"}
+	b := stubProxy{name: "same", type_: C.Http, provider: "provider", addr: "segment|endpoint"}
+
+	if ProxyIdentity(a) == ProxyIdentity(b) {
+		t.Fatal("proxy identity must not collide when delimiters move between provider and address")
+	}
+}
+
+func TestIPv4CapabilityProbeDoesNotMutateHealth(t *testing.T) {
+	p := &capabilityProbeProxy{}
+	entry := &capabilityEntry{}
+	probeCapability(p, capabilityIPv4, entry)
+	if !p.statusCalled {
+		t.Fatal("IPv4 capability probe must use StatusTest")
+	}
+	if p.urlCalled {
+		t.Fatal("IPv4 capability probe must not call URLTest")
+	}
+	entry.mu.Lock()
+	ok := entry.known && entry.ok
+	entry.mu.Unlock()
+	if !ok {
+		t.Fatal("successful IPv4 status probe should cache a positive capability")
+	}
+}
+
+func TestIPFamilyRequirementsFailClosedAndWarmUp(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("family")
+	state := capabilityStateForProxy(p)
+
+	set := func(entry *capabilityEntry, known, ok, probing bool) {
+		entry.mu.Lock()
+		entry.known = known
+		entry.ok = ok
+		entry.probing = probing
+		entry.expire = time.Now().Add(time.Hour)
+		entry.epoch = netstate.CurrentEpoch()
+		entry.mu.Unlock()
+	}
+
+	// Unknown capability is rejected by an explicit require-* directive.
+	set(&state.ipv6, false, false, true)
+	if IPFamilyRequirementsMet(p, false, true, false) {
+		t.Fatal("strict require-ipv6 must reject an unknown capability")
+	}
+	// auto-ip-family warm-up may temporarily retain unknown nodes.
+	if !IPFamilyRequirementsMet(p, false, true, true) {
+		t.Fatal("warm-up policy should retain an unknown IPv6 capability")
+	}
+
+	set(&state.ipv6, true, false, false)
+	if IPFamilyRequirementsMet(p, false, true, true) {
+		t.Fatal("confirmed missing IPv6 must be rejected even during warm-up")
+	}
+
+	set(&state.ipv6, true, true, false)
+	if !IPFamilyRequirementsMet(p, false, true, false) {
+		t.Fatal("confirmed IPv6 capability must satisfy require-ipv6")
+	}
+
+	set(&state.ipv4, true, false, false)
+	if IPFamilyRequirementsMet(p, true, true, false) {
+		t.Fatal("dual-stack requirement must reject a proxy missing IPv4")
+	}
+	set(&state.ipv4, true, true, false)
+	if !IPFamilyRequirementsMet(p, true, true, false) {
+		t.Fatal("dual-stack requirement must accept a proxy with both families")
+	}
+}
+
+func TestIPv4PreferencePenalty(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("v4-preference")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = false
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.mu.Unlock()
+
+	if got := CapabilityPenaltyExtended(p, false, true, false); got != capabilityMissingPenalty {
+		t.Fatalf("missing IPv4 penalty = %d, want %d", got, capabilityMissingPenalty)
+	}
+}
+
+func TestExitIdentityRejectsPreviousEpochEvidence(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("stale-egress")
+	state := capabilityStateForProxy(p)
+
+	oldEpoch := netstate.CurrentEpoch()
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("203.0.113.9")
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = oldEpoch
+	state.ipv4.probing = true // prevent the test from launching real network I/O
+	state.ipv4.mu.Unlock()
+
+	netstate.Advance()
+	defer netstate.Advance()
+
+	if known, country := ExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("previous-epoch country leaked as current: (%v,%q)", known, country)
+	}
+	if known, ip := ExitIPForProxy(p, false); known || ip.IsValid() {
+		t.Fatalf("previous-epoch IP leaked as current: (%v,%v)", known, ip)
+	}
+}
+
+func TestExitIdentityRejectsExpiredEvidence(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("expired-egress")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("198.51.100.7")
+	state.ipv4.country = "US"
+	state.ipv4.expire = time.Now().Add(-time.Second)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.probing = true // suppress active refresh inside this unit test
+	state.ipv4.mu.Unlock()
+
+	if known, country := ExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("expired country leaked as fresh: (%v,%q)", known, country)
+	}
+	if known, ip := ExitIPForProxy(p, false); known || ip.IsValid() {
+		t.Fatalf("expired IP leaked as fresh: (%v,%v)", known, ip)
+	}
+}
+
+func TestExitCountryUsesCachedFamilyTelemetry(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("country")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.mu.Unlock()
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = true
+	state.ipv6.country = "US"
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.epoch = netstate.CurrentEpoch()
+	state.ipv6.mu.Unlock()
+
+	if known, country := ExitCountryForProxy(p, false); !known || country != "JP" {
+		t.Fatalf("IPv4 country = (%v, %q), want (true, JP)", known, country)
+	}
+	if known, country := ExitCountryForProxy(p, true); !known || country != "US" {
+		t.Fatalf("IPv6 country = (%v, %q), want (true, US)", known, country)
+	}
+}
+
+func TestIPFamilyProbeNeedsTwoFailuresToDemote(t *testing.T) {
+	entry := &capabilityEntry{
+		known:  true,
+		ok:     true,
+		expire: time.Now().Add(time.Hour),
+	}
+	p := &capabilityProbeProxy{fail: true}
+
+	probeCapability(p, capabilityIPv6, entry)
+	entry.mu.Lock()
+	firstKnown, firstOK, firstFailures := entry.known, entry.ok, entry.failures
+	entry.mu.Unlock()
+	if !firstKnown || !firstOK || firstFailures != 1 {
+		t.Fatalf("first transient failure = known:%v ok:%v failures:%d, want true/true/1",
+			firstKnown, firstOK, firstFailures)
+	}
+
+	probeCapability(p, capabilityIPv6, entry)
+	entry.mu.Lock()
+	secondKnown, secondOK, secondFailures := entry.known, entry.ok, entry.failures
+	entry.mu.Unlock()
+	if !secondKnown || secondOK || secondFailures != 2 {
+		t.Fatalf("second consecutive failure = known:%v ok:%v failures:%d, want true/false/2",
+			secondKnown, secondOK, secondFailures)
+	}
+}
+
+func TestFirstFamilyProbeFailureStaysUnknown(t *testing.T) {
+	entry := &capabilityEntry{}
+	probeCapability(&capabilityProbeProxy{fail: true}, capabilityIPv4, entry)
+	entry.mu.Lock()
+	known, failures := entry.known, entry.failures
+	entry.mu.Unlock()
+	if known || failures != 1 {
+		t.Fatalf("first family failure = known:%v failures:%d, want false/1", known, failures)
+	}
+}
+
+func TestExitCountryMissingMMDBIsNonFatal(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+
+	oldHome := C.Path.HomeDir()
+	C.SetHomeDir(t.TempDir())
+	defer C.SetHomeDir(oldHome)
+
+	p := stub("country-missing-mmdb")
+	state := capabilityStateForProxy(p)
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.exitIP = netip.MustParseAddr("1.1.1.1")
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.mu.Unlock()
+
+	known, country := ExitCountryForProxy(p, false)
+	if known || country != "" {
+		t.Fatalf("missing MMDB country lookup = (%v, %q), want (false, empty)", known, country)
+	}
+
+	state.ipv4.mu.Lock()
+	stillHealthy := state.ipv4.known && state.ipv4.ok
+	state.ipv4.mu.Unlock()
+	if !stillHealthy {
+		t.Fatal("missing country database must not demote the proxy's IPv4 capability")
+	}
+}
+
+func TestIPFamilyProbeFallsBackToSecondEndpoint(t *testing.T) {
+	p := &capabilityProbeProxy{failFirst: true}
+	entry := &capabilityEntry{}
+	probeCapability(p, capabilityIPv6, entry)
+
+	entry.mu.Lock()
+	known, ok := entry.known, entry.ok
+	entry.mu.Unlock()
+
+	if !known || !ok {
+		t.Fatalf("fallback endpoint did not recover capability: known=%v ok=%v", known, ok)
+	}
+	if p.statusCalls != 2 {
+		t.Fatalf("status calls=%d, want 2 (primary failure + fallback success)", p.statusCalls)
+	}
+}
+
+func TestAutoIPFamilyPenaltyStronglyDemotesConfirmedMismatch(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("auto-family-mismatch")
+	state := capabilityStateForProxy(p)
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = false
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.epoch = netstate.CurrentEpoch()
+	state.ipv6.mu.Unlock()
+
+	got := AddAutoIPFamilyPenalty(80, p, true)
+	if got != 80+autoFamilyMissingPenalty {
+		t.Fatalf("confirmed IPv6 mismatch delay=%d, want %d", got, 80+autoFamilyMissingPenalty)
+	}
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = false
+	state.ipv6.probing = true
+	state.ipv6.expire = time.Time{}
+	state.ipv6.mu.Unlock()
+
+	got = AddAutoIPFamilyPenalty(80, p, true)
+	if got != 80+autoFamilyUnknownPenalty {
+		t.Fatalf("unknown IPv6 delay=%d, want %d", got, 80+autoFamilyUnknownPenalty)
+	}
+}
+
+
+func TestCachedExitCountryIsProbeFree(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("cached-country")
+	state := capabilityStateForProxy(p)
+
+	if known, country := CachedExitCountryForProxy(p, false); known || country != "" {
+		t.Fatalf("empty cached country = (%v, %q), want unknown", known, country)
+	}
+	state.ipv4.mu.Lock()
+	probing := state.ipv4.probing
+	state.ipv4.mu.Unlock()
+	if probing {
+		t.Fatal("cached country lookup must not schedule an active probe")
+	}
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.country = "JP"
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.mu.Unlock()
+
+	if known, country := CachedExitCountryForProxy(p, false); !known || country != "JP" {
+		t.Fatalf("fresh cached country = (%v, %q), want (true, JP)", known, country)
+	}
+}
+
+
+func TestCachedIPFamilyCapabilityKnownNeverStartsProbe(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool {
+		capabilityCache.Delete(k)
+		return true
+	})
+	p := stub("cached-family-passive")
+	state := capabilityStateForProxy(p)
+
+	known, ok := CachedIPFamilyCapabilityKnown(p, false)
+	if known || ok {
+		t.Fatalf("unknown cache returned known=%v ok=%v", known, ok)
+	}
+	state.ipv4.mu.Lock()
+	probing := state.ipv4.probing
+	state.ipv4.mu.Unlock()
+	if probing {
+		t.Fatal("probe-free cached family lookup started active probing")
+	}
+
+	state.ipv4.mu.Lock()
+	state.ipv4.known = true
+	state.ipv4.ok = true
+	state.ipv4.epoch = netstate.CurrentEpoch()
+	state.ipv4.expire = time.Now().Add(time.Hour)
+	state.ipv4.mu.Unlock()
+
+	known, ok = CachedIPFamilyCapabilityKnown(p, false)
+	if !known || !ok {
+		t.Fatalf("fresh positive cache returned known=%v ok=%v", known, ok)
+	}
+}
+
+func TestCachedIPFamilyCapabilityKnownRejectsPreviousEpoch(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool {
+		capabilityCache.Delete(k)
+		return true
+	})
+	p := stub("cached-family-epoch")
+	state := capabilityStateForProxy(p)
+	oldEpoch := netstate.CurrentEpoch()
+
+	state.ipv6.mu.Lock()
+	state.ipv6.known = true
+	state.ipv6.ok = false
+	state.ipv6.epoch = oldEpoch
+	state.ipv6.expire = time.Now().Add(time.Hour)
+	state.ipv6.mu.Unlock()
+
+	netstate.Advance()
+	known, _ := CachedIPFamilyCapabilityKnown(p, true)
+	if known {
+		t.Fatal("previous-network family verdict must not survive the epoch transition")
+	}
+}
+
+
+func TestCapabilityOnlySuccessClearsOldEgressIdentity(t *testing.T) {
+	p := &capabilityProbeProxy{}
+	entry := &capabilityEntry{
+		known:   true,
+		ok:      true,
+		exitIP:  netip.MustParseAddr("203.0.113.10"),
+		country: "US",
+		asn:     "AS64500",
+		asnOrg:  "old",
+	}
+	probeCapability(p, capabilityIPv4, entry)
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.known || !entry.ok {
+		t.Fatal("capability-only success should still prove IPv4 availability")
+	}
+	if entry.exitIP.IsValid() || entry.country != "" || entry.asn != "" || entry.asnOrg != "" {
+		t.Fatalf("old identity survived capability-only success: ip=%v country=%q asn=%q org=%q",
+			entry.exitIP, entry.country, entry.asn, entry.asnOrg)
+	}
+}
+
+func TestTransientFamilyFailureKeepsCapabilityButClearsIdentity(t *testing.T) {
+	p := &capabilityProbeProxy{fail: true}
+	entry := &capabilityEntry{
+		known:   true,
+		ok:      true,
+		exitIP:  netip.MustParseAddr("198.51.100.8"),
+		country: "JP",
+		asn:     "AS64501",
+		asnOrg:  "old",
+	}
+	probeCapability(p, capabilityIPv4, entry)
+
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.known || !entry.ok {
+		t.Fatal("first family failure should preserve the previous availability verdict")
+	}
+	if entry.exitIP.IsValid() || entry.country != "" || entry.asn != "" || entry.asnOrg != "" {
+		t.Fatalf("failed fresh probe must invalidate egress identity: ip=%v country=%q asn=%q org=%q",
+			entry.exitIP, entry.country, entry.asn, entry.asnOrg)
+	}
+}
+
+
+func TestObserveProxyPathSuccessPreservesInflightProbe(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("real-flow-proof")
+	state := capabilityStateForProxy(p)
+
+	state.ipv4.mu.Lock()
+	state.ipv4.probing = true
+	state.ipv4.mu.Unlock()
+
+	ObserveProxyPathSuccess(p, false, true, false, false)
+
+	state.ipv4.mu.Lock()
+	known, ok := state.ipv4.known, state.ipv4.ok
+	probing := state.ipv4.probing
+	epoch := state.ipv4.epoch
+	expire := state.ipv4.expire
+	state.ipv4.mu.Unlock()
+
+	if !known || !ok {
+		t.Fatal("real successful flow must mark the address family available")
+	}
+	if !probing {
+		t.Fatal("real-flow proof must not steal ownership from an in-flight probe")
+	}
+	if epoch != netstate.CurrentEpoch() || !expire.After(time.Now()) {
+		t.Fatal("real-flow proof did not refresh current-epoch capability TTL")
+	}
+}
+
+func TestObserveProxyPathSuccessAvoidsSyntheticProbeByDefault(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("passive-proof")
+	state := capabilityStateForProxy(p)
+
+	ObserveProxyPathSuccess(p, true, true, true, false)
+
+	state.ipv6.mu.Lock()
+	familyKnown, familyOK, familyProbing := state.ipv6.known, state.ipv6.ok, state.ipv6.probing
+	state.ipv6.mu.Unlock()
+	state.udp.mu.Lock()
+	udpKnown, udpOK, udpProbing := state.udp.known, state.udp.ok, state.udp.probing
+	state.udp.mu.Unlock()
+
+	if !familyKnown || !familyOK || !udpKnown || !udpOK {
+		t.Fatal("real flow should prove family and UDP capability")
+	}
+	if familyProbing || udpProbing {
+		t.Fatal("ordinary successful flow must not schedule redundant synthetic probes")
+	}
+}
+
+
+func TestCachedCapabilitySnapshotMatchesLegacyViews(t *testing.T) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("snapshot-view")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+	expire := time.Now().Add(time.Hour)
+
+	state.udp.mu.Lock()
+	state.udp.known, state.udp.ok, state.udp.epoch, state.udp.expire = true, true, epoch, expire
+	state.udp.mu.Unlock()
+	state.ipv4.mu.Lock()
+	state.ipv4.known, state.ipv4.ok, state.ipv4.epoch, state.ipv4.expire = true, true, epoch, expire
+	state.ipv4.country = "US"
+	state.ipv4.mu.Unlock()
+	state.ipv6.mu.Lock()
+	state.ipv6.known, state.ipv6.ok, state.ipv6.epoch, state.ipv6.expire = true, false, epoch, expire
+	state.ipv6.mu.Unlock()
+
+	snapshot := CachedCapabilitySnapshotForProxy(p)
+	if !snapshot.UDPKnown || !snapshot.UDPAvailable {
+		t.Fatal("snapshot lost UDP capability")
+	}
+	if !snapshot.IPv4Known || !snapshot.IPv4Available || snapshot.IPv4Country != "US" {
+		t.Fatalf("snapshot IPv4=%+v", snapshot)
+	}
+	if !snapshot.IPv6Known || snapshot.IPv6Available || snapshot.IPv6Country != "" {
+		t.Fatalf("snapshot IPv6=%+v", snapshot)
+	}
+
+	legacy := AddCapabilityPenaltyExtended(100, p, true, true, true)
+	fromSnapshot := AddCapabilityPenaltyFromSnapshot(100, snapshot, true, true, true)
+	if legacy != fromSnapshot {
+		t.Fatalf("penalty mismatch legacy=%d snapshot=%d", legacy, fromSnapshot)
+	}
+	if got := AddAutoIPFamilyPenaltyFromSnapshot(100, snapshot, true); got != AddAutoIPFamilyPenalty(100, p, true) {
+		t.Fatalf("auto-family penalty mismatch: %d", got)
+	}
+}
+
+func BenchmarkCapabilitySnapshotReuse(b *testing.B) {
+	capabilityCache.Range(func(k, _ any) bool { capabilityCache.Delete(k); return true })
+	p := stub("snapshot-bench")
+	state := capabilityStateForProxy(p)
+	epoch := netstate.CurrentEpoch()
+	expire := time.Now().Add(time.Hour)
+
+	state.udp.mu.Lock()
+	state.udp.known, state.udp.ok, state.udp.epoch, state.udp.expire = true, true, epoch, expire
+	state.udp.mu.Unlock()
+	for _, entry := range []*capabilityEntry{&state.ipv4, &state.ipv6} {
+		entry.mu.Lock()
+		entry.known, entry.ok, entry.epoch, entry.expire = true, true, epoch, expire
+		entry.country = "US"
+		entry.mu.Unlock()
+	}
+
+	b.Run("legacy-multi-read", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink uint16
+		for i := 0; i < b.N; i++ {
+			delay := AddCapabilityPenaltyExtended(100, p, true, true, true)
+			delay = AddAutoIPFamilyPenalty(delay, p, false)
+			_, _ = CachedExitCountryForProxy(p, false)
+			_, _ = CachedExitCountryForProxy(p, true)
+			sink = delay
+		}
+		_ = sink
+	})
+
+	b.Run("single-snapshot", func(b *testing.B) {
+		b.ReportAllocs()
+		var sink uint16
+		for i := 0; i < b.N; i++ {
+			snapshot := CachedCapabilitySnapshotForProxy(p)
+			delay := AddCapabilityPenaltyFromSnapshot(100, snapshot, true, true, true)
+			delay = AddAutoIPFamilyPenaltyFromSnapshot(delay, snapshot, false)
+			_ = snapshot.IPv4Country
+			_ = snapshot.IPv6Country
+			sink = delay
+		}
+		_ = sink
+	})
+}

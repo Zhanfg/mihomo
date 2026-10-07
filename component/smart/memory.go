@@ -1,0 +1,423 @@
+package smart
+
+import (
+	"encoding/json"
+	"math"
+	"runtime"
+	"sync"
+	stdatomic "sync/atomic"
+	"time"
+
+	"github.com/metacubex/mihomo/common/lru"
+	"github.com/metacubex/mihomo/common/xsync"
+	C "github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/log"
+)
+
+var (
+	// cacheReady is the lifecycle contract for hot paths that want to reuse
+	// resident AtomicStatsRecord entries. A non-nil pointer alone is not a
+	// sufficient readiness signal in tests/tools that can construct globals
+	// outside InitCache.
+	cacheReady stdatomic.Bool
+
+	targetCache *lru.LruCache[string, string]
+
+	unwrapCache *lru.LruCache[string, UnwrapMap]
+
+	recordCache *lru.LruCache[string, *AtomicStatsRecord]
+
+	dbResultCache *lru.LruCache[string, map[string][]byte]
+
+	blockedNodesCache *lru.LruCache[string, map[string]bool]
+
+	hostStatusCache *lru.LruCache[string, *HostStatus]
+)
+
+var (
+	dbResultRefreshFlags     xsync.Map[string, bool]
+	blockedNodesRefreshFlags xsync.Map[string, bool]
+	cacheAdjustMutex         sync.Mutex
+)
+
+type (
+	UnwrapMap struct {
+		Proxies []string `json:"proxies,omitempty"`
+		Ref     string   `json:"ref,omitempty"`
+		Country string   `json:"country,omitempty"`
+		Epoch   uint64   `json:"epoch,omitempty"`
+	}
+
+	NodesWithWeights struct {
+		Nodes   []string  `json:"nodes"`
+		Weights []float64 `json:"weights"`
+	}
+
+	NodeWithWeight struct {
+		Node   string
+		Weight float64
+	}
+
+	PrefetchMap struct {
+		TCP         NodesWithWeights `json:"tcp,omitempty"`
+		UDP         NodesWithWeights `json:"udp,omitempty"`
+		UpdatedTime int64            `json:"updated_time,omitempty"`
+		Epoch       uint64           `json:"epoch,omitempty"`
+	}
+)
+
+func InitCache() {
+	globalCacheParams.mutex.Lock()
+	defer globalCacheParams.mutex.Unlock()
+
+	if unwrapCache != nil {
+		return
+	}
+
+	globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit
+	globalCacheParams.MaxTargets = MinTargetsLimit
+
+	targetCache = lru.New[string, string](
+		lru.WithSize[string, string](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, string](300),
+		lru.WithStale[string, string](true),
+	)
+
+	unwrapCache = lru.New[string, UnwrapMap](
+		lru.WithSize[string, UnwrapMap](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, UnwrapMap](600),
+		lru.WithStale[string, UnwrapMap](true),
+	)
+
+	recordCache = lru.New[string, *AtomicStatsRecord](
+		lru.WithSize[string, *AtomicStatsRecord](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, *AtomicStatsRecord](300),
+		lru.WithStale[string, *AtomicStatsRecord](true),
+	)
+
+	dbResultCache = lru.New[string, map[string][]byte](
+		lru.WithSize[string, map[string][]byte](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, map[string][]byte](300),
+		lru.WithStale[string, map[string][]byte](true),
+	)
+
+	blockedNodesCache = lru.New[string, map[string]bool](
+		lru.WithSize[string, map[string]bool](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, map[string]bool](300),
+		lru.WithStale[string, map[string]bool](true),
+	)
+
+	hostStatusCache = lru.New[string, *HostStatus](
+		lru.WithSize[string, *HostStatus](globalCacheParams.MaxTargets/3),
+		lru.WithAge[string, *HostStatus](300),
+		lru.WithStale[string, *HostStatus](true),
+	)
+	cacheReady.Store(true)
+}
+
+// 存储预取结果
+func (s *Store) StorePrefetchResult(group, config string, target string, isUDP bool, proxyNames []string, weights []float64) {
+	if target == "" || len(proxyNames) == 0 {
+		return
+	}
+
+	var pm PrefetchMap
+	nodeWeight := NodesWithWeights{Nodes: proxyNames, Weights: weights}
+
+	if isUDP {
+		pm.UDP = nodeWeight
+	} else {
+		pm.TCP = nodeWeight
+	}
+	pm.UpdatedTime = time.Now().Unix()
+	pm.Epoch = currentRouteEpoch()
+
+	data, err := json.Marshal(pm)
+	if err != nil {
+		return
+	}
+
+	s.AppendToGlobalQueue(StoreOperation{
+		Type:   OpSavePrefetch,
+		Group:  group,
+		Config: config,
+		Target: target,
+		Data:   data,
+	})
+}
+
+// 获取预取结果
+func (s *Store) GetPrefetchResult(group, config string, target string, isUDP bool) ([]string, []float64) {
+	if target == "" {
+		return nil, nil
+	}
+
+	loadPM := func(pathPrefix string) (PrefetchMap, bool) {
+		rawResult, err := s.GetSubBytesByPath(pathPrefix)
+		if err != nil {
+			return PrefetchMap{}, false
+		}
+		for _, data := range rawResult {
+			var pm PrefetchMap
+			if json.Unmarshal(data, &pm) == nil {
+				return pm, true
+			}
+		}
+		return PrefetchMap{}, false
+	}
+
+	pick := func(pm PrefetchMap) ([]string, []float64) {
+		if !routeEvidenceCurrent(pm.Epoch) {
+			return nil, nil
+		}
+		var res NodesWithWeights
+		if isUDP {
+			res = pm.UDP
+		} else {
+			res = pm.TCP
+		}
+		if len(res.Nodes) > 0 && len(res.Weights) == len(res.Nodes) {
+			return res.Nodes, res.Weights
+		}
+		return nil, nil
+	}
+
+	if pm, ok := loadPM(FormatDBKey(KeyTypePrefetch, config, group, target)); ok {
+		if nodes, weights := pick(pm); nodes != nil {
+			return nodes, weights
+		}
+	}
+
+	return nil, nil
+}
+
+func (s *Store) StoreUnwrapResult(group, config string, target string, proxies []C.Proxy) {
+	s.StoreUnwrapResultWithCountry(group, config, target, proxies, "")
+}
+
+// StoreUnwrapResultWithCountry keeps the winning node and, when available, the
+// two-letter exit country observed for this Smart target. Reusing the existing
+// unwrap LRU avoids a second per-target map: country affinity costs one tiny
+// string per already-cached target and expires with the same 10-minute pin.
+func (s *Store) StoreUnwrapResultWithCountry(group, config string, target string, proxies []C.Proxy, country string) {
+	if target == "" || len(proxies) == 0 {
+		return
+	}
+
+	names := make([]string, len(proxies))
+	for i, p := range proxies {
+		names[i] = p.Name()
+	}
+
+	targetKey := FormatDBKey(config, group, target)
+	existing, expireTime, found := unwrapCache.GetWithExpire(targetKey)
+	if found && routeEvidenceCurrent(existing.Epoch) && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
+		// Do not rewrite a live winner merely to add metadata. If the caller is
+		// refreshing the same winner, enrich the cached entry in place.
+		if len(names) == len(existing.Proxies) {
+			same := true
+			for i := range names {
+				if names[i] != existing.Proxies[i] {
+					same = false
+					break
+				}
+			}
+			if same && country != "" && existing.Country != country {
+				existing.Country = country
+				existing.Epoch = currentRouteEpoch()
+				unwrapCache.Set(targetKey, existing)
+			}
+		}
+		return
+	}
+	unwrapCache.Set(targetKey, UnwrapMap{Proxies: names, Country: country, Epoch: currentRouteEpoch()})
+}
+
+func (s *Store) GetUnwrapAffinity(group, config, target string) (proxies []string, country string, expired bool) {
+	if target == "" {
+		return nil, "", false
+	}
+
+	targetKey := FormatDBKey(config, group, target)
+	if value, expireTime, found := unwrapCache.GetWithExpire(targetKey); found {
+		if !routeEvidenceCurrent(value.Epoch) {
+			unwrapCache.Delete(targetKey)
+			return nil, "", true
+		}
+		if len(value.Proxies) > 0 {
+			return value.Proxies, value.Country, expireTime.Before(time.Now())
+		}
+	}
+
+	return nil, "", false
+}
+
+func (s *Store) GetUnwrapResult(group, config, target string) (proxies []string, expired bool) {
+	proxies, _, expired = s.GetUnwrapAffinity(group, config, target)
+	return proxies, expired
+}
+
+func (s *Store) DeleteUnwrapResult(group, config string, target string) {
+	if target == "" {
+		return
+	}
+
+	unwrapCache.Delete(FormatDBKey(config, group, target))
+}
+
+func (s *Store) UpdateBlockedNodesCache(group, config string, updates map[string]*NodeState) {
+	cacheKey := FormatDBKey(config, group)
+	blocked, _, _ := blockedNodesCache.GetWithExpire(cacheKey)
+
+	newBlocked := make(map[string]bool, len(blocked)+len(updates))
+	for k, v := range blocked {
+		newBlocked[k] = v
+	}
+
+	now := time.Now().Unix()
+
+	for node, state := range updates {
+		if state == nil {
+			continue
+		}
+		if state.BlockedUntil > 0 && state.BlockedUntil > now {
+			newBlocked[node] = true
+		} else {
+			delete(newBlocked, node)
+		}
+	}
+
+	blockedNodesCache.Set(cacheKey, newBlocked)
+}
+
+const (
+	androidCacheSoftHeap   = 96 << 20
+	androidCacheHighHeap   = 160 << 20
+	androidCacheMaxHeap    = 224 << 20
+	androidCacheMaxTargets = 2000
+)
+
+// smartCacheTargetLimit keeps the learning caches proportional to both system
+// pressure and the core's own live heap. Android phones can have huge physical
+// RAM, so system percentage alone lets a long-running Smart database grow far
+// beyond what one proxy process needs. This cap changes only cache residency;
+// persisted learning records stay in bbolt and are reloaded on demand.
+func smartCacheTargetLimit(memoryUsage float64, heapAlloc uint64, android bool) int {
+	limit := MinTargetsLimit
+	if memoryUsage <= 0.9 {
+		adjustFactor := (1 - memoryUsage) * 0.5
+		limit += int(float64(MaxTargetsLimit-MinTargetsLimit) * adjustFactor)
+	}
+	if !android {
+		return limit
+	}
+	if limit > androidCacheMaxTargets {
+		limit = androidCacheMaxTargets
+	}
+	switch {
+	case heapAlloc >= androidCacheMaxHeap:
+		return MinTargetsLimit
+	case heapAlloc >= androidCacheHighHeap:
+		if limit > 750 {
+			return 750
+		}
+	case heapAlloc >= androidCacheSoftHeap:
+		if limit > 1200 {
+			return 1200
+		}
+	}
+	return limit
+}
+
+// 调整缓存参数
+func (s *Store) AdjustCacheParameters() {
+	cacheAdjustMutex.Lock()
+	defer cacheAdjustMutex.Unlock()
+
+	memoryUsage := GetSystemMemoryUsage()
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+	maxTargets := smartCacheTargetLimit(memoryUsage, mem.HeapAlloc, runtime.GOOS == "android")
+
+	globalCacheParams.mutex.Lock()
+
+	isFirstRun := globalCacheParams.LastMemoryUsage == 0
+	oldTargets := globalCacheParams.MaxTargets
+	needAdjust := isFirstRun || oldTargets != maxTargets
+	if !isFirstRun && !needAdjust {
+		memoryChanged := math.Abs(memoryUsage-globalCacheParams.LastMemoryUsage) > 0.05
+		needAdjust = memoryChanged
+	}
+
+	globalCacheParams.LastMemoryUsage = memoryUsage
+
+	if !needAdjust && !isFirstRun {
+		globalCacheParams.mutex.Unlock()
+		return
+	}
+
+	globalCacheParams.MaxTargets = maxTargets
+	// Smaller resident sets also need smaller write batches so dirty records do
+	// not sit in RAM waiting for a desktop-sized threshold.
+	ratio := float64(maxTargets-MinTargetsLimit) / float64(MaxTargetsLimit-MinTargetsLimit)
+	if ratio < 0 {
+		ratio = 0
+	}
+	if ratio > 1 {
+		ratio = 1
+	}
+	globalCacheParams.BatchSaveThreshold = MinBatchThreshLimit +
+		int(float64(MaxBatchThreshLimit-MinBatchThreshLimit)*ratio)
+	batchSaveThreshold := globalCacheParams.BatchSaveThreshold
+	globalCacheParams.mutex.Unlock()
+
+	log.Debugln("[SmartStore] Cache budget adjusted: MaxTargets=%d, BatchThreshold=%d, Heap=%d MiB",
+		maxTargets,
+		batchSaveThreshold,
+		mem.HeapAlloc>>20)
+
+	cacheSize := maxTargets / 4
+	targetCache.Resize(cacheSize)
+	unwrapCache.Resize(cacheSize)
+	recordCache.Resize(cacheSize)
+	dbResultCache.Resize(cacheSize)
+	blockedNodesCache.Resize(cacheSize)
+	hostStatusCache.Resize(cacheSize)
+	go s.FlushQueue(true)
+}
+
+// 按级别清理内存缓存
+func (s *Store) clearCache(level string, config string, group string) {
+	s.FlushQueue(true)
+
+	if level == "all" {
+		targetCache.Clear()
+		unwrapCache.Clear()
+		recordCache.Clear()
+		dbResultCache.Clear()
+		blockedNodesCache.Clear()
+		hostStatusCache.Clear()
+		return
+	}
+
+	targetCache.Clear()
+
+	if level == "config" {
+		unwrapCache.RemoveByKeyPrefix(FormatDBKey(config) + "/")
+		recordCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeStats, config) + "/")
+		for _, kt := range []string{KeyTypeStats, KeyTypeNode, KeyTypePrefetch, KeyTypeRanking, KeyTypeHostFailures} {
+			dbResultCache.RemoveByKeyPrefix(FormatDBKey(kt, config) + "/")
+		}
+		blockedNodesCache.RemoveByKeyPrefix(FormatDBKey(config) + "/")
+		hostStatusCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeHostFailures, config) + "/")
+	} else if level == "group" {
+		groupKey := FormatDBKey(config, group) // "smart/{config}/{group}"
+		unwrapCache.RemoveByKeyPrefix(groupKey + "/")
+		recordCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeStats, config, group) + "/")
+		for _, kt := range []string{KeyTypeStats, KeyTypeNode, KeyTypePrefetch, KeyTypeRanking, KeyTypeHostFailures} {
+			dbResultCache.Delete(FormatDBKey(kt, config, group))
+		}
+		blockedNodesCache.Delete(groupKey)
+		hostStatusCache.RemoveByKeyPrefix(FormatDBKey(KeyTypeHostFailures, config, group) + "/")
+	}
+}

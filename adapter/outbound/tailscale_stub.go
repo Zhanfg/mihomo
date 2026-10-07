@@ -1,0 +1,31 @@
+//go:build !with_gvisor || no_tailscale
+
+package outbound
+
+import "fmt"
+
+type Tailscale struct {
+	*Base
+}
+
+type TailscaleOption struct {
+	BasicOption
+	Name       string `proxy:"name"`
+	Hostname   string `proxy:"hostname,omitempty"`
+	ListenPort uint16 `proxy:"listen-port,omitempty"`
+	AuthKey    string `proxy:"auth-key,omitempty"`
+	ControlURL string `proxy:"control-url,omitempty"`
+	StateDir   string `proxy:"state-dir,omitempty"`
+	Ephemeral  bool   `proxy:"ephemeral,omitempty"`
+	UDP        bool   `proxy:"udp,omitempty"`
+
+	AcceptRoutes           *bool    `proxy:"accept-routes,omitempty"`
+	ExitNode               string   `proxy:"exit-node,omitempty"`
+	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
+	AdvertiseRoutes        []string `proxy:"advertise-routes,omitempty"`
+	AdvertiseExitNode      bool     `proxy:"advertise-exit-node,omitempty"`
+}
+
+func NewTailscale(option TailscaleOption) (*Tailscale, error) {
+	return nil, fmt.Errorf("tailscale support is disabled by \"no_tailscale\" build tag or not include \"with_gvisor\" build tag")
+}

@@ -1,0 +1,447 @@
+package statistic
+
+import (
+	"io"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/metacubex/mihomo/common/atomic"
+	"github.com/metacubex/mihomo/common/buf"
+	N "github.com/metacubex/mihomo/common/net"
+	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/health"
+	"github.com/metacubex/mihomo/component/netstate"
+	C "github.com/metacubex/mihomo/constant"
+
+	"github.com/gofrs/uuid/v5"
+)
+
+type Tracker interface {
+	ID() string
+	Close() error
+	Info() *TrackerInfo
+	C.Connection
+}
+
+type timeBucket struct {
+	startMs int64
+	bytes   int64
+}
+
+type bucketWindow struct {
+	buckets    []timeBucket
+	interval   int64
+	windowMs   int64
+	mu         sync.Mutex
+	lastSlot   int64
+	cachedRate atomic.Int64
+}
+
+type TrackerInfo struct {
+	UUID            uuid.UUID    `json:"id"`
+	Metadata        *C.Metadata  `json:"metadata"`
+	UploadTotal     atomic.Int64 `json:"upload"`
+	DownloadTotal   atomic.Int64 `json:"download"`
+	Start           time.Time    `json:"start"`
+	Chain           C.Chain      `json:"chains"`
+	ProviderChain   C.Chain      `json:"providerChains"`
+	Rule            string       `json:"rule"`
+	RulePayload     string       `json:"rulePayload"`
+	MaxUploadRate   atomic.Int64 `json:"maxUploadRate"`
+	MaxDownloadRate atomic.Int64 `json:"maxDownloadRate"`
+	NetworkEpoch    uint64       `json:"networkEpoch,omitempty"`
+
+	// When payload last moved each way, in Unix nanoseconds; zero if it never
+	// has. Kept out of the API: they exist for AwaitingReply.
+	LastUpload   atomic.Int64 `json:"-"`
+	LastDownload atomic.Int64 `json:"-"`
+}
+
+// AwaitingReply reports whether the last payload on the connection went out and
+// nothing has come back for at least d -- the one shape a connection stuck on a
+// dead relay has that a working one does not.
+//
+// Silence alone is not that shape. A connection whose last exchange was an
+// answer is idle, not stuck, and so is one that has carried nothing. Neither is
+// a connection still sending: a write through a dead relay blocks once the send
+// buffer fills, so writes that keep completing are still being carried, even
+// through an upload the far end will only answer at the end.
+func (t *TrackerInfo) AwaitingReply(now time.Time, d time.Duration) bool {
+	sent := t.LastUpload.Load()
+	if sent == 0 || t.LastDownload.Load() >= sent {
+		return false
+	}
+	return now.UnixNano()-sent >= int64(d)
+}
+
+func noteTraffic(stamp *atomic.Int64, n int64) {
+	if n > 0 {
+		stamp.Store(time.Now().UnixNano())
+	}
+}
+
+// stampInitialTraffic dates bytes counted before tracking began to when it
+// began, which is when they moved to within a dial.
+func (t *TrackerInfo) stampInitialTraffic(uploadTotal, downloadTotal int64) {
+	if uploadTotal > 0 {
+		t.LastUpload.Store(t.Start.UnixNano())
+	}
+	if downloadTotal > 0 {
+		t.LastDownload.Store(t.Start.UnixNano())
+	}
+}
+
+// stallWindow bounds how quickly a payload-less connection must close to
+// count as a stall rather than an idle keep-alive.
+const stallWindow = 8 * time.Second
+
+type tcpTracker struct {
+	C.Conn `json:"-"`
+	*TrackerInfo
+	manager *Manager
+
+	pushToManager bool `json:"-"`
+	initialUpload int64
+	closeOnce     sync.Once
+	closeErr      error
+
+	uploadBucketWindow   *bucketWindow
+	downloadBucketWindow *bucketWindow
+}
+
+func (tt *tcpTracker) ID() string {
+	return tt.UUID.String()
+}
+
+func (tt *tcpTracker) Info() *TrackerInfo {
+	return tt.TrackerInfo
+}
+
+func (tt *tcpTracker) Read(b []byte) (int, error) {
+	n, err := tt.Conn.Read(b)
+	download := int64(n)
+	if tt.pushToManager {
+		tt.manager.PushDownloaded(download)
+	}
+	tt.DownloadTotal.Add(download)
+	noteTraffic(&tt.LastDownload, download)
+	tt.TrackerInfo.MaxDownloadRate.Store(tt.downloadBucketWindow.updateMaxRate(download))
+	return n, err
+}
+
+func (tt *tcpTracker) ReadBuffer(buffer *buf.Buffer) (err error) {
+	err = tt.Conn.ReadBuffer(buffer)
+	download := int64(buffer.Len())
+	if tt.pushToManager {
+		tt.manager.PushDownloaded(download)
+	}
+	tt.DownloadTotal.Add(download)
+	noteTraffic(&tt.LastDownload, download)
+	tt.TrackerInfo.MaxDownloadRate.Store(tt.downloadBucketWindow.updateMaxRate(download))
+	return
+}
+
+func (tt *tcpTracker) UnwrapReader() (io.Reader, []N.CountFunc) {
+	return tt.Conn, []N.CountFunc{func(download int64) {
+		if tt.pushToManager {
+			tt.manager.PushDownloaded(download)
+		}
+		tt.DownloadTotal.Add(download)
+		noteTraffic(&tt.LastDownload, download)
+		tt.TrackerInfo.MaxDownloadRate.Store(tt.downloadBucketWindow.updateMaxRate(download))
+	}}
+}
+
+func (tt *tcpTracker) Write(b []byte) (int, error) {
+	n, err := tt.Conn.Write(b)
+	upload := int64(n)
+	if tt.pushToManager {
+		tt.manager.PushUploaded(upload)
+	}
+	tt.UploadTotal.Add(upload)
+	noteTraffic(&tt.LastUpload, upload)
+	tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
+	return n, err
+}
+
+func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
+	upload := int64(buffer.Len())
+	err = tt.Conn.WriteBuffer(buffer)
+	if tt.pushToManager {
+		tt.manager.PushUploaded(upload)
+	}
+	tt.UploadTotal.Add(upload)
+	noteTraffic(&tt.LastUpload, upload)
+	tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
+	return
+}
+
+func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
+	return tt.Conn, []N.CountFunc{func(upload int64) {
+		if tt.pushToManager {
+			tt.manager.PushUploaded(upload)
+		}
+		tt.UploadTotal.Add(upload)
+		noteTraffic(&tt.LastUpload, upload)
+		tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
+	}}
+}
+
+func (tt *tcpTracker) Close() error {
+	tt.closeOnce.Do(func() {
+		tt.closeErr = tt.Conn.Close()
+		tt.manager.Leave(tt)
+		tt.reportStall()
+	})
+	return tt.closeErr
+}
+
+// reportStall flags connections that sent data after tracking started but got
+// nothing back before closing quickly. Initial upload may be peeked protocol
+// data that was already written during handshake and must not be penalized.
+//
+// This is a heuristic and it does misfire: a request the client cancels right
+// after sending it looks exactly like a relay that swallowed it. That is
+// tolerated rather than tightened, because telling the two apart needs to know
+// which side closed first, which a tracker cannot see. The cost of a false
+// positive is bounded instead — penalize-unstable is opt-in, one incident only
+// adds penaltyPerEvent to ranking latency, and component/health decays it, so a
+// node has to stall repeatedly before the penalty changes which node wins.
+func (tt *tcpTracker) reportStall() {
+	if len(tt.Chain) == 0 {
+		return
+	}
+	if tt.DownloadTotal.Load() > 0 || tt.UploadTotal.Load() <= tt.initialUpload {
+		return
+	}
+	if time.Since(tt.Start) > stallWindow {
+		return
+	}
+	// Record against every hop, not just the leaf. A url-test group looks the
+	// penalty up by the name of its own direct member, which for a nested
+	// group is the sub-group rather than the node that actually stalled, so
+	// attributing the incident only to Chain[0] left every enclosing group
+	// blind to it. AppendToChains fills Chain and ProviderChain in lockstep,
+	// so the two are index-aligned.
+	for index, name := range tt.Chain {
+		provider := ""
+		if index < len(tt.ProviderChain) {
+			provider = tt.ProviderChain[index]
+		}
+		health.RecordStall(health.ProxyKey(name, provider))
+	}
+}
+
+func (tt *tcpTracker) Upstream() any {
+	return tt.Conn
+}
+
+func NewTCPTracker(conn C.Conn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *tcpTracker {
+	metadata.RemoteDst = conn.RemoteDestination()
+
+	trackerUUID := utils.NewUUIDV4()
+
+	metadata.UUID = trackerUUID.String()
+
+	t := &tcpTracker{
+		Conn:    conn,
+		manager: manager,
+		TrackerInfo: &TrackerInfo{
+			UUID:          trackerUUID,
+			Start:         time.Now(),
+			Metadata:      metadata,
+			Chain:         conn.Chains(),
+			ProviderChain: conn.ProviderChains(),
+			Rule:          "",
+			NetworkEpoch:  netstate.CurrentEpoch(),
+			UploadTotal:   atomic.NewInt64(uploadTotal),
+			DownloadTotal: atomic.NewInt64(downloadTotal),
+		},
+		pushToManager:        pushToManager,
+		initialUpload:        uploadTotal,
+		uploadBucketWindow:   newBucketWindow(10, 100),
+		downloadBucketWindow: newBucketWindow(10, 100),
+	}
+
+	t.stampInitialTraffic(uploadTotal, downloadTotal)
+
+	if pushToManager {
+		if uploadTotal > 0 {
+			manager.PushUploaded(uploadTotal)
+		}
+		if downloadTotal > 0 {
+			manager.PushDownloaded(downloadTotal)
+		}
+	}
+
+	if rule != nil {
+		t.TrackerInfo.Rule = rule.RuleType().String()
+		t.TrackerInfo.RulePayload = rule.Payload()
+	}
+
+	manager.Join(t)
+	return t
+}
+
+type udpTracker struct {
+	C.PacketConn `json:"-"`
+	*TrackerInfo
+	manager *Manager
+
+	pushToManager bool `json:"-"`
+	closeOnce     sync.Once
+	closeErr      error
+
+	uploadBucketWindow   *bucketWindow
+	downloadBucketWindow *bucketWindow
+}
+
+func (ut *udpTracker) ID() string {
+	return ut.UUID.String()
+}
+
+func (ut *udpTracker) Info() *TrackerInfo {
+	return ut.TrackerInfo
+}
+
+func (ut *udpTracker) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, addr, err := ut.PacketConn.ReadFrom(b)
+	download := int64(n)
+	if ut.pushToManager {
+		ut.manager.PushDownloaded(download)
+	}
+	ut.DownloadTotal.Add(download)
+	noteTraffic(&ut.LastDownload, download)
+	ut.TrackerInfo.MaxDownloadRate.Store(ut.downloadBucketWindow.updateMaxRate(download))
+	return n, addr, err
+}
+
+func (ut *udpTracker) WaitReadFrom() (data []byte, put func(), addr net.Addr, err error) {
+	data, put, addr, err = ut.PacketConn.WaitReadFrom()
+	download := int64(len(data))
+	if ut.pushToManager {
+		ut.manager.PushDownloaded(download)
+	}
+	ut.DownloadTotal.Add(download)
+	noteTraffic(&ut.LastDownload, download)
+	ut.TrackerInfo.MaxDownloadRate.Store(ut.downloadBucketWindow.updateMaxRate(download))
+	return
+}
+
+func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
+	n, err := ut.PacketConn.WriteTo(b, addr)
+	upload := int64(n)
+	if ut.pushToManager {
+		ut.manager.PushUploaded(upload)
+	}
+	ut.UploadTotal.Add(upload)
+	noteTraffic(&ut.LastUpload, upload)
+	ut.TrackerInfo.MaxUploadRate.Store(ut.uploadBucketWindow.updateMaxRate(upload))
+	return n, err
+}
+
+func (ut *udpTracker) Close() error {
+	ut.closeOnce.Do(func() {
+		ut.closeErr = ut.PacketConn.Close()
+		ut.manager.Leave(ut)
+	})
+	return ut.closeErr
+}
+
+func (ut *udpTracker) Upstream() any {
+	return ut.PacketConn
+}
+
+func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, rule C.Rule, uploadTotal int64, downloadTotal int64, pushToManager bool) *udpTracker {
+	metadata.RemoteDst = conn.RemoteDestination()
+
+	trackerUUID := utils.NewUUIDV4()
+
+	metadata.UUID = trackerUUID.String()
+
+	ut := &udpTracker{
+		PacketConn: conn,
+		manager:    manager,
+		TrackerInfo: &TrackerInfo{
+			UUID:          trackerUUID,
+			Start:         time.Now(),
+			Metadata:      metadata,
+			Chain:         conn.Chains(),
+			ProviderChain: conn.ProviderChains(),
+			Rule:          "",
+			NetworkEpoch:  netstate.CurrentEpoch(),
+			UploadTotal:   atomic.NewInt64(uploadTotal),
+			DownloadTotal: atomic.NewInt64(downloadTotal),
+		},
+		pushToManager:        pushToManager,
+		uploadBucketWindow:   newBucketWindow(10, 100),
+		downloadBucketWindow: newBucketWindow(10, 100),
+	}
+
+	ut.stampInitialTraffic(uploadTotal, downloadTotal)
+
+	if pushToManager {
+		if uploadTotal > 0 {
+			manager.PushUploaded(uploadTotal)
+		}
+		if downloadTotal > 0 {
+			manager.PushDownloaded(downloadTotal)
+		}
+	}
+
+	if rule != nil {
+		ut.TrackerInfo.Rule = rule.RuleType().String()
+		ut.TrackerInfo.RulePayload = rule.Payload()
+	}
+
+	manager.Join(ut)
+	return ut
+}
+
+func newBucketWindow(bucketCount int, intervalMs int64) *bucketWindow {
+	return &bucketWindow{
+		buckets:  make([]timeBucket, bucketCount),
+		interval: intervalMs,
+		windowMs: intervalMs * int64(bucketCount),
+	}
+}
+
+func (w *bucketWindow) updateMaxRate(bytes int64) int64 {
+	if bytes <= 0 {
+		return w.cachedRate.Load()
+	}
+	nowMs := time.Now().UnixNano() / 1e6
+	slot := nowMs / w.interval
+	idx := int(slot % int64(len(w.buckets)))
+	bucketStart := slot * w.interval
+
+	w.mu.Lock()
+	if w.buckets[idx].startMs != bucketStart {
+		w.buckets[idx].startMs = bucketStart
+		w.buckets[idx].bytes = 0
+	}
+	w.buckets[idx].bytes += bytes
+
+	if slot != w.lastSlot {
+		w.lastSlot = slot
+		windowStart := nowMs - w.windowMs
+		maxRate := int64(0)
+		for _, b := range w.buckets {
+			if b.startMs >= windowStart && b.bytes > 0 {
+				rate := b.bytes * 1000 / w.interval
+				if rate > maxRate {
+					maxRate = rate
+				}
+			}
+		}
+		w.cachedRate.Store(maxRate)
+	} else {
+		if r := w.buckets[idx].bytes * 1000 / w.interval; r > w.cachedRate.Load() {
+			w.cachedRate.Store(r)
+		}
+	}
+	result := w.cachedRate.Load()
+	w.mu.Unlock()
+	return result
+}

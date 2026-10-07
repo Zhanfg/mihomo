@@ -1,0 +1,346 @@
+name: Smart Link A/B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - opt/smart-link-v2
+      - opt/smart-greedy-v3
+      - opt/smart-greedy-v4
+      - opt/smart-learning-v5
+      - opt/smart-runtime-v6
+      - opt/smart-model-v7
+      - opt/smart-expert-v8
+      - opt/smart-production-v9
+    paths:
+      - ".github/workflows/smart-link-ab.yml"
+      - "adapter/outboundgroup/**"
+      - "component/smart/**"
+      - "tunnel/statistic/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-link-ab
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Integration vs Smart candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout integration
+        uses: actions/checkout@v6
+        with:
+          ref: integration/boxproxy-native-ebpf
+          path: base
+
+      - name: Checkout candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref_name }}
+          path: candidate
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Build both cores
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd base && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o ../mihomo-base)
+          (cd candidate && CGO_ENABLED=0 go build -buildvcs=false -trimpath -o ../mihomo-candidate)
+
+      - name: Prepare local target and HTTP proxy
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/ab_harness.py <<'PY'
+          import http.server, select, socket, socketserver, threading
+
+          class Target(http.server.BaseHTTPRequestHandler):
+              protocol_version = "HTTP/1.1"
+              def do_GET(self):
+                  body = b"smart-link-ab"
+                  self.send_response(200)
+                  self.send_header("Content-Length", str(len(body)))
+                  self.send_header("Connection", "close")
+                  self.end_headers()
+                  self.wfile.write(body)
+              def log_message(self, *_):
+                  pass
+
+          class Proxy(socketserver.BaseRequestHandler):
+              def handle(self):
+                  client = self.request
+                  client.settimeout(5)
+                  data = b""
+                  while b"\r\n\r\n" not in data and len(data) < 65536:
+                      chunk = client.recv(4096)
+                      if not chunk:
+                          return
+                      data += chunk
+                  first = data.split(b"\r\n", 1)[0].decode("latin1", "replace")
+                  parts = first.split()
+                  if len(parts) < 2 or parts[0].upper() != "CONNECT":
+                      client.sendall(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length:0\r\n\r\n")
+                      return
+                  hostport = parts[1]
+                  host, port = hostport.rsplit(":", 1)
+                  host = host.strip("[]")
+                  upstream = socket.create_connection((host, int(port)), timeout=5)
+                  client.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                  client.setblocking(False)
+                  upstream.setblocking(False)
+                  sockets = [client, upstream]
+                  try:
+                      while True:
+                          readable, _, exceptional = select.select(sockets, [], sockets, 5)
+                          if exceptional or not readable:
+                              break
+                          for src in readable:
+                              dst = upstream if src is client else client
+                              try:
+                                  buf = src.recv(65536)
+                              except BlockingIOError:
+                                  continue
+                              if not buf:
+                                  return
+                              dst.sendall(buf)
+                  finally:
+                      upstream.close()
+
+          class TargetServer(http.server.ThreadingHTTPServer):
+              daemon_threads = True
+              request_queue_size = 256
+
+          class Threaded(socketserver.ThreadingMixIn, socketserver.TCPServer):
+              daemon_threads = True
+              allow_reuse_address = True
+              request_queue_size = 256
+
+          target = TargetServer(("127.0.0.1", 18080), Target)
+          proxy = Threaded(("127.0.0.1", 18081), Proxy)
+          threading.Thread(target=target.serve_forever, daemon=True).start()
+          proxy.serve_forever()
+          PY
+          python3 /tmp/ab_harness.py > /tmp/ab_harness.log 2>&1 &
+          echo $! > /tmp/ab_harness.pid
+          for i in $(seq 1 50); do
+            if (echo > /dev/tcp/127.0.0.1/18081) >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+
+      - name: Prepare deterministic Smart workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/load.py <<'PY'
+          import concurrent.futures, socket, sys
+          total = int(sys.argv[1])
+          workers = int(sys.argv[2])
+          def one(i):
+              try:
+                  s = socket.create_connection(("127.0.0.1", 7890), timeout=10)
+                  req = (
+                      f"GET http://127.0.0.1:18080/item/{i} HTTP/1.1\r\n"
+                      "Host: 127.0.0.1:18080\r\n"
+                      "Connection: close\r\n\r\n"
+                  ).encode()
+                  s.sendall(req)
+                  data = b""
+                  while True:
+                      chunk = s.recv(65536)
+                      if not chunk:
+                          break
+                      data += chunk
+                  s.close()
+                  return 0 if b" 200 " in data[:64] else 1
+              except Exception:
+                  return 1
+          failures = 0
+          with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+              for rc in ex.map(one, range(total)):
+                  failures += rc
+          print(failures)
+          PY
+
+          make_config() {
+            local home="$1"
+            mkdir -p "$home"
+            {
+              echo 'mixed-port: 7890'
+              echo 'allow-lan: false'
+              echo 'mode: rule'
+              echo 'log-level: error'
+              echo 'ipv6: false'
+              echo 'proxies:'
+              for i in $(seq -w 1 64); do
+                echo "  - {name: N$i, type: http, server: 127.0.0.1, port: 18081}"
+              done
+              echo 'proxy-groups:'
+              echo '  - name: SMART'
+              echo '    type: smart'
+              printf '    proxies: ['
+              sep=''
+              for i in $(seq -w 1 64); do printf '%sN%s' "$sep" "$i"; sep=', '; done
+              echo ']'
+              echo '    url: http://127.0.0.1:18080/ping'
+              echo '    interval: 3600'
+              echo '    uselightgbm: true'
+              echo '    empty-fallback: REJECT'
+              echo 'rules:'
+              echo '  - MATCH,SMART'
+            } > "$home/config.yaml"
+          }
+          make_config /tmp/base-home
+          make_config /tmp/candidate-home
+
+      - name: Run same-runner crossed A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLK_TCK="$(getconf CLK_TCK)"
+
+          run_case() {
+            local label="$1" bin="$2" home="$3"
+            rm -f "/tmp/$label.metrics" "/tmp/$label.stop"
+            "$bin" -d "$home" -f "$home/config.yaml" > "/tmp/$label.core.log" 2>&1 &
+            local pid=$!
+            for i in $(seq 1 100); do
+              if (echo > /dev/tcp/127.0.0.1/7890) >/dev/null 2>&1; then break; fi
+              if ! kill -0 "$pid" 2>/dev/null; then
+                cat "/tmp/$label.core.log"
+                return 1
+              fi
+              sleep 0.1
+            done
+
+            warm_fail="$(python3 /tmp/load.py 400 24)"
+            test "$warm_fail" = "0"
+
+            python3 - "$pid" "/tmp/$label.metrics" "/tmp/$label.stop" <<'PY' &
+          import os, sys, time
+          pid, out, stop = int(sys.argv[1]), sys.argv[2], sys.argv[3]
+          peak_rss = peak_threads = 0
+          while not os.path.exists(stop) and os.path.exists(f"/proc/{pid}/status"):
+              try:
+                  with open(f"/proc/{pid}/status") as f:
+                      for line in f:
+                          if line.startswith("VmRSS:"):
+                              peak_rss = max(peak_rss, int(line.split()[1]))
+                          elif line.startswith("Threads:"):
+                              peak_threads = max(peak_threads, int(line.split()[1]))
+              except FileNotFoundError:
+                  break
+              time.sleep(0.02)
+          with open(out, "w") as f:
+              f.write(f"peak_rss_kb={peak_rss}\npeak_threads={peak_threads}\n")
+          PY
+            local mon=$!
+
+            local ticks0 ticks1 start_ns end_ns failures
+            ticks0="$(awk '{print $14+$15}' /proc/$pid/stat)"
+            start_ns="$(date +%s%N)"
+            failures="$(python3 /tmp/load.py 4000 48)"
+            end_ns="$(date +%s%N)"
+            ticks1="$(awk '{print $14+$15}' /proc/$pid/stat)"
+            touch "/tmp/$label.stop"
+            wait "$mon"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+
+            python3 - "$label" "$ticks0" "$ticks1" "$CLK_TCK" "$start_ns" "$end_ns" "$failures" "/tmp/$label.metrics" <<'PY'
+          import json, sys
+          label, t0, t1, hz, n0, n1, failures, metrics = sys.argv[1:]
+          vals = {}
+          with open(metrics) as f:
+              for line in f:
+                  k, v = line.strip().split("=", 1)
+                  vals[k] = int(v)
+          elapsed = (int(n1)-int(n0))/1e9
+          cpu_seconds = (int(t1)-int(t0))/int(hz)
+          vals.update({
+              "label": label,
+              "elapsed_s": elapsed,
+              "cpu_seconds": cpu_seconds,
+              "cpu_percent": cpu_seconds/elapsed*100 if elapsed else 0,
+              "failures": int(failures),
+              "requests": 4000,
+              "parallelism": 48,
+          })
+          with open(f"{label}.json", "w") as f:
+              json.dump(vals, f, sort_keys=True)
+          print(json.dumps(vals, sort_keys=True))
+          PY
+          }
+
+          # Cross the order to reduce warm-cache / runner-temperature bias.
+          run_case base1 ./mihomo-base /tmp/base-home
+          run_case candidate1 ./mihomo-candidate /tmp/candidate-home
+          run_case candidate2 ./mihomo-candidate /tmp/candidate-home
+          run_case base2 ./mihomo-base /tmp/base-home
+
+      - name: Summarize A/B
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 <<'PY' | tee SMART_LINK_AB.txt
+          import json, statistics
+          def load(prefix):
+              return [json.load(open(f"{prefix}{i}.json")) for i in (1,2)]
+          base, cand = load("base"), load("candidate")
+          def med(rows, key):
+              return statistics.median(r[key] for r in rows)
+          keys = ["elapsed_s","cpu_seconds","cpu_percent","peak_rss_kb","peak_threads"]
+          print("metric,base,candidate,change_percent")
+          for key in keys:
+              b, c = med(base,key), med(cand,key)
+              change = ((c-b)/b*100) if b else 0
+              print(f"{key},{b:.3f},{c:.3f},{change:.2f}")
+          bf, cf = sum(r["failures"] for r in base), sum(r["failures"] for r in cand)
+          total = sum(r["requests"] for r in cand)
+          print(f"failures,{bf},{cf},")
+          print(f"failure_rate,{bf/(total or 1):.6f},{cf/(total or 1):.6f},")
+
+          # The Python CONNECT harness is deliberately outside both Mihomo
+          # processes and can very occasionally drop a socket under 48-way
+          # shared-runner load. Treat only tiny common-mode noise as fixture
+          # noise; a candidate-specific increase remains a regression.
+          fixture_budget = max(2, int(total * 0.001))
+          if bf > fixture_budget or cf > fixture_budget:
+              raise SystemExit(f"A/B workload exceeded fixture failure budget: base={bf} candidate={cf}")
+          if cf > bf + 1:
+              raise SystemExit(f"candidate request failures exceeded baseline: base={bf} candidate={cf}")
+
+          # Performance is noisy on shared CI; gate only clear regressions.
+          if med(cand,"cpu_seconds") > med(base,"cpu_seconds") * 1.10:
+              raise SystemExit("candidate CPU regressed >10%")
+          if med(cand,"peak_rss_kb") > med(base,"peak_rss_kb") * 1.10:
+              raise SystemExit("candidate RSS regressed >10%")
+          PY
+
+      - name: Upload A/B report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smart-link-ab
+          path: |
+            base1.json
+            base2.json
+            candidate1.json
+            candidate2.json
+            SMART_LINK_AB.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Stop harness
+        if: always()
+        shell: bash
+        run: |
+          kill "$(cat /tmp/ab_harness.pid 2>/dev/null)" 2>/dev/null || true
