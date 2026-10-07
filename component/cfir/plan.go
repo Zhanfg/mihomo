@@ -108,6 +108,7 @@ type ExecutionPlan struct {
 	Action              RouteAction
 	Protocol            ProtocolID
 	Instance            string
+	InstancePrimitives  PrimitiveMask
 	Capabilities        CapabilitySet
 	Security            SecurityContext
 	Backend             string
@@ -152,6 +153,15 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 			}
 			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
 			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+		}
+		if p.InstancePrimitives == 0 {
+			return fmt.Errorf("cfir: protocol instance %s/%s declares no primitives", p.Protocol, p.Instance)
+		}
+		if descriptor.Primitives&p.InstancePrimitives != p.InstancePrimitives {
+			return fmt.Errorf("cfir: protocol instance %s/%s claims primitives outside family declaration", p.Protocol, p.Instance)
+		}
+		if !p.InstancePrimitives.Supports(p.Primitive) {
+			return fmt.Errorf("cfir: protocol instance %s/%s does not support %s", p.Protocol, p.Instance, p.Primitive)
 		}
 		if !descriptor.Capabilities.ContainsAll(p.Capabilities) {
 			return fmt.Errorf("cfir: protocol instance %s/%s claims capabilities outside family declaration", p.Protocol, p.Instance)
