@@ -73,3 +73,11 @@ func (p SecurityProfile) Meets(min SecurityProfile) bool {
 	}
 	return true
 }
+
+
+func (c SecurityContext) Meets(min SecurityProfile) bool {
+	if min == (SecurityProfile{}) {
+		return true
+	}
+	return c.AttestedByCore && c.Profile.Meets(min)
+}
