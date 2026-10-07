@@ -370,6 +370,7 @@ func NewUDPTracker(conn C.PacketConn, manager *Manager, metadata *C.Metadata, ru
 			Chain:         conn.Chains(),
 			ProviderChain: conn.ProviderChains(),
 			Rule:          "",
+			NetworkEpoch:  netstate.CurrentEpoch(),
 			UploadTotal:   atomic.NewInt64(uploadTotal),
 			DownloadTotal: atomic.NewInt64(downloadTotal),
 		},
