@@ -40,6 +40,8 @@ type StatsRecord struct {
 	CumulRetrans       uint64             `json:"cumul_retrans,omitempty"`
 	BanditTCP          *OnlineBanditState `json:"bandit_tcp,omitempty"`
 	BanditUDP          *OnlineBanditState `json:"bandit_udp,omitempty"`
+	TinyRouterTCP      *TinyRouterState   `json:"tiny_router_tcp,omitempty"`
+	TinyRouterUDP      *TinyRouterState   `json:"tiny_router_udp,omitempty"`
 }
 
 
@@ -95,6 +97,10 @@ type AtomicStatsRecord struct {
 	banditUDP            *OnlineBanditState
 	banditUncertaintyTCP atomic.Float64
 	banditUncertaintyUDP atomic.Float64
+
+	tinyRouterMu  sync.RWMutex
+	tinyRouterTCP *TinyRouterState
+	tinyRouterUDP *TinyRouterState
 }
 
 func (r *AtomicStatsRecord) restoreBanditState(state *OnlineBanditState, isUDP bool) {
@@ -129,6 +135,80 @@ func (r *AtomicStatsRecord) snapshotBanditState(isUDP bool) *OnlineBanditState {
 	copyState := *state
 	r.banditMu.RUnlock()
 	return &copyState
+}
+
+func (r *AtomicStatsRecord) restoreTinyRouterState(state *TinyRouterState, isUDP bool) {
+	if r == nil || state == nil {
+		return
+	}
+	copyState := normalizeTinyRouterState(*state)
+	r.tinyRouterMu.Lock()
+	if isUDP {
+		r.tinyRouterUDP = &copyState
+	} else {
+		r.tinyRouterTCP = &copyState
+	}
+	r.tinyRouterMu.Unlock()
+}
+
+func (r *AtomicStatsRecord) snapshotTinyRouterState(isUDP bool) *TinyRouterState {
+	if r == nil {
+		return nil
+	}
+	r.tinyRouterMu.RLock()
+	var state *TinyRouterState
+	if isUDP {
+		state = r.tinyRouterUDP
+	} else {
+		state = r.tinyRouterTCP
+	}
+	if state == nil {
+		r.tinyRouterMu.RUnlock()
+		return nil
+	}
+	copyState := *state
+	r.tinyRouterMu.RUnlock()
+	return &copyState
+}
+
+func LoadTinyRouterState(record *AtomicStatsRecord, isUDP bool) TinyRouterState {
+	if record == nil {
+		return defaultTinyRouterState()
+	}
+	record.tinyRouterMu.RLock()
+	var state *TinyRouterState
+	if isUDP {
+		state = record.tinyRouterUDP
+	} else {
+		state = record.tinyRouterTCP
+	}
+	if state == nil {
+		record.tinyRouterMu.RUnlock()
+		return defaultTinyRouterState()
+	}
+	out := *state
+	record.tinyRouterMu.RUnlock()
+	return normalizeTinyRouterState(out)
+}
+
+func SaveTinyRouterState(record *AtomicStatsRecord, isUDP bool, state TinyRouterState) {
+	if record == nil {
+		return
+	}
+	state = normalizeTinyRouterState(state)
+	record.tinyRouterMu.Lock()
+	if isUDP {
+		if record.tinyRouterUDP == nil {
+			record.tinyRouterUDP = new(TinyRouterState)
+		}
+		*record.tinyRouterUDP = state
+	} else {
+		if record.tinyRouterTCP == nil {
+			record.tinyRouterTCP = new(TinyRouterState)
+		}
+		*record.tinyRouterTCP = state
+	}
+	record.tinyRouterMu.Unlock()
 }
 
 
@@ -320,6 +400,12 @@ func (s *Store) GetOrCreateAtomicRecord(cacheKey string, group, config, target, 
 					} else if migrated, ok := legacyBanditStateFromWeights(existingRecord.Weights, true); ok {
 						r.restoreBanditState(&migrated, true)
 					}
+					if existingRecord.TinyRouterTCP != nil {
+						r.restoreTinyRouterState(existingRecord.TinyRouterTCP, false)
+					}
+					if existingRecord.TinyRouterUDP != nil {
+						r.restoreTinyRouterState(existingRecord.TinyRouterUDP, true)
+					}
 
 					if existingRecord.Weights != nil {
 						for k, v := range existingRecord.Weights {
@@ -360,6 +446,8 @@ func (record *AtomicStatsRecord) CreateStatsSnapshot(cacheKey string) *StatsReco
 		Weights:            record.weights.FilterByKeyPrefix(""),
 		BanditTCP:          record.snapshotBanditState(false),
 		BanditUDP:          record.snapshotBanditState(true),
+		TinyRouterTCP:      record.snapshotTinyRouterState(false),
+		TinyRouterUDP:      record.snapshotTinyRouterState(true),
 	}
 
 	if cacheReady.Load() && recordCache != nil {
