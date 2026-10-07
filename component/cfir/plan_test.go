@@ -73,3 +73,58 @@ func TestCapabilityExtensionsRemainNegotiable(t *testing.T) {
 		t.Fatal("extension capability did not participate in normal negotiation")
 	}
 }
+
+
+func TestExecutionPlanKeepsProtocolAndBackendCapabilitiesScoped(t *testing.T) {
+	registry := NewRegistry()
+	if err := registry.RegisterProtocol(testProtocol{descriptor: ProtocolDescriptor{
+		ID:         "stream-only",
+		MinCFIR:    CurrentVersion,
+		Primitives: PrimitiveSet(PrimitiveStream),
+		Capabilities: NewCapabilitySet(
+			CapabilityHalfClose,
+		),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.RegisterBackend(testBackend{descriptor: BackendDescriptor{
+		ID:        "linux-fast",
+		Kind:      BackendKernelAccelerator,
+		Platforms: Platforms(PlatformLinux),
+		MinCFIR:   CurrentVersion,
+		Capabilities: NewCapabilitySet(
+			CapabilityZeroCopy,
+			CapabilityReliableDatagram,
+		),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	valid := ExecutionPlan{
+		Protocol:  "stream-only",
+		Backend:   "linux-fast",
+		Platform:  PlatformLinux,
+		Primitive: PrimitiveStream,
+		Requirements: CapabilityRequirement{Standard: []StandardCapability{
+			CapabilityHalfClose,
+		}},
+		BackendRequirements: CapabilityRequirement{Standard: []StandardCapability{
+			CapabilityZeroCopy,
+		}},
+	}
+	if err := valid.Validate(registry); err != nil {
+		t.Fatal(err)
+	}
+
+	wrongScope := valid
+	wrongScope.Requirements.Standard = []StandardCapability{CapabilityReliableDatagram}
+	if err := wrongScope.Validate(registry); err == nil {
+		t.Fatal("backend capability must not satisfy a protocol requirement")
+	}
+
+	wrongPlatform := valid
+	wrongPlatform.Platform = PlatformWindows
+	if err := wrongPlatform.Validate(registry); err == nil {
+		t.Fatal("platform-incompatible backend must be rejected")
+	}
+}
