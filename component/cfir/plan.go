@@ -108,6 +108,7 @@ type ExecutionPlan struct {
 	Action              RouteAction
 	Protocol            ProtocolID
 	Instance            string
+	Capabilities        CapabilitySet
 	Security            SecurityContext
 	Backend             string
 	Platform            Platform
@@ -146,6 +147,13 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 			}
 			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
 			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+		}
+		if !p.Requirements.SatisfiedBy(p.Capabilities) {
+			missing := p.Requirements.MissingFrom(p.Capabilities)
+			return fmt.Errorf(
+				"cfir: protocol instance %s/%s misses runtime capabilities: standard=%v extensions=%v",
+				p.Protocol, p.Instance, missing.Standard, missing.Extensions,
+			)
 		}
 		if !p.Security.Meets(p.SecurityFloor) {
 			return fmt.Errorf("cfir: protocol instance %s/%s violates or cannot attest execution-plan security floor", p.Protocol, p.Instance)
