@@ -53,6 +53,9 @@ func (r *Registry) ValidateBackendCandidate(intent ExecutionIntent, candidate Ba
 	if err := intent.Validate(); err != nil {
 		return BackendDescriptor{}, err
 	}
+	if candidate.Instance == "" {
+		return BackendDescriptor{}, fmt.Errorf("cfir: backend candidate instance is empty")
+	}
 	backend, ok := r.Backend(candidate.Backend)
 	if !ok {
 		return BackendDescriptor{}, fmt.Errorf("cfir: unknown backend %s", candidate.Backend)
