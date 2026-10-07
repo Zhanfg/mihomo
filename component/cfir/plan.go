@@ -98,10 +98,7 @@ func (i ExecutionIntent) AcceptsProtocol(descriptor ProtocolDescriptor) bool {
 	if !descriptor.Primitives.Supports(i.Primitive) {
 		return false
 	}
-	if !i.Requirements.SatisfiedBy(descriptor.Capabilities) {
-		return false
-	}
-	return descriptor.Security.Meets(i.SecurityFloor)
+	return i.Requirements.SatisfiedBy(descriptor.Capabilities)
 }
 
 // ExecutionPlan is the stable handoff from Smart/Planner to protocol and
@@ -110,6 +107,8 @@ func (i ExecutionIntent) AcceptsProtocol(descriptor ProtocolDescriptor) bool {
 type ExecutionPlan struct {
 	Action              RouteAction
 	Protocol            ProtocolID
+	Instance            string
+	Security            SecurityContext
 	Backend             string
 	Platform            Platform
 	Primitive           Primitive
@@ -145,11 +144,11 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 			if !descriptor.Primitives.Supports(p.Primitive) {
 				return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
 			}
-			if !p.Requirements.SatisfiedBy(descriptor.Capabilities) {
-				missing := p.Requirements.MissingFrom(descriptor.Capabilities)
-				return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
-			}
-			return fmt.Errorf("cfir: protocol %s violates execution plan security floor", p.Protocol)
+			missing := p.Requirements.MissingFrom(descriptor.Capabilities)
+			return fmt.Errorf("cfir: protocol %s misses capabilities: standard=%v extensions=%v", p.Protocol, missing.Standard, missing.Extensions)
+		}
+		if !p.Security.Meets(p.SecurityFloor) {
+			return fmt.Errorf("cfir: protocol instance %s/%s violates or cannot attest execution-plan security floor", p.Protocol, p.Instance)
 		}
 	} else if p.Protocol != "" {
 		return errors.New("cfir: non-forward execution plan must not name a wire protocol")
