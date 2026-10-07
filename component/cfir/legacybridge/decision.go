@@ -211,10 +211,11 @@ func ProjectProxyDecision(proxy C.ProxyAdapter, metadata *C.Metadata) (LegacyDec
 	decision.Protocol = descriptor.ID
 	decision.Family = descriptor
 	decision.Instance = cfir.ProtocolCandidate{
-		Protocol: descriptor.ID,
-		Instance: current.Name(),
+		Protocol:     descriptor.ID,
+		Instance:     current.Name(),
+		Primitives:   descriptor.Primitives,
 		Capabilities: descriptor.Capabilities,
-		Security: cfir.SecurityContext{},
+		Security:     cfir.SecurityContext{},
 	}
 	decision.Resolved = true
 	return decision, nil
