@@ -1,10 +1,14 @@
 package cfir
 
-import "slices"
+import (
+	"errors"
+	"fmt"
+	"slices"
+)
 
-// CandidateProtocols returns every registered protocol that can legally satisfy
-// an unresolved forward intent. Smart/Neural ranking consumes this already
-// filtered set instead of scoring incapable or security-ineligible protocols.
+// CandidateProtocols returns protocol families that are structurally capable
+// of an unresolved forward intent. Runtime security and per-node optional
+// capabilities are validated on ProtocolCandidate before Smart/Neural ranking.
 func (r *Registry) CandidateProtocols(intent ExecutionIntent) ([]ProtocolDescriptor, error) {
 	if err := intent.Validate(); err != nil {
 		return nil, err
@@ -32,4 +36,42 @@ func (r *Registry) CandidateProtocols(intent ExecutionIntent) ([]ProtocolDescrip
 		}
 	}
 	return result, nil
+}
+
+
+type ProtocolCandidate struct {
+	Protocol     ProtocolID
+	Instance     string
+	Capabilities CapabilitySet
+	Security     SecurityContext
+}
+
+func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate ProtocolCandidate) (ProtocolDescriptor, error) {
+	if err := intent.Validate(); err != nil {
+		return ProtocolDescriptor{}, err
+	}
+	if intent.Action != RouteActionForward {
+		return ProtocolDescriptor{}, errors.New("cfir: protocol candidate is only valid for forward intents")
+	}
+	descriptor, err := r.EffectiveProtocolDescriptor(candidate.Protocol)
+	if err != nil {
+		return ProtocolDescriptor{}, err
+	}
+	if !intent.AcceptsProtocol(descriptor) {
+		return ProtocolDescriptor{}, fmt.Errorf("cfir: protocol family %s cannot satisfy structural intent", candidate.Protocol)
+	}
+	if !intent.Requirements.SatisfiedBy(candidate.Capabilities) {
+		missing := intent.Requirements.MissingFrom(candidate.Capabilities)
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s misses capabilities: standard=%v extensions=%v",
+			candidate.Protocol, candidate.Instance, missing.Standard, missing.Extensions,
+		)
+	}
+	if !candidate.Security.Meets(intent.SecurityFloor) {
+		return ProtocolDescriptor{}, fmt.Errorf(
+			"cfir: protocol instance %s/%s violates or cannot attest security floor",
+			candidate.Protocol, candidate.Instance,
+		)
+	}
+	return descriptor, nil
 }
