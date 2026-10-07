@@ -125,3 +125,28 @@ func TestTinyRouterTransportFeaturesAreBounded(t *testing.T) {
 		}
 	}
 }
+
+
+func BenchmarkTinyRouterPredict(b *testing.B) {
+	state := defaultTinyRouterState()
+	state.Updates = 64
+	state.Output = [TinyRouterHiddenDimension]float64{0.05, -0.04, 0.03, 0.02}
+	x := TinyRouterFeatures(healthyTinyInput(), TinyRouterTransport{
+		RTTVarMs: 8, Unacked: 2, Cwnd: 64,
+	})
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = state.Predict(0.82, x)
+	}
+}
+
+func BenchmarkTinyRouterUpdate(b *testing.B) {
+	x := TinyRouterFeatures(healthyTinyInput(), TinyRouterTransport{
+		RTTVarMs: 8, Unacked: 2, Cwnd: 64,
+	})
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		state := defaultTinyRouterState()
+		_, _ = state.Update(0.82, 0.90, x, 1)
+	}
+}
