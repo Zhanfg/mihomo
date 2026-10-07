@@ -262,3 +262,44 @@ for QUIC datagrams, MASQUE, packet tunnels, multipath and future session types.
 
 This avoids introducing an unnecessary encode/decode layer or freezing a
 lowest-common-denominator buffer API before the capability model is mature.
+
+
+## 15. Protocol families, instances and runtime security
+
+Protocol-family metadata and protocol-instance evidence are separate.
+
+A family descriptor says what an implementation can structurally support. A
+runtime ProtocolCandidate identifies one concrete node/endpoint and carries the
+capabilities that are actually enabled for that instance.
+
+Security admission is performed on the instance SecurityContext. A non-empty
+security floor requires core-attested runtime evidence; an adapter name such as
+VLESS, SOCKS or Shadowsocks is never sufficient evidence by itself.
+
+Future protocol adapters may implement ProtocolProjectionProvider and
+self-describe both family and instance semantics. The central Mihomo
+AdapterType-to-protocol mapping exists only as a legacy compatibility fallback.
+A new self-describing protocol therefore does not require a CFIR core switch.
+
+## 16. Legal-set-first ranking
+
+Optimization is explicitly downstream of policy admission.
+
+The pipeline is:
+
+1. Build ExecutionIntent.
+2. Filter protocol families structurally.
+3. Validate per-instance capabilities and security attestation.
+4. Filter platform backends and kernel capabilities.
+5. Construct the approved PlanCandidate set.
+6. Pass only that set to a Ranker.
+7. Validate that the Ranker returned exactly the approved candidates.
+8. Sort by model utility/confidence/uncertainty.
+9. Materialize the final ExecutionPlan.
+
+A Ranker cannot introduce a protocol, node or backend that CFIR rejected.
+
+The current Smart/Tiny-Neural system is being attached in shadow mode to this
+boundary. Shadow observation consumes the exact list returned by the live
+Smart selectProxies() call rather than invoking Smart a second time, avoiding
+cache/exploration observer effects.
