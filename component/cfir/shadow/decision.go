@@ -36,6 +36,9 @@ func decisionEligible(intent cfir.ExecutionIntent, candidate legacybridge.Legacy
 	if !intent.AcceptsProtocol(candidate.Family) {
 		return false
 	}
+	if !candidate.Instance.Primitives.Supports(intent.Primitive) {
+		return false
+	}
 	if !intent.Requirements.SatisfiedBy(candidate.Instance.Capabilities) {
 		return false
 	}
@@ -62,7 +65,8 @@ func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir
 	}
 
 	descriptor := legacy.Family
-	if !descriptor.Primitives.Supports(intent.Primitive) {
+	if !descriptor.Primitives.Supports(intent.Primitive) ||
+		!legacy.Instance.Primitives.Supports(intent.Primitive) {
 		result.Mismatch |= DecisionMismatchPrimitive
 	}
 	if !intent.Requirements.SatisfiedBy(descriptor.Capabilities) ||
