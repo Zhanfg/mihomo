@@ -70,11 +70,10 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 	if err := p.Requirements.Validate(); err != nil {
 		return err
 	}
-	adapter, ok := registry.Protocol(p.Protocol)
-	if !ok {
-		return fmt.Errorf("cfir: execution plan references unknown protocol %s", p.Protocol)
+	descriptor, err := registry.EffectiveProtocolDescriptor(p.Protocol)
+	if err != nil {
+		return err
 	}
-	descriptor := adapter.Descriptor()
 	if !descriptor.Primitives.Supports(p.Primitive) {
 		return fmt.Errorf("cfir: protocol %s does not support %s", p.Protocol, p.Primitive)
 	}
