@@ -18,6 +18,7 @@ import (
 	P "github.com/metacubex/mihomo/constant/provider"
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
+	"github.com/metacubex/mihomo/tunnel/statistic"
 )
 
 // A provider health check already fans out over its own proxies. Android uses
@@ -43,6 +44,7 @@ func networkSettleDelay(android bool) time.Duration {
 type fanOut struct {
 	flushCache      func()
 	resetConnection func()
+	reapConnections func(epoch uint64) int
 	providers       func() map[string]P.ProxyProvider
 }
 
@@ -62,6 +64,7 @@ var defaultNotifier = &notifier{
 	work: fanOut{
 		flushCache:      iface.FlushCache,
 		resetConnection: resolver.ResetConnection,
+		reapConnections: statistic.DefaultManager.CloseBeforeNetworkEpoch,
 		providers:       tunnel.Providers,
 	},
 }
@@ -117,6 +120,14 @@ func (n *notifier) run(ctx context.Context, work fanOut) {
 		return
 	}
 	work.resetConnection()
+	if ctx.Err() != nil {
+		return
+	}
+	if work.reapConnections != nil {
+		if closed := work.reapConnections(netstate.CurrentEpoch()); closed > 0 {
+			log.Debugln("[NetChange] reaped %d connections from previous network epoch", closed)
+		}
+	}
 	if ctx.Err() != nil {
 		return
 	}
