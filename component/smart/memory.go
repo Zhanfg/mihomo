@@ -211,7 +211,7 @@ func (s *Store) StoreUnwrapResultWithCountry(group, config string, target string
 
 	targetKey := FormatDBKey(config, group, target)
 	existing, expireTime, found := unwrapCache.GetWithExpire(targetKey)
-	if found && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
+	if found && routeEvidenceCurrent(existing.Epoch) && len(existing.Proxies) > 0 && expireTime.After(time.Now()) {
 		// Do not rewrite a live winner merely to add metadata. If the caller is
 		// refreshing the same winner, enrich the cached entry in place.
 		if len(names) == len(existing.Proxies) {
