@@ -81,3 +81,29 @@ func (c SecurityContext) Meets(min SecurityProfile) bool {
 	}
 	return c.AttestedByCore && c.Profile.Meets(min)
 }
+
+
+func (c SecurityContext) Validate() error {
+	return c.Profile.Validate()
+}
+
+func validateSecurityOfferAndEvidence(offer, floor SecurityProfile, evidence SecurityContext) error {
+	if err := offer.Validate(); err != nil {
+		return err
+	}
+	if !offer.Meets(floor) {
+		return fmt.Errorf("cfir: security offer does not meet required floor")
+	}
+	if err := evidence.Validate(); err != nil {
+		return err
+	}
+	if evidence.AttestedByCore {
+		if !evidence.Profile.Meets(floor) {
+			return fmt.Errorf("cfir: attested security does not meet required floor")
+		}
+		if !evidence.Profile.Meets(offer) {
+			return fmt.Errorf("cfir: attested security is weaker than the selected offer")
+		}
+	}
+	return nil
+}
