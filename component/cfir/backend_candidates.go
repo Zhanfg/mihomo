@@ -90,6 +90,9 @@ func (p BackendProjection) Validate() error {
 	if p.Instance.Backend == "" {
 		return fmt.Errorf("cfir: backend projection instance has no backend id")
 	}
+	if p.Instance.Instance == "" {
+		return fmt.Errorf("cfir: backend projection instance has no instance id")
+	}
 	if p.Instance.Backend != p.Family.ID {
 		return fmt.Errorf(
 			"cfir: backend projection instance %s does not match family %s",
