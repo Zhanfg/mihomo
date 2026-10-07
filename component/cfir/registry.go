@@ -228,6 +228,13 @@ func (r *Registry) RegisterBackend(backend Backend) error {
 	return nil
 }
 
+func (r *Registry) Backend(id string) (Backend, bool) {
+	r.mu.RLock()
+	backend, ok := r.backends[id]
+	r.mu.RUnlock()
+	return backend, ok
+}
+
 func (r *Registry) Backends(kind BackendKind, platform Platform) []BackendDescriptor {
 	r.mu.RLock()
 	result := make([]BackendDescriptor, 0, len(r.backends))
