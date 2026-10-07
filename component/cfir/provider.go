@@ -102,6 +102,11 @@ func (r *Registry) RegisterProvider(bundle ProviderBundle) error {
 			return fmt.Errorf("cfir: provider %s conflicts with layer %s", bundle.Source.Project, id)
 		}
 	}
+	for _, adapter := range protocols {
+		if err := r.validateProtocolCompositionLocked(adapter.Descriptor(), layers); err != nil {
+			return fmt.Errorf("cfir: provider %s: %w", bundle.Source.Project, err)
+		}
+	}
 
 	for id, adapter := range protocols {
 		r.protocols[id] = adapter
