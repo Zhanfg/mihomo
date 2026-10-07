@@ -868,12 +868,24 @@ func (s *Store) rankTargetStatsWithExploration(group, config, target string, sta
 		if liveCache != nil {
 			cacheKey := FormatDBKey(KeyTypeStats, config, group, target, nodeName)
 			if record, ok := liveCache.Get(cacheKey); ok && record != nil {
+				routeEpoch := uint64(record.GetWeight(RouteEpochWeightType(isUDP)))
+				if !routeEvidenceCurrent(routeEpoch) {
+					continue
+				}
 				weight = record.GetWeight(weightType)
 				uncertainty = record.GetWeight(BanditUncertaintyWeightType(isUDP))
 				lastUsed = record.lastUsed.Load()
 			} else {
 				var record StatsRecord
 				if json.Unmarshal(data, &record) != nil || record.Weights == nil {
+					continue
+				}
+				routeEpoch := uint64(record.Weights[RouteEpochWeightType(isUDP)])
+				if !routeEvidenceCurrent(routeEpoch) {
+					continue
+				}
+				routeEpoch := uint64(record.Weights[RouteEpochWeightType(isUDP)])
+				if !routeEvidenceCurrent(routeEpoch) {
 					continue
 				}
 				weight = record.Weights[weightType]
