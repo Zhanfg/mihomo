@@ -23,6 +23,7 @@ func (r *Registry) MaterializeExecutionPlan(intent ExecutionIntent, scored Score
 		Instance:            scored.Candidate.Protocol.Instance,
 		InstancePrimitives:  scored.Candidate.Protocol.Primitives,
 		Capabilities:        scored.Candidate.Protocol.Capabilities,
+		SecurityOffer:       scored.Candidate.Protocol.SecurityOffer,
 		Security:            scored.Candidate.Protocol.Security,
 		Backend:             scored.Candidate.Backend.Backend,
 		BackendInstance:     scored.Candidate.Backend.Instance,
