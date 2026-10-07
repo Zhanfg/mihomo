@@ -118,6 +118,7 @@ func TestUnknownFutureProtocolSelfDescribesWithoutCoreSwitch(t *testing.T) {
 			Instance: cfir.ProtocolCandidate{
 				Protocol: "foo-next",
 				Instance: "foo-node",
+				Primitives: cfir.PrimitiveSet(cfir.PrimitiveStream, cfir.PrimitiveDatagram),
 				Capabilities: cfir.NewCapabilitySet(cfir.CapabilityPathMigration),
 				Security: cfir.SecurityContext{},
 			},
