@@ -41,8 +41,23 @@ func TestCFIRHysteria2ProjectionIsSelfDescribingButNotSecurityAttested(t *testin
 		!projection.Instance.Capabilities.HasExtension("hysteria2.obfs.salamander") {
 		t.Fatalf("HY2 instance capabilities incomplete: %#v", projection.Instance.Capabilities)
 	}
+	if projection.Instance.SecurityOffer.Authentication != cfir.AuthenticationServer ||
+		projection.Instance.SecurityOffer.Confidentiality != cfir.ConfidentialityTransport ||
+		projection.Instance.SecurityOffer.Integrity != cfir.IntegrityAuthenticated ||
+		!projection.Instance.SecurityOffer.ForwardSecrecy {
+		t.Fatalf("unexpected HY2 security offer: %#v", projection.Instance.SecurityOffer)
+	}
 	if projection.Instance.Security.AttestedByCore {
 		t.Fatal("configured TLS must not be treated as completed runtime attestation")
+	}
+
+	insecure := &Hysteria2{
+		Base: testProjectionBase("hy2-insecure", C.Hysteria2, true),
+		option: &Hysteria2Option{SkipCertVerify: true},
+	}
+	insecureProjection := insecure.CFIRProtocolProjection()
+	if insecureProjection.Instance.SecurityOffer.Authentication != cfir.AuthenticationNone {
+		t.Fatalf("skip-cert-verify HY2 must not offer server authentication: %#v", insecureProjection.Instance.SecurityOffer)
 	}
 }
 
@@ -72,6 +87,10 @@ func TestCFIRVLESSProjectionKeepsUDPAtInstanceScope(t *testing.T) {
 		!projection.Instance.Capabilities.HasExtension("vless.security.tls-configured") {
 		t.Fatalf("VLESS configured extensions missing: %#v", projection.Instance.Capabilities.Extensions())
 	}
+	if projection.Instance.SecurityOffer.Authentication != cfir.AuthenticationServer ||
+		projection.Instance.SecurityOffer.Confidentiality != cfir.ConfidentialityTransport {
+		t.Fatalf("unexpected VLESS TLS security offer: %#v", projection.Instance.SecurityOffer)
+	}
 	if projection.Instance.Security.AttestedByCore {
 		t.Fatal("VLESS TLS configuration must not self-attest runtime security")
 	}
@@ -87,6 +106,16 @@ func TestCFIRVLESSProjectionKeepsUDPAtInstanceScope(t *testing.T) {
 	if !udpProjection.Instance.Primitives.Supports(cfir.PrimitiveDatagram) ||
 		!udpProjection.Instance.Capabilities.HasExtension("vless.xudp") {
 		t.Fatalf("VLESS UDP instance evidence missing: %#v", udpProjection.Instance)
+	}
+
+	insecureTLS := &Vless{
+		Base: testProjectionBase("vless-insecure", C.Vless, false),
+		option: &VlessOption{TLS: true, SkipCertVerify: true},
+	}
+	insecureProjection := insecureTLS.CFIRProtocolProjection()
+	if insecureProjection.Instance.SecurityOffer.Authentication != cfir.AuthenticationNone ||
+		insecureProjection.Instance.SecurityOffer.Confidentiality != cfir.ConfidentialityTransport {
+		t.Fatalf("VLESS insecure TLS should retain encryption but drop peer authentication: %#v", insecureProjection.Instance.SecurityOffer)
 	}
 }
 
@@ -114,6 +143,9 @@ func TestCFIRWireGuardProjectionPreservesL3AndOptionalUDP(t *testing.T) {
 		!projection.Instance.Capabilities.HasStandard(cfir.CapabilityNativeResolve) ||
 		!projection.Instance.Capabilities.HasExtension("wireguard.ip-stack.mips") {
 		t.Fatalf("WireGuard instance capability projection incomplete: %#v", projection.Instance.Capabilities)
+	}
+	if projection.Instance.SecurityOffer != cfirWireGuardSecurity {
+		t.Fatalf("unexpected WireGuard security offer: %#v", projection.Instance.SecurityOffer)
 	}
 	if projection.Instance.Security.AttestedByCore {
 		t.Fatal("WireGuard configuration alone must not claim completed handshake attestation")
@@ -157,7 +189,20 @@ func TestCFIRMasqueProjectionDifferentiatesH2AndH3L4(t *testing.T) {
 		!h3Projection.Instance.Primitives.Supports(cfir.PrimitiveSession) {
 		t.Fatalf("MASQUE packet/session semantics missing: %#v", h3Projection.Instance.Primitives)
 	}
+	if h3Projection.Instance.SecurityOffer.Authentication != cfir.AuthenticationServer ||
+		h3Projection.Instance.SecurityOffer.Confidentiality != cfir.ConfidentialityTransport {
+		t.Fatalf("unexpected MASQUE pinned-key security offer: %#v", h3Projection.Instance.SecurityOffer)
+	}
 	if h3Projection.Instance.Security.AttestedByCore {
 		t.Fatal("MASQUE TLS configuration must not self-attest negotiated security")
+	}
+
+	insecure := &Masque{
+		Base: testProjectionBase("masque-insecure", C.Masque, false),
+		option: MasqueOption{SkipCertVerify: true},
+	}
+	insecureProjection := insecure.CFIRProtocolProjection()
+	if insecureProjection.Instance.SecurityOffer.Authentication != cfir.AuthenticationNone {
+		t.Fatalf("MASQUE skip-cert-verify must not offer peer authentication: %#v", insecureProjection.Instance.SecurityOffer)
 	}
 }
