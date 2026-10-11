@@ -86,6 +86,9 @@ func RankSnapshotThroughCFIRWithScores(
 				)
 			}
 		}
+		if score.SourceOrder == 0 {
+			score.SourceOrder = uint32(index + 1)
+		}
 		if err := score.Validate(); err != nil {
 			return nil, fmt.Errorf("cfir shadow: invalid Smart score for %s: %w", decision.LeafName, err)
 		}
