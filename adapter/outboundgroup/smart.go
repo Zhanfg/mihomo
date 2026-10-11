@@ -972,6 +972,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				continue
 			}
 
+			observeCFIRSmartConnection(metadata, p, c)
 			s.adoptUnwrapWinner(metadata, p)
 			s.onDialSuccess()
 			return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
