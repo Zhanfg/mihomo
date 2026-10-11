@@ -20,12 +20,22 @@ func (c PlanCandidate) Key() string {
 }
 
 type CandidateScore struct {
+	// LearnedUtility is Smart's learned/persisted utility after freshness decay
+	// but before request-local exploration, country and live-link policy.
+	// Zero means the ranker has no comparable learned score (for example a
+	// fallback-only candidate).
+	LearnedUtility float64
+
+	// Utility is the final request-local value used for ordering.
 	Utility     float64
 	Confidence  float64
 	Uncertainty float64
 }
 
 func (s CandidateScore) Validate() error {
+	if math.IsNaN(s.LearnedUtility) || math.IsInf(s.LearnedUtility, 0) {
+		return errors.New("cfir: candidate learned utility must be finite")
+	}
 	if math.IsNaN(s.Utility) || math.IsInf(s.Utility, 0) {
 		return errors.New("cfir: candidate utility must be finite")
 	}
