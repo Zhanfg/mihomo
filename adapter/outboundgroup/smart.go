@@ -1601,7 +1601,17 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		exploredUtility := w
 		effectiveWeight := adjustedGreedyWeight(w, fit, adapter.TunnelPathAssessmentForProxy(proxy))
 		if scoreRecorder != nil {
-			scoreRecorder.Record(proxy, learnedUtility, uncertainty, exploredUtility, effectiveWeight)
+			residualUncertainty := s.store.LiveTinyRouterUncertainty(
+				s.Name(), s.configName, metadata.SmartTarget, name, isUDP,
+			)
+			scoreRecorder.Record(
+				proxy,
+				learnedUtility,
+				uncertainty,
+				residualUncertainty,
+				exploredUtility,
+				effectiveWeight,
+			)
 		}
 		insertAt := len(selectedWeights)
 		for j := range selectedWeights {
