@@ -34,6 +34,11 @@ type CandidateScore struct {
 	Utility     float64
 	Confidence  float64
 	Uncertainty float64
+
+	// ResidualUncertainty is the nonlinear residual learner's confidence
+	// signal. It is diagnostic evidence and deliberately does not participate
+	// in RankPreparedCandidates tie-breaking.
+	ResidualUncertainty float64
 }
 
 func (s CandidateScore) Validate() error {
@@ -51,6 +56,10 @@ func (s CandidateScore) Validate() error {
 	}
 	if math.IsNaN(s.Uncertainty) || math.IsInf(s.Uncertainty, 0) || s.Uncertainty < 0 || s.Uncertainty > 1 {
 		return errors.New("cfir: candidate uncertainty must be finite and within [0,1]")
+	}
+	if math.IsNaN(s.ResidualUncertainty) || math.IsInf(s.ResidualUncertainty, 0) ||
+		s.ResidualUncertainty < 0 || s.ResidualUncertainty > 1 {
+		return errors.New("cfir: candidate residual uncertainty must be finite and within [0,1]")
 	}
 	return nil
 }
