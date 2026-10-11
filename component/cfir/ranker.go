@@ -39,6 +39,12 @@ type CandidateScore struct {
 	// signal. It is diagnostic evidence and deliberately does not participate
 	// in RankPreparedCandidates tie-breaking.
 	ResidualUncertainty float64
+
+	// SourceOrder is a 1-based stable order supplied by an already-ranked
+	// source such as live Smart. Zero means unspecified. It is consulted only
+	// when final Utility is exactly equal, preserving source semantics without
+	// perturbing the utility value itself.
+	SourceOrder uint32
 }
 
 func (s CandidateScore) Validate() error {
@@ -143,6 +149,13 @@ func RankPreparedCandidates(ctx context.Context, intent ExecutionIntent, ranker 
 			return -1
 		}
 		if a.Score.Utility < b.Score.Utility {
+			return 1
+		}
+		if a.Score.SourceOrder != 0 && b.Score.SourceOrder != 0 &&
+			a.Score.SourceOrder != b.Score.SourceOrder {
+			if a.Score.SourceOrder < b.Score.SourceOrder {
+				return -1
+			}
 			return 1
 		}
 		if a.Score.Confidence > b.Score.Confidence {
