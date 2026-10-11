@@ -42,7 +42,11 @@ func decisionEligible(intent cfir.ExecutionIntent, candidate legacybridge.Legacy
 	if !intent.Requirements.SatisfiedBy(candidate.Instance.Capabilities) {
 		return false
 	}
-	return candidate.Instance.Security.Meets(intent.SecurityFloor)
+	return cfir.ValidateSecurityAdmission(
+		candidate.Instance.SecurityOffer,
+		intent.SecurityFloor,
+		candidate.Instance.Security,
+	) == nil
 }
 
 func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir.Generation) (DecisionResult, error) {
@@ -73,7 +77,11 @@ func ObserveDecision(metadata *C.Metadata, proxy C.ProxyAdapter, generation cfir
 		!intent.Requirements.SatisfiedBy(legacy.Instance.Capabilities) {
 		result.Mismatch |= DecisionMismatchCapability
 	}
-	if !legacy.Instance.Security.Meets(intent.SecurityFloor) {
+	if cfir.ValidateSecurityAdmission(
+		legacy.Instance.SecurityOffer,
+		intent.SecurityFloor,
+		legacy.Instance.Security,
+	) != nil {
 		result.Mismatch |= DecisionMismatchSecurity
 	}
 
