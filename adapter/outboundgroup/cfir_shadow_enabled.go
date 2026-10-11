@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/metacubex/mihomo/component/cfir"
+	"github.com/metacubex/mihomo/component/cfir/legacybridge"
 	"github.com/metacubex/mihomo/component/cfir/shadow"
 	"github.com/metacubex/mihomo/component/netstate"
 	C "github.com/metacubex/mihomo/constant"
@@ -145,17 +146,24 @@ func (r *cfirSmartScoreRecorder) Finish(ranked []C.Proxy) {
 	if r == nil || len(ranked) == 0 {
 		return
 	}
+	instanceScores := make(map[string]cfir.CandidateScore, len(ranked))
 	for _, proxy := range ranked {
 		if proxy == nil {
 			return
 		}
-		if _, ok := r.scores[proxy.Name()]; !ok {
+		score, ok := r.scores[proxy.Name()]
+		if !ok {
 			// A fallback/top-up candidate has no comparable learned utility.
 			// The existing rank-only observer will validate this snapshot.
 			return
 		}
+		decision, err := legacybridge.ProjectProxyDecision(proxy, r.metadata)
+		if err != nil || !decision.Resolved || decision.LeafName == "" {
+			return
+		}
+		instanceScores[decision.LeafName] = score
 	}
-	observeCFIRSmartRankingWithScores(r.metadata, ranked, r.scores)
+	observeCFIRSmartRankingWithScores(r.metadata, ranked, instanceScores)
 }
 
 func observeCFIRSmartConnection(metadata *C.Metadata, proxy C.Proxy, conn C.Conn) {
