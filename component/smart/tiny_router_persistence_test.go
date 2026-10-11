@@ -3,6 +3,7 @@ package smart
 import (
 	"encoding/json"
 	"math"
+	"sync"
 	"testing"
 
 	"github.com/metacubex/mihomo/common/lru"
@@ -65,5 +66,52 @@ func TestLoadTinyRouterStateColdDefault(t *testing.T) {
 	got := LoadTinyRouterState(record, true)
 	if got.Updates != 0 || got.Uncertainty != 1 {
 		t.Fatalf("cold TinyRouter state=%#v want updates=0 uncertainty=1", got)
+	}
+}
+
+
+func TestTinyRouterConcurrentStateAccess(t *testing.T) {
+	record := &AtomicStatsRecord{
+		weights: lru.New[string, float64](lru.WithSize[string, float64](8)),
+	}
+	SaveTinyRouterState(record, false, TinyRouterState{
+		Updates: 1, Uncertainty: 1,
+	})
+
+	const workers = 8
+	const iterations = 250
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for worker := 0; worker < workers; worker++ {
+		worker := worker
+		go func() {
+			defer wg.Done()
+			for iteration := 0; iteration < iterations; iteration++ {
+				if worker%2 == 0 {
+					state := LoadTinyRouterState(record, false)
+					state.Updates += 1
+					state.Uncertainty = float64((worker+iteration)%100) / 100
+					state.Output[(worker+iteration)%TinyRouterHiddenDimension] += 0.001
+					SaveTinyRouterState(record, false, state)
+				} else {
+					_ = LoadTinyRouterState(record, false)
+					_ = record.snapshotTinyRouterState(false)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	got := LoadTinyRouterState(record, false)
+	if got.Updates <= 0 {
+		t.Fatalf("concurrent state access lost all updates: %#v", got)
+	}
+	for i, value := range got.Output {
+		if math.IsNaN(value) || math.IsInf(value, 0) || value < -0.45 || value > 0.45 {
+			t.Fatalf("output[%d]=%v outside normalized bounds", i, value)
+		}
+	}
+	if got.Uncertainty < 0 || got.Uncertainty > 1 {
+		t.Fatalf("uncertainty=%v outside [0,1]", got.Uncertainty)
 	}
 }
