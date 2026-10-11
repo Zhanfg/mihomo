@@ -18,10 +18,18 @@ var (
 )
 
 func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
+	observeCFIRSmartRankingWithScores(metadata, ranked, nil)
+}
+
+func observeCFIRSmartRankingWithScores(
+	metadata *C.Metadata,
+	ranked []C.Proxy,
+	scores map[string]cfir.CandidateScore,
+) {
 	generation := cfir.Generation{Network: netstate.CurrentEpoch()}
 	result, err := shadow.ObserveRankedCandidates(metadata, ranked, generation)
-	bridged, bridgeErr := shadow.RankSnapshotThroughCFIR(metadata, ranked, generation)
-	plan, planErr := shadow.MaterializeSnapshotPlan(metadata, ranked, generation)
+	bridged, bridgeErr := shadow.RankSnapshotThroughCFIRWithScores(metadata, ranked, generation, scores)
+	plan, planErr := shadow.MaterializeSnapshotPlanWithScores(metadata, ranked, generation, scores)
 
 	bridgeMatches := false
 	if bridgeErr == nil {
@@ -88,6 +96,60 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 	}
 }
 
+
+
+type cfirSmartScoreRecorder struct {
+	metadata *C.Metadata
+	scores   map[string]cfir.CandidateScore
+}
+
+func newCFIRSmartScoreRecorder(metadata *C.Metadata) *cfirSmartScoreRecorder {
+	return &cfirSmartScoreRecorder{
+		metadata: metadata,
+		scores:   make(map[string]cfir.CandidateScore, maxSelected),
+	}
+}
+
+func (r *cfirSmartScoreRecorder) Record(
+	proxy C.Proxy,
+	learnedUtility float64,
+	uncertainty float64,
+	exploredUtility float64,
+	finalUtility float64,
+) {
+	if r == nil || proxy == nil {
+		return
+	}
+	if uncertainty < 0 {
+		uncertainty = 0
+	} else if uncertainty > 1 {
+		uncertainty = 1
+	}
+	r.scores[proxy.Name()] = cfir.CandidateScore{
+		LearnedUtility: learnedUtility,
+		Utility:        finalUtility,
+		Confidence:     1 - uncertainty,
+		Uncertainty:    uncertainty,
+	}
+	_ = exploredUtility // retained at this boundary for future score tracing.
+}
+
+func (r *cfirSmartScoreRecorder) Finish(ranked []C.Proxy) {
+	if r == nil || len(ranked) == 0 {
+		return
+	}
+	for _, proxy := range ranked {
+		if proxy == nil {
+			return
+		}
+		if _, ok := r.scores[proxy.Name()]; !ok {
+			// A fallback/top-up candidate has no comparable learned utility.
+			// The existing rank-only observer will validate this snapshot.
+			return
+		}
+	}
+	observeCFIRSmartRankingWithScores(r.metadata, ranked, r.scores)
+}
 
 func observeCFIRSmartConnection(metadata *C.Metadata, proxy C.Proxy, conn C.Conn) {
 	result, err := shadow.ObserveSelectedConnection(
