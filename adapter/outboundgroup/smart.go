@@ -1488,6 +1488,7 @@ func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
 }
 
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, explorationAlpha float64) []C.Proxy {
+	scoreRecorder := newCFIRSmartScoreRecorder(metadata)
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
 	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
@@ -1559,6 +1560,10 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	selected := make([]C.Proxy, 0, minCount+1)
 	selectedWeights := make([]float64, 0, minCount+1)
+	finishSelection := func(result []C.Proxy) []C.Proxy {
+		scoreRecorder.Finish(result)
+		return result
+	}
 
 	for i, name := range names {
 		proxy := proxyByName[name]
@@ -1583,11 +1588,21 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		}
 
 		_, fit := countryFit(proxy)
+		learnedUtility := w
+		uncertainty := 0.0
+		if explorationAlpha > 0 || scoreRecorder != nil {
+			uncertainty = s.store.LiveBanditUncertainty(
+				s.Name(), s.configName, metadata.SmartTarget, name, isUDP,
+			)
+		}
 		if explorationAlpha > 0 {
-			uncertainty := s.store.LiveBanditUncertainty(s.Name(), s.configName, metadata.SmartTarget, name, isUDP)
 			w = smart.ExplorationBonus(w, uncertainty, explorationAlpha)
 		}
+		exploredUtility := w
 		effectiveWeight := adjustedGreedyWeight(w, fit, adapter.TunnelPathAssessmentForProxy(proxy))
+		if scoreRecorder != nil {
+			scoreRecorder.Record(proxy, learnedUtility, uncertainty, exploredUtility, effectiveWeight)
+		}
 		insertAt := len(selectedWeights)
 		for j := range selectedWeights {
 			if effectiveWeight > selectedWeights[j] {
@@ -1610,15 +1625,15 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 
 	// Unwrap result should not filled
 	if weights == nil && len(selected) > 0 {
-		return selected
+		return finishSelection(selected)
 	}
 
 	if len(selected) >= len(all) {
-		return selected
+		return finishSelection(selected)
 	}
 
 	if len(selected) >= minCount {
-		return selected[:minCount]
+		return finishSelection(selected[:minCount])
 	}
 
 	hasPriority := len(s.policyPriority) > 0
@@ -1806,7 +1821,7 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		selected = append(selected, s.EmptyFallback())
 	}
 
-	return selected
+	return finishSelection(selected)
 }
 
 // selectProxies returns the nodes to dial and whether the target is already pinned to
