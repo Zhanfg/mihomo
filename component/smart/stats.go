@@ -625,6 +625,31 @@ func (r *AtomicStatsRecord) SetWeight(weightType string, value float64) {
 }
 
 
+func (s *Store) LiveTinyRouterUncertainty(group, config, target, node string, isUDP bool) float64 {
+	if !cacheReady.Load() {
+		return 1
+	}
+	cacheKey := FormatDBKey(KeyTypeStats, config, group, target, node)
+	record, ok := recordCache.Get(cacheKey)
+	if !ok || record == nil {
+		return 1
+	}
+	record.tinyRouterMu.RLock()
+	var state *TinyRouterState
+	if isUDP {
+		state = record.tinyRouterUDP
+	} else {
+		state = record.tinyRouterTCP
+	}
+	if state == nil || state.Updates <= 0 {
+		record.tinyRouterMu.RUnlock()
+		return 1
+	}
+	uncertainty := clamp01(state.Uncertainty)
+	record.tinyRouterMu.RUnlock()
+	return uncertainty
+}
+
 func (s *Store) LiveBanditUncertainty(group, config, target, node string, isUDP bool) float64 {
 	// Unknown/cold records are intentionally treated as maximally uncertain.
 	// Resident records expose one atomic scalar: no model mutex and no generic
