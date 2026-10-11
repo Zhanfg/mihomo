@@ -27,6 +27,8 @@ func cfirProjection(
 	instancePrimitives cfir.PrimitiveMask,
 	familyCapabilities cfir.CapabilitySet,
 	instanceCapabilities cfir.CapabilitySet,
+	familySecurity cfir.SecurityProfile,
+	securityOffer cfir.SecurityProfile,
 ) cfir.ProtocolProjection {
 	return cfir.ProtocolProjection{
 		Family: cfir.ProtocolDescriptor{
@@ -35,17 +37,40 @@ func cfirProjection(
 			MinCFIR:      cfir.CurrentVersion,
 			Primitives:   familyPrimitives,
 			Capabilities: familyCapabilities,
+			Security:     familySecurity,
 		},
 		Instance: cfir.ProtocolCandidate{
 			Protocol:     id,
 			Instance:     instance,
-			Primitives:   instancePrimitives,
-			Capabilities: instanceCapabilities,
+			Primitives:    instancePrimitives,
+			Capabilities:  instanceCapabilities,
+			SecurityOffer: securityOffer,
 			// Configuration describes intended security, not completed
 			// negotiation. Runtime attestation is deliberately left false.
 			Security: cfir.SecurityContext{},
 		},
 	}
+}
+
+func cfirTLSOffer(serverAuthenticated bool, forwardSecrecy bool) cfir.SecurityProfile {
+	authentication := cfir.AuthenticationNone
+	if serverAuthenticated {
+		authentication = cfir.AuthenticationServer
+	}
+	return cfir.SecurityProfile{
+		Authentication:  authentication,
+		Confidentiality: cfir.ConfidentialityTransport,
+		Integrity:       cfir.IntegrityAuthenticated,
+		ForwardSecrecy:  forwardSecrecy,
+	}
+}
+
+var cfirWireGuardSecurity = cfir.SecurityProfile{
+	Authentication:   cfir.AuthenticationMutual,
+	Confidentiality:  cfir.ConfidentialityEndToEnd,
+	Integrity:        cfir.IntegrityAuthenticated,
+	ForwardSecrecy:   true,
+	ReplayProtection: true,
 }
 
 func (h *Hysteria2) CFIRProtocolProjection() cfir.ProtocolProjection {
@@ -92,10 +117,14 @@ func (h *Hysteria2) CFIRProtocolProjection() cfir.ProtocolProjection {
 		cfir.PrimitiveDatagram,
 		cfir.PrimitiveSession,
 	)
+	serverAuthenticated := h.option != nil && !h.option.SkipCertVerify
+	familySecurity := cfirTLSOffer(false, false)
+	securityOffer := cfirTLSOffer(serverAuthenticated, true)
 	return cfirProjection(
 		"hysteria2", "Hysteria2", h.Name(),
 		primitives, primitives,
 		familyCaps, instanceCaps,
+		familySecurity, securityOffer,
 	)
 }
 
@@ -124,6 +153,7 @@ func (v *Vless) CFIRProtocolProjection() cfir.ProtocolProjection {
 	instancePrimitives := cfir.PrimitiveSet(cfir.PrimitiveStream)
 	instanceStandard := make([]cfir.StandardCapability, 0, 1)
 	instanceExtensions := make([]string, 0, 8)
+	securityOffer := cfir.SecurityProfile{}
 	if v.SupportUDP() {
 		instancePrimitives |= cfir.PrimitiveSet(cfir.PrimitiveDatagram)
 		instanceExtensions = append(instanceExtensions, "vless.udp")
@@ -154,6 +184,7 @@ func (v *Vless) CFIRProtocolProjection() cfir.ProtocolProjection {
 		}
 		if v.option.TLS {
 			instanceExtensions = append(instanceExtensions, "vless.security.tls-configured")
+			securityOffer = cfirTLSOffer(!v.option.SkipCertVerify, false)
 		}
 		if v.realityConfig != nil {
 			instanceExtensions = append(instanceExtensions, "vless.security.reality-configured")
@@ -178,6 +209,7 @@ func (v *Vless) CFIRProtocolProjection() cfir.ProtocolProjection {
 		instancePrimitives,
 		familyCaps,
 		cfirCaps(instanceStandard, instanceExtensions...),
+		cfir.SecurityProfile{}, securityOffer,
 	)
 }
 
@@ -235,6 +267,7 @@ func (w *WireGuard) CFIRProtocolProjection() cfir.ProtocolProjection {
 		instancePrimitives,
 		familyCaps,
 		cfirCaps(instanceStandard, instanceExtensions...),
+		cfirWireGuardSecurity, cfirWireGuardSecurity,
 	)
 }
 
@@ -265,6 +298,7 @@ func (m *Masque) CFIRProtocolProjection() cfir.ProtocolProjection {
 	}
 	instanceStandard := []cfir.StandardCapability{cfir.CapabilityMultiplex}
 	instanceExtensions := []string{"masque.security.tls-configured"}
+	securityOffer := cfirTLSOffer(!m.option.SkipCertVerify, false)
 
 	switch strings.ToLower(m.option.Network) {
 	case "h2":
@@ -305,6 +339,7 @@ func (m *Masque) CFIRProtocolProjection() cfir.ProtocolProjection {
 		instancePrimitives,
 		familyCaps,
 		cfirCaps(instanceStandard, instanceExtensions...),
+		cfirTLSOffer(false, false), securityOffer,
 	)
 }
 
