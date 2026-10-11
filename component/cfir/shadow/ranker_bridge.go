@@ -26,11 +26,23 @@ func (r SnapshotRanker) ScoreCandidates(_ context.Context, _ cfir.ExecutionInten
 }
 
 // RankSnapshotThroughCFIR converts the exact live Smart order into the generic
-// Ranker ABI without asking Smart to make a second decision. Utility is an
-// order-preserving shadow score only; it is not yet Smart's internal model
-// weight. The purpose is to prove candidate identity/legality/order parity
-// before extracting real model utility into a pure scorer.
+// Ranker ABI without asking Smart to make a second decision. Callers that do
+// not have score evidence get a strictly order-preserving fallback score.
 func RankSnapshotThroughCFIR(metadata *C.Metadata, ranked []C.Proxy, generation cfir.Generation) ([]cfir.ScoredCandidate, error) {
+	return RankSnapshotThroughCFIRWithScores(metadata, ranked, generation, nil)
+}
+
+// RankSnapshotThroughCFIRWithScores consumes scores produced by the same live
+// Smart selection pass. The map is keyed by concrete proxy instance name.
+// Missing entries deliberately fall back to rank-only evidence so pins,
+// fallback candidates and legacy paths remain observable without inventing a
+// model score.
+func RankSnapshotThroughCFIRWithScores(
+	metadata *C.Metadata,
+	ranked []C.Proxy,
+	generation cfir.Generation,
+	instanceScores map[string]cfir.CandidateScore,
+) ([]cfir.ScoredCandidate, error) {
 	intent, err := legacybridge.IntentForLegacyDecision(metadata, generation, cfir.RouteActionForward)
 	if err != nil {
 		return nil, err
@@ -50,19 +62,22 @@ func RankSnapshotThroughCFIR(metadata *C.Metadata, ranked []C.Proxy, generation 
 		if !decisionEligible(intent, decision) {
 			continue
 		}
-		candidate := cfir.PlanCandidate{
-			Protocol: decision.Instance,
-		}
+		candidate := cfir.PlanCandidate{Protocol: decision.Instance}
 		key := candidate.Key()
 		if _, exists := scores[key]; exists {
 			continue
 		}
-		// Strictly monotonic utility preserves the actual Smart snapshot order.
-		// Confidence/uncertainty remain neutral until Smart exports real values.
-		score := cfir.CandidateScore{
-			Utility:    total - float64(index),
-			Confidence: 0.5,
-			Uncertainty: 0.5,
+
+		score, ok := instanceScores[decision.LeafName]
+		if !ok {
+			score = cfir.CandidateScore{
+				Utility:    total - float64(index),
+				Confidence: 0.5,
+				Uncertainty: 0.5,
+			}
+		}
+		if err := score.Validate(); err != nil {
+			return nil, fmt.Errorf("cfir shadow: invalid Smart score for %s: %w", decision.LeafName, err)
 		}
 		candidates = append(candidates, candidate)
 		scores[key] = score
@@ -87,7 +102,15 @@ func MaterializeSnapshotPlan(metadata *C.Metadata, ranked []C.Proxy, generation 
 	if len(scored) == 0 {
 		return cfir.ExecutionPlan{}, nil
 	}
+	return materializeRankedSnapshotPlan(metadata, ranked, generation, scored)
+}
 
+func materializeRankedSnapshotPlan(
+	metadata *C.Metadata,
+	ranked []C.Proxy,
+	generation cfir.Generation,
+	scored []cfir.ScoredCandidate,
+) (cfir.ExecutionPlan, error) {
 	selected := scored[0].Candidate.Protocol
 	var selectedDecision legacybridge.LegacyDecision
 	for _, proxy := range ranked {
@@ -122,4 +145,21 @@ func MaterializeSnapshotPlan(metadata *C.Metadata, ranked []C.Proxy, generation 
 		return cfir.ExecutionPlan{}, err
 	}
 	return registry.MaterializeExecutionPlan(intent, scored[0])
+}
+
+
+func MaterializeSnapshotPlanWithScores(
+	metadata *C.Metadata,
+	ranked []C.Proxy,
+	generation cfir.Generation,
+	instanceScores map[string]cfir.CandidateScore,
+) (cfir.ExecutionPlan, error) {
+	scored, err := RankSnapshotThroughCFIRWithScores(metadata, ranked, generation, instanceScores)
+	if err != nil {
+		return cfir.ExecutionPlan{}, err
+	}
+	if len(scored) == 0 {
+		return cfir.ExecutionPlan{}, nil
+	}
+	return materializeRankedSnapshotPlan(metadata, ranked, generation, scored)
 }
