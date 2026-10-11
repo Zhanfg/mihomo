@@ -814,7 +814,7 @@ func (w *WireGuard) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 	if conn == nil {
 		return nil, E.New("conn is nil")
 	}
-	return NewConn(conn, w), nil
+	return NewConnWithCFIRSecurityEvidence(conn, w, w.cfirSecurityEvidence()), nil
 }
 
 func (w *WireGuard) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
