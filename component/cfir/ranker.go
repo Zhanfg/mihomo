@@ -26,6 +26,10 @@ type CandidateScore struct {
 	// fallback-only candidate).
 	LearnedUtility float64
 
+	// ExploredUtility is LearnedUtility after the request-local exploration
+	// bonus but before country/live-link policy.
+	ExploredUtility float64
+
 	// Utility is the final request-local value used for ordering.
 	Utility     float64
 	Confidence  float64
@@ -35,6 +39,9 @@ type CandidateScore struct {
 func (s CandidateScore) Validate() error {
 	if math.IsNaN(s.LearnedUtility) || math.IsInf(s.LearnedUtility, 0) {
 		return errors.New("cfir: candidate learned utility must be finite")
+	}
+	if math.IsNaN(s.ExploredUtility) || math.IsInf(s.ExploredUtility, 0) {
+		return errors.New("cfir: candidate explored utility must be finite")
 	}
 	if math.IsNaN(s.Utility) || math.IsInf(s.Utility, 0) {
 		return errors.New("cfir: candidate utility must be finite")
