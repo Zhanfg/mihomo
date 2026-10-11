@@ -118,6 +118,8 @@ jobs:
           cache: true
       - name: Test CFIR packages
         run: go test ./component/cfir/... -count=1
+      - name: Test Smart neural residual and persistence
+        run: go test ./component/smart -run '^TestTinyRouter|^TestLoadTinyRouter' -count=1
       - name: Compile production data plane with zero-cost CFIR hooks
         run: go test ./tunnel ./adapter/outboundgroup -run '^$' -count=1
       - name: Compile live CFIR shadow data plane
