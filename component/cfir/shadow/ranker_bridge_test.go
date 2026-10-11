@@ -79,8 +79,9 @@ func TestScoredSnapshotCarriesRealSmartUtilityStages(t *testing.T) {
 			LearnedUtility:  0.72,
 			ExploredUtility: 0.78,
 			Utility:         0.74,
-			Confidence:      0.80,
-			Uncertainty:     0.20,
+			Confidence:          0.80,
+			Uncertainty:         0.20,
+			ResidualUncertainty: 0.31,
 		},
 		"hy2-b": {
 			LearnedUtility:  0.61,
@@ -106,7 +107,8 @@ func TestScoredSnapshotCarriesRealSmartUtilityStages(t *testing.T) {
 	if got[0].Score.LearnedUtility != 0.72 ||
 		got[0].Score.ExploredUtility != 0.78 ||
 		got[0].Score.Utility != 0.74 ||
-		got[0].Score.Uncertainty != 0.20 {
+		got[0].Score.Uncertainty != 0.20 ||
+		got[0].Score.ResidualUncertainty != 0.31 {
 		t.Fatalf("Smart score stages were not preserved: %#v", got[0].Score)
 	}
 }
@@ -165,5 +167,38 @@ func TestScoredSnapshotUsesFinalUtilityForRanking(t *testing.T) {
 	}
 	if len(got) != 2 || got[0].Candidate.Protocol.Instance != "hy2-b" {
 		t.Fatalf("final request utility did not control Ranker order: %#v", got)
+	}
+}
+
+
+func TestScoredSnapshotExactUtilityTiePreservesLiveOrder(t *testing.T) {
+	first := &fakeProxy{name: "hy2-z", kind: C.Hysteria2, udp: true}
+	second := &fakeProxy{name: "hy2-a", kind: C.Hysteria2, udp: true}
+
+	got, err := RankSnapshotThroughCFIRWithScores(
+		decisionMetadata(C.UDP),
+		[]C.Proxy{first, second},
+		cfir.Generation{},
+		map[string]cfir.CandidateScore{
+			"hy2-z": {
+				LearnedUtility: 0.7, ExploredUtility: 0.7, Utility: 0.7,
+				Confidence: 0.2, Uncertainty: 0.8, ResidualUncertainty: 0.9,
+			},
+			"hy2-a": {
+				LearnedUtility: 0.7, ExploredUtility: 0.7, Utility: 0.7,
+				Confidence: 0.9, Uncertainty: 0.1, ResidualUncertainty: 0.1,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 ||
+		got[0].Candidate.Protocol.Instance != "hy2-z" ||
+		got[1].Candidate.Protocol.Instance != "hy2-a" {
+		t.Fatalf("exact utility tie lost live Smart order: %#v", got)
+	}
+	if got[0].Score.SourceOrder != 1 || got[1].Score.SourceOrder != 2 {
+		t.Fatalf("source order evidence missing: %#v", got)
 	}
 }
