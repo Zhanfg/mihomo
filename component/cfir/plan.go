@@ -232,3 +232,14 @@ func (p ExecutionPlan) WithSecurityAttestation(evidence SecurityContext) (Execut
 	p.Security = evidence
 	return p, nil
 }
+
+
+// WithSecurityEvidence extracts connection-scoped evidence and seals it into
+// the plan. This is the intended post-dial bridge for CFIR-aware executors.
+func (p ExecutionPlan) WithSecurityEvidence(value any) (ExecutionPlan, error) {
+	evidence, ok := SecurityEvidenceFrom(value)
+	if !ok {
+		return ExecutionPlan{}, errors.New("cfir: connection has no valid runtime security evidence")
+	}
+	return p.WithSecurityAttestation(evidence)
+}
