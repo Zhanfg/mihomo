@@ -20,6 +20,7 @@ func (r *cfirSmartScoreRecorder) Record(
 	proxy C.Proxy,
 	learnedUtility float64,
 	uncertainty float64,
+	residualUncertainty float64,
 	exploredUtility float64,
 	finalUtility float64,
 ) {}
