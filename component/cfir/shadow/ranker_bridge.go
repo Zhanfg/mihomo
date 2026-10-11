@@ -34,9 +34,9 @@ func RankSnapshotThroughCFIR(metadata *C.Metadata, ranked []C.Proxy, generation 
 
 // RankSnapshotThroughCFIRWithScores consumes scores produced by the same live
 // Smart selection pass. The map is keyed by concrete proxy instance name.
-// Missing entries deliberately fall back to rank-only evidence so pins,
-// fallback candidates and legacy paths remain observable without inventing a
-// model score.
+// A non-nil score snapshot must cover every admitted candidate: mixing learned
+// utilities with fabricated rank utilities would put unlike scales in one
+// ordering. Call RankSnapshotThroughCFIR for pin/fallback/rank-only snapshots.
 func RankSnapshotThroughCFIRWithScores(
 	metadata *C.Metadata,
 	ranked []C.Proxy,
@@ -68,12 +68,21 @@ func RankSnapshotThroughCFIRWithScores(
 			continue
 		}
 
-		score, ok := instanceScores[decision.LeafName]
-		if !ok {
+		var score cfir.CandidateScore
+		if instanceScores == nil {
 			score = cfir.CandidateScore{
 				Utility:    total - float64(index),
 				Confidence: 0.5,
 				Uncertainty: 0.5,
+			}
+		} else {
+			var ok bool
+			score, ok = instanceScores[decision.LeafName]
+			if !ok {
+				return nil, fmt.Errorf(
+					"cfir shadow: scored snapshot is incomplete; missing %s",
+					decision.LeafName,
+				)
 			}
 		}
 		if err := score.Validate(); err != nil {
