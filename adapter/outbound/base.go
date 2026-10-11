@@ -11,6 +11,7 @@ import (
 
 	N "github.com/metacubex/mihomo/common/net"
 	"github.com/metacubex/mihomo/common/utils"
+	"github.com/metacubex/mihomo/component/cfir"
 	"github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/component/proxydialer"
 	"github.com/metacubex/mihomo/component/resolver"
@@ -224,9 +225,15 @@ func (b *BasicOption) NewTunnel() C.Tunnel {
 
 type conn struct {
 	N.ExtendedConn
-	chain       C.Chain
-	pdChain     C.Chain
-	adapterAddr string
+	chain            C.Chain
+	pdChain          C.Chain
+	adapterAddr      string
+	securityEvidence cfir.SecurityContext
+	securityReady    bool
+}
+
+func (c *conn) CFIRSecurityEvidence() (cfir.SecurityContext, bool) {
+	return c.securityEvidence, c.securityReady
 }
 
 func (c *conn) RemoteDestination() string {
@@ -282,6 +289,14 @@ type ipstackConn interface {
 }
 
 func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
+	return newConn(c, a, cfir.SecurityContext{}, false)
+}
+
+func NewConnWithCFIRSecurityEvidence(c net.Conn, a C.ProxyAdapter, evidence cfir.SecurityContext) C.Conn {
+	return newConn(c, a, evidence, evidence.AttestedByCore)
+}
+
+func newConn(c net.Conn, a C.ProxyAdapter, evidence cfir.SecurityContext, ready bool) C.Conn {
 	switch c.(type) {
 	case syscall.Conn: // exclusion system conn like *net.TCPConn
 		break
@@ -290,19 +305,30 @@ func NewConn(c net.Conn, a C.ProxyAdapter) C.Conn {
 	default:
 		c = N.NewDeadlineConn(c) // most conn from outbound can't handle readDeadline correctly
 	}
-	cc := &conn{N.NewExtendedConn(c), nil, nil, a.Addr()}
+	cc := &conn{
+		ExtendedConn:     N.NewExtendedConn(c),
+		adapterAddr:      a.Addr(),
+		securityEvidence: evidence,
+		securityReady:    ready,
+	}
 	cc.AppendToChains(a)
 	return cc
 }
 
 type packetConn struct {
 	N.EnhancePacketConn
-	chain       C.Chain
-	pdChain     C.Chain
-	adapterName string
-	connID      string
-	adapterAddr string
-	resolveUDP  func(ctx context.Context, metadata *C.Metadata) error
+	chain            C.Chain
+	pdChain          C.Chain
+	adapterName      string
+	connID           string
+	adapterAddr      string
+	resolveUDP       func(ctx context.Context, metadata *C.Metadata) error
+	securityEvidence cfir.SecurityContext
+	securityReady    bool
+}
+
+func (c *packetConn) CFIRSecurityEvidence() (cfir.SecurityContext, bool) {
+	return c.securityEvidence, c.securityReady
 }
 
 func (c *packetConn) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
@@ -352,6 +378,14 @@ func (c *packetConn) AddRef(ref any) {
 }
 
 func NewPacketConn(pc net.PacketConn, a ProxyAdapter) C.PacketConn {
+	return newPacketConn(pc, a, cfir.SecurityContext{}, false)
+}
+
+func NewPacketConnWithCFIRSecurityEvidence(pc net.PacketConn, a ProxyAdapter, evidence cfir.SecurityContext) C.PacketConn {
+	return newPacketConn(pc, a, evidence, evidence.AttestedByCore)
+}
+
+func newPacketConn(pc net.PacketConn, a ProxyAdapter, evidence cfir.SecurityContext, ready bool) C.PacketConn {
 	epc := N.NewEnhancePacketConn(pc)
 	switch pc.(type) {
 	case syscall.Conn: // exclusion system conn like *net.UDPConn
@@ -361,7 +395,15 @@ func NewPacketConn(pc net.PacketConn, a ProxyAdapter) C.PacketConn {
 	default:
 		epc = N.NewDeadlineEnhancePacketConn(epc) // most conn from outbound can't handle readDeadline correctly
 	}
-	cpc := &packetConn{epc, nil, nil, a.Name(), utils.NewUUIDV4().String(), a.Addr(), a.ResolveUDP}
+	cpc := &packetConn{
+		EnhancePacketConn: epc,
+		adapterName:       a.Name(),
+		connID:            utils.NewUUIDV4().String(),
+		adapterAddr:       a.Addr(),
+		resolveUDP:        a.ResolveUDP,
+		securityEvidence:  evidence,
+		securityReady:     ready,
+	}
 	cpc.AppendToChains(a)
 	return cpc
 }
