@@ -99,7 +99,7 @@ func (r *Registry) ValidateProtocolCandidate(intent ExecutionIntent, candidate P
 			candidate.Protocol, candidate.Instance,
 		)
 	}
-	if err := validateSecurityOfferAndEvidence(candidate.SecurityOffer, intent.SecurityFloor, candidate.Security); err != nil {
+	if err := ValidateSecurityAdmission(candidate.SecurityOffer, intent.SecurityFloor, candidate.Security); err != nil {
 		return ProtocolDescriptor{}, fmt.Errorf(
 			"cfir: protocol instance %s/%s security admission failed: %w",
 			candidate.Protocol, candidate.Instance, err,
