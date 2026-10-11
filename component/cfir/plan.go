@@ -177,7 +177,7 @@ func (p ExecutionPlan) Validate(registry *Registry) error {
 		if descriptor.Security != (SecurityProfile{}) && !p.SecurityOffer.Meets(descriptor.Security) {
 			return fmt.Errorf("cfir: protocol instance %s/%s security offer is below family minimum", p.Protocol, p.Instance)
 		}
-		if err := validateSecurityOfferAndEvidence(p.SecurityOffer, p.SecurityFloor, p.Security); err != nil {
+		if err := ValidateSecurityAdmission(p.SecurityOffer, p.SecurityFloor, p.Security); err != nil {
 			return fmt.Errorf("cfir: protocol instance %s/%s security validation failed: %w", p.Protocol, p.Instance, err)
 		}
 	} else if p.Protocol != "" {
@@ -226,7 +226,7 @@ func (p ExecutionPlan) WithSecurityAttestation(evidence SecurityContext) (Execut
 	if !evidence.AttestedByCore {
 		return ExecutionPlan{}, errors.New("cfir: runtime security evidence is not core-attested")
 	}
-	if err := validateSecurityOfferAndEvidence(p.SecurityOffer, p.SecurityFloor, evidence); err != nil {
+	if err := ValidateSecurityAdmission(p.SecurityOffer, p.SecurityFloor, evidence); err != nil {
 		return ExecutionPlan{}, err
 	}
 	p.Security = evidence
