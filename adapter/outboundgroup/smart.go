@@ -978,6 +978,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 				continue
 			}
 
+			observeCFIRSmartConnection(metadata, p, c)
 			s.adoptUnwrapWinner(metadata, p)
 			s.onDialSuccess()
 			return s.WrapConnWithMetric(c, p, metadata, connectTime), nil
@@ -990,6 +991,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 
 	all := s.GetProxies(true)
 	proxies, pinned := s.selectProxies(metadata, all)
+	observeCFIRSmartRanking(metadata, proxies)
 	weak := s.isWeakDialPath(metadata, proxies)
 	conn, err := tryDial(proxies, pinned, weak)
 	if err == nil || tunnel.ShouldStopRetry(err) {
@@ -1005,6 +1007,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
 		all = s.GetProxies(true)
 		fresh, _ := s.selectProxies(metadata, all)
+		observeCFIRSmartRanking(metadata, fresh)
 		if len(fresh) > 0 {
 			failedProxies = fresh
 			conn, retryErr := tryDial(fresh, false, s.isWeakDialPath(metadata, fresh))
@@ -1078,6 +1081,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 
 	all := s.GetProxies(true)
 	proxies, pinned := s.selectProxies(metadata, all)
+	observeCFIRSmartRanking(metadata, proxies)
 	pc, err = tryListen(proxies, pinned)
 	if err == nil || tunnel.ShouldStopRetry(err) {
 		return pc, err
@@ -1091,6 +1095,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
 		all = s.GetProxies(true)
 		fresh, _ := s.selectProxies(metadata, all)
+		observeCFIRSmartRanking(metadata, fresh)
 		if len(fresh) > 0 {
 			failedProxies = fresh
 			pc, retryErr := tryListen(fresh, false)

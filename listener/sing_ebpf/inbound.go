@@ -61,6 +61,10 @@ type Inbound struct {
 	datapathReportCancel context.CancelFunc
 	datapathReportDone   chan struct{}
 
+	// kernelProbeReport is populated by the existing asynchronous capability
+	// probe. CFIR only reads this snapshot; it does not schedule another probe.
+	kernelProbeReport atomic.TypedValue[*ECommon.KernelProbeReport]
+
 	localDNSMode        string
 	sharedDNSMode       string
 	localIPv6           bool

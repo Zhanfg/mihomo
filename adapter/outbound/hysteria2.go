@@ -94,7 +94,7 @@ func (h *Hysteria2) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.
 	if err != nil {
 		return nil, err
 	}
-	return NewConn(c, h), nil
+	return NewConnWithCFIRSecurityEvidence(c, h, h.cfirSecurityEvidence()), nil
 }
 
 func (h *Hysteria2) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {

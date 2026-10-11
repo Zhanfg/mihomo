@@ -362,7 +362,7 @@ func (v *Vless) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn
 	if err != nil {
 		return nil, fmt.Errorf("%s connect error: %s", v.addr, err.Error())
 	}
-	return NewConn(c, v), err
+	return NewConnWithCFIRSecurityEvidence(c, v, v.cfirSecurityEvidence()), err
 }
 
 // ListenPacketContext implements C.ProxyAdapter
@@ -389,18 +389,22 @@ func (v *Vless) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		if metadata.SourceValid() {
 			globalID = utils.GlobalID(metadata.SourceAddress())
 		}
-		return NewPacketConn(N.NewThreadSafePacketConn(
+		return NewPacketConnWithCFIRSecurityEvidence(N.NewThreadSafePacketConn(
 			vmessSing.NewXUDPConn(c,
 				globalID,
 				M.SocksaddrFromNet(metadata.UDPAddr())),
-		), v), nil
+		), v, v.cfirSecurityEvidence()), nil
 	} else if v.option.PacketAddr {
-		return NewPacketConn(N.NewThreadSafePacketConn(
+		return NewPacketConnWithCFIRSecurityEvidence(N.NewThreadSafePacketConn(
 			packetaddr.NewConn(v.client.PacketConn(c, metadata.UDPAddr()),
 				M.SocksaddrFromNet(metadata.UDPAddr())),
-		), v), nil
+		), v, v.cfirSecurityEvidence()), nil
 	}
-	return NewPacketConn(N.NewThreadSafePacketConn(v.client.PacketConn(c, metadata.UDPAddr())), v), nil
+	return NewPacketConnWithCFIRSecurityEvidence(
+		N.NewThreadSafePacketConn(v.client.PacketConn(c, metadata.UDPAddr())),
+		v,
+		v.cfirSecurityEvidence(),
+	), nil
 }
 
 // SupportUOT implements C.ProxyAdapter

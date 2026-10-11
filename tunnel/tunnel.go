@@ -520,12 +520,14 @@ func handleUDPConn(packet C.PacketAdapter) {
 			}
 
 			_ = preHandleMetadata(metadata) // error was pre-checked
+			observeCFIRShadow(metadata)
 
 			proxy, rule, decidedMode, err := resolveMetadata(metadata)
 			if err != nil {
 				log.Warnln("[UDP] Parse metadata failed: %s", err.Error())
 				return nil, nil, err
 			}
+			observeCFIRDecisionShadow(metadata, proxy)
 
 			dialMetadata := metadata.Pure()
 			ctx, cancel := context.WithTimeout(context.Background(), C.DefaultUDPTimeout)
@@ -610,6 +612,8 @@ func handleTCPConn(connCtx C.ConnContext) {
 		return
 	}
 
+	observeCFIRShadow(metadata)
+
 	peekMutex := sync.Mutex{}
 	if !conn.Peeked() {
 		peekMutex.Lock()
@@ -626,6 +630,7 @@ func handleTCPConn(connCtx C.ConnContext) {
 		log.Warnln("[Metadata] parse failed: %s", err.Error())
 		return
 	}
+	observeCFIRDecisionShadow(metadata, proxy)
 
 	dialMetadata := metadata
 	if len(metadata.Host) > 0 {

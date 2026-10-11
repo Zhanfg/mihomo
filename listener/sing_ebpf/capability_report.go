@@ -44,6 +44,7 @@ func (i *Inbound) reportKernelCapabilities() {
 			log.Debugln("[EBPF] kernel capability probe skipped: %s", err)
 			return
 		}
+		i.kernelProbeReport.Store(report)
 		var degraded []string
 		for _, finding := range report.Findings {
 			if finding.Status == ECommon.KernelProbePass {
