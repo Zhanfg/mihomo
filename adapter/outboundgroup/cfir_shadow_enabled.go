@@ -126,12 +126,12 @@ func (r *cfirSmartScoreRecorder) Record(
 		uncertainty = 1
 	}
 	r.scores[proxy.Name()] = cfir.CandidateScore{
-		LearnedUtility: learnedUtility,
-		Utility:        finalUtility,
-		Confidence:     1 - uncertainty,
-		Uncertainty:    uncertainty,
+		LearnedUtility:  learnedUtility,
+		ExploredUtility: exploredUtility,
+		Utility:         finalUtility,
+		Confidence:      1 - uncertainty,
+		Uncertainty:     uncertainty,
 	}
-	_ = exploredUtility // retained at this boundary for future score tracing.
 }
 
 func (r *cfirSmartScoreRecorder) Finish(ranked []C.Proxy) {
