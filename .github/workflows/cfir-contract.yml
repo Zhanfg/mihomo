@@ -1,6 +1,7 @@
 name: CFIR Contract
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - 'arch/cfir-*'
