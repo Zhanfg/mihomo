@@ -71,9 +71,10 @@ func RankSnapshotThroughCFIRWithScores(
 		var score cfir.CandidateScore
 		if instanceScores == nil {
 			score = cfir.CandidateScore{
-				Utility:    total - float64(index),
-				Confidence: 0.5,
-				Uncertainty: 0.5,
+				Utility:             total - float64(index),
+				Confidence:          0.5,
+				Uncertainty:         0.5,
+				ResidualUncertainty: 1,
 			}
 		} else {
 			var ok bool
