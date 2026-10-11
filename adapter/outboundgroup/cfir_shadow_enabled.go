@@ -12,7 +12,10 @@ import (
 	"github.com/metacubex/mihomo/log"
 )
 
-var cfirSmartRankingReports atomic.Uint64
+var (
+	cfirSmartRankingReports  atomic.Uint64
+	cfirSmartSecurityReports atomic.Uint64
+)
 
 func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 	generation := cfir.Generation{Network: netstate.CurrentEpoch()}
@@ -81,6 +84,32 @@ func observeCFIRSmartRanking(metadata *C.Metadata, ranked []C.Proxy) {
 			bridgeProtocol,
 			plan.Instance,
 			plan.Protocol,
+		)
+	}
+}
+
+
+func observeCFIRSmartConnection(metadata *C.Metadata, proxy C.Proxy, conn C.Conn) {
+	result, err := shadow.ObserveSelectedConnection(
+		metadata,
+		proxy,
+		conn,
+		cfir.Generation{Network: netstate.CurrentEpoch()},
+	)
+	if err == nil {
+		return
+	}
+	n := cfirSmartSecurityReports.Add(1)
+	if n <= 8 || n&(n-1) == 0 {
+		log.Warnln(
+			"[CFIR Smart Shadow] post-dial security mismatch (#%d): protocol=%s instance=%s evidence_required=%v evidence_present=%v sealed=%v error=%v",
+			n,
+			result.Plan.Protocol,
+			result.Plan.Instance,
+			result.EvidenceRequired,
+			result.EvidencePresent,
+			result.Sealed,
+			err,
 		)
 	}
 }
