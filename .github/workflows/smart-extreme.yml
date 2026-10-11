@@ -6,6 +6,7 @@ on:
     branches:
       - opt/smart-expert-v8
       - opt/smart-production-v9
+      - 'arch/**'
     paths:
       - ".github/workflows/smart-extreme.yml"
       - "adapter/outboundgroup/**"
@@ -57,7 +58,7 @@ jobs:
           GOMAXPROCS: "4"
         run: |
           set -euo pipefail
-          go test ./component/smart -run '^$' -bench 'Benchmark(ExpertTeacherPrior|DistilledExpertPrior|OnlineBanditPredict|OnlineBanditUpdate|ExplorationBonus)$' -benchtime=3s -benchmem | tee SMART_EXPERT_BENCH.txt
+          go test ./component/smart -run '^$' -bench 'Benchmark(ExpertTeacherPrior|DistilledExpertPrior|OnlineBanditPredict|OnlineBanditUpdate|TinyRouterPredict|TinyRouterUpdate|ExplorationBonus)$' -benchtime=3s -benchmem | tee SMART_EXPERT_BENCH.txt
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -85,7 +86,7 @@ jobs:
           GOMEMLIMIT: "256MiB"
         run: |
           set -euo pipefail
-          go test -race ./component/smart ./adapter/outboundgroup -run 'Test(OnlineBandit|Distilled|Expert|GreedyExploration|ShouldInvokeTeacher|Student)' -count=10 -timeout=30m 2>&1 | tee SMART_RACE_SOAK.txt
+          go test -race ./component/smart ./adapter/outboundgroup -run 'Test(OnlineBandit|TinyRouter|Distilled|Expert|GreedyExploration|ShouldInvokeTeacher|Student)' -count=10 -timeout=30m 2>&1 | tee SMART_RACE_SOAK.txt
 
       - uses: actions/upload-artifact@v7
         if: always()
