@@ -87,7 +87,9 @@ func (c SecurityContext) Validate() error {
 	return c.Profile.Validate()
 }
 
-func validateSecurityOfferAndEvidence(offer, floor SecurityProfile, evidence SecurityContext) error {
+// ValidateSecurityAdmission validates a preflight security offer against a
+// required floor and, when present, verifies post-handshake core evidence.
+func ValidateSecurityAdmission(offer, floor SecurityProfile, evidence SecurityContext) error {
 	if err := offer.Validate(); err != nil {
 		return err
 	}
