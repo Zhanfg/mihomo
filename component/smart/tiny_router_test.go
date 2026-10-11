@@ -146,3 +146,28 @@ func BenchmarkTinyRouterUpdate(b *testing.B) {
 		_, _ = state.Update(0.82, 0.90, x, 1)
 	}
 }
+
+
+func TestTinyRouterPredictAndUpdateStayAllocationFree(t *testing.T) {
+	state := defaultTinyRouterState()
+	state.Updates = 32
+	state.Output = [TinyRouterHiddenDimension]float64{0.04, -0.02, 0.03, 0.01}
+	x := TinyRouterFeatures(healthyTinyInput(), TinyRouterTransport{
+		RTTVarMs: 8, Unacked: 2, Cwnd: 64,
+	})
+
+	predictAllocs := testing.AllocsPerRun(1000, func() {
+		_, _ = state.Predict(0.82, x)
+	})
+	if predictAllocs != 0 {
+		t.Fatalf("TinyRouter Predict allocated %v objects/run; want 0", predictAllocs)
+	}
+
+	updateAllocs := testing.AllocsPerRun(1000, func() {
+		local := state
+		_, _ = local.Update(0.82, 0.90, x, 1)
+	})
+	if updateAllocs != 0 {
+		t.Fatalf("TinyRouter Update allocated %v objects/run; want 0", updateAllocs)
+	}
+}
