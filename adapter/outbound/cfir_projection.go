@@ -343,6 +343,60 @@ func (m *Masque) CFIRProtocolProjection() cfir.ProtocolProjection {
 	)
 }
 
+func cfirAttestedSecurity(offer cfir.SecurityProfile, peerIdentity string) cfir.SecurityContext {
+	if offer == (cfir.SecurityProfile{}) {
+		return cfir.SecurityContext{}
+	}
+	return cfir.SecurityContext{
+		Profile:        offer,
+		PeerIdentity:   peerIdentity,
+		AttestedByCore: true,
+	}
+}
+
+func (h *Hysteria2) cfirSecurityEvidence() cfir.SecurityContext {
+	peer := ""
+	if h.option != nil && !h.option.SkipCertVerify {
+		peer = h.option.NameCertVerify
+		if peer == "" {
+			peer = h.option.SNI
+		}
+		if peer == "" {
+			peer = h.option.Server
+		}
+	}
+	return cfirAttestedSecurity(h.CFIRProtocolProjection().Instance.SecurityOffer, peer)
+}
+
+func (v *Vless) cfirSecurityEvidence() cfir.SecurityContext {
+	peer := ""
+	if v.option != nil && v.option.TLS && !v.option.SkipCertVerify {
+		peer = v.option.NameCertVerify
+		if peer == "" {
+			peer = v.option.ServerName
+		}
+		if peer == "" {
+			peer = v.option.Server
+		}
+	}
+	return cfirAttestedSecurity(v.CFIRProtocolProjection().Instance.SecurityOffer, peer)
+}
+
+func (w *WireGuard) cfirSecurityEvidence() cfir.SecurityContext {
+	return cfirAttestedSecurity(w.CFIRProtocolProjection().Instance.SecurityOffer, "")
+}
+
+func (m *Masque) cfirSecurityEvidence() cfir.SecurityContext {
+	peer := ""
+	if !m.option.SkipCertVerify {
+		peer = m.option.SNI
+		if peer == "" {
+			peer = m.option.Server
+		}
+	}
+	return cfirAttestedSecurity(m.CFIRProtocolProjection().Instance.SecurityOffer, peer)
+}
+
 var (
 	_ cfir.ProtocolProjectionProvider = (*Hysteria2)(nil)
 	_ cfir.ProtocolProjectionProvider = (*Vless)(nil)
