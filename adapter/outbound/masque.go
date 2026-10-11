@@ -506,7 +506,7 @@ func (w *Masque) dialContextL4(ctx context.Context, metadata *C.Metadata) (_ C.C
 	if conn == nil {
 		return nil, errors.New("conn is nil")
 	}
-	return NewConn(conn, w), nil
+	return NewConnWithCFIRSecurityEvidence(conn, w, w.cfirSecurityEvidence()), nil
 }
 
 func (w *Masque) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Conn, err error) {
@@ -535,7 +535,7 @@ func (w *Masque) DialContext(ctx context.Context, metadata *C.Metadata) (_ C.Con
 	if conn == nil {
 		return nil, errors.New("conn is nil")
 	}
-	return NewConn(conn, w), nil
+	return NewConnWithCFIRSecurityEvidence(conn, w, w.cfirSecurityEvidence()), nil
 }
 
 func (w *Masque) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (_ C.PacketConn, err error) {
@@ -557,7 +557,7 @@ func (w *Masque) ListenPacketContext(ctx context.Context, metadata *C.Metadata) 
 	if pc == nil {
 		return nil, errors.New("packetConn is nil")
 	}
-	return NewPacketConn(pc, w), nil
+	return NewPacketConnWithCFIRSecurityEvidence(pc, w, w.cfirSecurityEvidence()), nil
 }
 
 func (w *Masque) ResolveUDP(ctx context.Context, metadata *C.Metadata) error {
