@@ -114,6 +114,7 @@ func (r *cfirSmartScoreRecorder) Record(
 	proxy C.Proxy,
 	learnedUtility float64,
 	uncertainty float64,
+	residualUncertainty float64,
 	exploredUtility float64,
 	finalUtility float64,
 ) {
@@ -125,12 +126,18 @@ func (r *cfirSmartScoreRecorder) Record(
 	} else if uncertainty > 1 {
 		uncertainty = 1
 	}
+	if residualUncertainty < 0 {
+		residualUncertainty = 0
+	} else if residualUncertainty > 1 {
+		residualUncertainty = 1
+	}
 	r.scores[proxy.Name()] = cfir.CandidateScore{
 		LearnedUtility:  learnedUtility,
 		ExploredUtility: exploredUtility,
 		Utility:         finalUtility,
-		Confidence:      1 - uncertainty,
-		Uncertainty:     uncertainty,
+		Confidence:          1 - uncertainty,
+		Uncertainty:         uncertainty,
+		ResidualUncertainty: residualUncertainty,
 	}
 }
 
