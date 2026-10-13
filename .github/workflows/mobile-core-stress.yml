@@ -4,15 +4,8 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - integration/boxproxy-native-ebpf
-      - opt/smart-link-v2
-      - opt/smart-greedy-v3
-      - opt/smart-greedy-v4
-      - opt/smart-learning-v5
-      - opt/smart-runtime-v6
-      - opt/smart-model-v7
-      - opt/smart-expert-v8
-      - opt/smart-production-v9
       - 'fix/smart-*'
       - 'sync/**'
     paths:
