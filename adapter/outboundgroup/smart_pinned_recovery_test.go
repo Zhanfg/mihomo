@@ -8,12 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/outbound"
 	C "github.com/metacubex/mihomo/constant"
 )
 
 func pinnedTestProxy(name string) C.Proxy {
-	return outbound.NewDirectWithOption(outbound.DirectOption{Name: name})
+	return adapter.NewProxy(outbound.NewDirectWithOption(outbound.DirectOption{Name: name}))
 }
 
 func proxyNames(ps []C.Proxy) []string {
