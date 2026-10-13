@@ -26,6 +26,14 @@ func TestGroupDialFailureWindowRestartsFromOne(t *testing.T) {
 	if !gb.recordFailedDial(start.Add(8 * time.Second)) {
 		t.Fatal("third failure in the new window must reach threshold")
 	}
+	for i := 0; i < 1000; i++ {
+		if !gb.recordFailedDial(start.Add(8 * time.Second)) {
+			t.Fatal("failure threshold must remain reached during a burst")
+		}
+	}
+	if gb.failedTimes != 3 {
+		t.Fatalf("failure counter must saturate at threshold, got %d", gb.failedTimes)
+	}
 }
 
 func TestGroupAutomaticHealthCheckCooldown(t *testing.T) {
