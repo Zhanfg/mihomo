@@ -173,6 +173,7 @@ jobs:
             "feature/ip-family-routing"
             "feature/mobile-core-lean"
             "feature/mobile-core-opt"
+            "feature/mobile-core-runtime-final"
             "feature/mobile-full-opt"
             "feature/mobile-runtime-ai"
             "feature/per-target-country-affinity"
