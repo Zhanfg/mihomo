@@ -162,11 +162,84 @@ jobs:
               echo "PREVIEW $branch: verified squash-merged PR #14"
             fi
           fi
-          echo "deleted=$deleted skipped=$skipped failed=$failed"
+          # Archive abandoned divergent development experiments as immutable
+          # refs before deleting the mutable branch. No content is merged or
+          # silently discarded: original commits remain addressable by tag.
+          archive_candidates=(
+            "debug/smart-core-bisect"
+            "dev-conn-prepare"
+            "dev-refactor-udp"
+            "feature/android-ebpf-routing"
+            "feature/ip-family-routing"
+            "feature/mobile-core-lean"
+            "feature/mobile-core-opt"
+            "feature/mobile-full-opt"
+            "feature/mobile-runtime-ai"
+            "feature/per-target-country-affinity"
+            "feature/smart-vector-store"
+            "fix/android-box-tproxy-loopback"
+            "fix/ipv6-resilience"
+            "fix/mmdb-country-bootstrap"
+            "opt/android-runtime"
+            "opt/smart-box-v8"
+            "opt/smart-distill-v8"
+            "opt/smart-expert-v8"
+            "opt/smart-learning-v7"
+            "opt/smart-link-v2-stage2"
+            "optimize/android-ebpf-smart-core"
+            "test/smart-alpha-routing-sim"
+          )
+          archived=0
+          for branch in "${archive_candidates[@]}"; do
+            if grep -Fxq -- "$branch" /tmp/pr-refs.txt; then
+              echo "PRESERVE $branch: referenced by open PR"
+              continue
+            fi
+            head=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
+            protected=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.protected' 2>/dev/null || true)
+            if [[ -z "$head" || "$protected" != "false" ]]; then
+              echo "PRESERVE $branch: missing/protected"
+              continue
+            fi
+            tag="branch-archive/2026-10-14/$branch"
+            if [[ "$apply" != "true" ]]; then
+              echo "PREVIEW $branch => refs/tags/$tag @ $head"
+              continue
+            fi
+            saved=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)
+            if [[ -z "$saved" ]]; then
+              if ! gh api --method POST "repos/$GH_REPO/git/refs" \
+                  -f ref="refs/tags/$tag" -f sha="$head" >/dev/null; then
+                echo "PRESERVE $branch: archive tag creation failed"
+                ((failed+=1))
+                continue
+              fi
+              saved=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq '.object.sha' 2>/dev/null || true)
+            fi
+            if [[ "$saved" != "$head" ]]; then
+              echo "PRESERVE $branch: archive tag SHA mismatch"
+              ((failed+=1))
+              continue
+            fi
+            live=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
+            if [[ "$live" != "$head" ]]; then
+              echo "PRESERVE $branch: branch changed during archive"
+              continue
+            fi
+            if gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$branch" >/dev/null; then
+              echo "ARCHIVED $branch => $tag @ $head"
+              ((archived+=1))
+            else
+              echo "PRESERVE $branch: GitHub rejected delete"
+              ((failed+=1))
+            fi
+          done
+          echo "deleted=$deleted archived=$archived skipped=$skipped failed=$failed"
           {
             echo "### Curated integrated branch cleanup"
             echo "Applied: $apply"
             echo "Deleted: $deleted"
+            echo "Archived branches to tags: $archived"
             echo "Skipped: $skipped"
             echo "Failed: $failed"
           } >> "$GITHUB_STEP_SUMMARY"
