@@ -805,6 +805,41 @@ func smartDialBatchBoundsForLink(total, iteration int, pinned, _ bool) (begin, e
 	return begin, end
 }
 
+// freshAfterPinnedFailure removes the just-failed cached winner from a
+// freshly ranked recovery list when another eligible candidate exists.
+// Filtering is request-scoped: it never changes the host's persisted policy
+// or excludes the sole usable node. The new ranking has already enforced
+// IP-family, country and capability constraints.
+func freshAfterPinnedFailure(fresh, failed []C.Proxy) []C.Proxy {
+	if len(fresh) <= 1 || len(failed) == 0 {
+		return fresh
+	}
+	failedNames := make(map[string]struct{}, len(failed))
+	for _, p := range failed {
+		if p != nil {
+			failedNames[p.Name()] = struct{}{}
+		}
+	}
+	if len(failedNames) == 0 {
+		return fresh
+	}
+
+	var filtered []C.Proxy
+	for _, p := range fresh {
+		if p == nil {
+			continue
+		}
+		if _, wasFailed := failedNames[p.Name()]; wasFailed {
+			continue
+		}
+		filtered = append(filtered, p)
+	}
+	if len(filtered) == 0 {
+		return fresh
+	}
+	return filtered
+}
+
 func (s *Smart) isWeakDialPath(metadata *C.Metadata, proxies []C.Proxy) bool {
 	if len(proxies) > 0 {
 		assessment := adapter.TunnelPathAssessmentForProxy(proxies[0])
@@ -1005,6 +1040,7 @@ func (s *Smart) DialContext(ctx context.Context, metadata *C.Metadata) (C.Conn, 
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
 		all = s.GetProxies(true)
 		fresh, _ := s.selectProxies(metadata, all)
+		fresh = freshAfterPinnedFailure(fresh, proxies)
 		if len(fresh) > 0 {
 			failedProxies = fresh
 			conn, retryErr := tryDial(fresh, false, s.isWeakDialPath(metadata, fresh))
@@ -1091,6 +1127,7 @@ func (s *Smart) ListenPacketContext(ctx context.Context, metadata *C.Metadata) (
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
 		all = s.GetProxies(true)
 		fresh, _ := s.selectProxies(metadata, all)
+		fresh = freshAfterPinnedFailure(fresh, proxies)
 		if len(fresh) > 0 {
 			failedProxies = fresh
 			pc, retryErr := tryListen(fresh, false)
