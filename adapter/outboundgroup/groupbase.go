@@ -320,19 +320,23 @@ func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func(
 	if adapterType == C.Direct || adapterType == C.Compatible || adapterType == C.Reject || adapterType == C.Pass || adapterType == C.RejectDrop {
 		return
 	}
-	if err == nil || errors.Is(err, C.ErrNotSupport) {
+	if err == nil || errors.Is(err, C.ErrNotSupport) || errors.Is(err, context.Canceled) {
 		return
 	}
 
+	// Failure bursts are common during a mobile handover. Do the bounded,
+	// in-memory accounting on this caller and spawn a goroutine only when an
+	// actual provider-wide health check was reserved. Previously every failed
+	// dial spawned its own goroutine, even while a check was on cooldown.
+	now := time.Now()
+	refused := strings.Contains(err.Error(), "connection refused")
+	if !refused && !gb.recordFailedDial(now) {
+		return
+	}
+	if !gb.reserveAutomaticHealthCheck(now) {
+		return
+	}
 	go func() {
-		now := time.Now()
-		refused := strings.Contains(err.Error(), "connection refused")
-		if !refused && !gb.recordFailedDial(now) {
-			return
-		}
-		if !gb.reserveAutomaticHealthCheck(now) {
-			return
-		}
 		if !refused {
 			log.Warnln("because %s failed multiple times, activate health check", gb.Name())
 		}
