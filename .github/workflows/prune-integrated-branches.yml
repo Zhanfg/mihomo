@@ -1,0 +1,111 @@
+name: Prune Integrated Branches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/prune-integrated-branches.yml
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: 'Actually delete integrated branches (false = preview)'
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: prune-integrated-branches
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Delete only branches fully contained in main and unused by open PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          APPLY_INPUT: ${{ inputs.apply }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only the curated historical refs below can be pruned.
+          # Keep main, Alpha, Meta, Mitm, memory and all active/diverged work.
+          candidates=(
+            "archive/main-pre-smart-v9-20261007"
+            "backup/alpha-20260815"
+            "debug/smart-latest-control"
+            "debug/smart-old-control"
+            "opt/smart-greedy-v3"
+            "opt/smart-greedy-v4"
+            "opt/smart-learning-v5"
+            "opt/smart-link-v2"
+            "opt/smart-runtime-v6"
+            "opt/smart-production-v9"
+            "sync/upstream-smart-20261006-longflow"
+            "fix/smart-healthcheck-storm-20261013"
+          )
+          gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
+            --jq '.[] | .head.ref, .base.ref' | sort -u > /tmp/pr-refs.txt
+          apply=false
+          if [[ "$EVENT_NAME" == "push" || "$APPLY_INPUT" == "true" ]]; then
+            apply=true
+          fi
+          deleted=0
+          skipped=0
+          failed=0
+          for branch in "${candidates[@]}"; do
+            if grep -Fxq -- "$branch" /tmp/pr-refs.txt; then
+              echo "SKIP $branch: referenced by open PR"
+              ((skipped+=1))
+              continue
+            fi
+            # Missing/renamed branch? No action.
+            protected=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.protected' 2>/dev/null) || {
+              echo "SKIP $branch: missing or inaccessible"
+              ((skipped+=1))
+              continue
+            }
+            if [[ "$protected" == "true" ]]; then
+              echo "SKIP $branch: protected"
+              ((skipped+=1))
+              continue
+            fi
+            ahead=$(gh api "repos/$GH_REPO/compare/main...$branch" --jq '.ahead_by' 2>/dev/null) || {
+              echo "SKIP $branch: cannot prove ancestry"
+              ((skipped+=1))
+              continue
+            }
+            if [[ "$ahead" != "0" ]]; then
+              echo "SKIP $branch: $ahead commits not in main"
+              ((skipped+=1))
+              continue
+            fi
+            if [[ "$apply" != "true" ]]; then
+              echo "PREVIEW $branch: safe to delete"
+              ((skipped+=1))
+              continue
+            fi
+            if gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$branch" >/dev/null; then
+              echo "DELETED $branch"
+              ((deleted+=1))
+            else
+              echo "ERROR $branch: deletion rejected by GitHub" >&2
+              ((failed+=1))
+            fi
+          done
+          echo "deleted=$deleted skipped=$skipped failed=$failed"
+          {
+            echo "### Curated integrated branch cleanup"
+            echo "Applied: $apply"
+            echo "Deleted: $deleted"
+            echo "Skipped: $skipped"
+            echo "Failed: $failed"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [[ "$failed" == "0" ]]
