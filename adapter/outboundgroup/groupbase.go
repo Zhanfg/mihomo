@@ -27,17 +27,17 @@ type GroupBase struct {
 	excludeFilterRegs []*regexp2.Regexp
 	excludeTypeArray  []string
 	providers         []P.ProxyProvider
-	failedTestMux     sync.Mutex
-	failedTimes       int
-	failedTime        time.Time
+	failedTestMux       sync.Mutex
+	failedTimes         int
+	failedTime          time.Time
 	lastAutoHealthCheck time.Time
-	failedTesting     atomic.Bool
-	testTimeout       int
-	maxFailedTimes    int
-	emptyFallback     C.Proxy
-	preferUDP         bool
-	preferIPv6        bool
-	penalizeUnstable  bool
+	failedTesting       atomic.Bool
+	testTimeout         int
+	maxFailedTimes      int
+	emptyFallback       C.Proxy
+	preferUDP           bool
+	preferIPv6          bool
+	penalizeUnstable    bool
 
 	// for GetProxies
 	getProxiesMutex  sync.Mutex
@@ -294,7 +294,8 @@ func (gb *GroupBase) recordFailedDial(now time.Time) bool {
 	if gb.failedTimes == 0 || now.Sub(gb.failedTime) > time.Duration(gb.testTimeout)*time.Millisecond {
 		gb.failedTimes = 1
 		gb.failedTime = now
-	} else {
+	} else if gb.failedTimes < gb.maxFailedTimes {
+		// Bound the counter while automatic probes are cooling down.
 		gb.failedTimes++
 	}
 	return gb.failedTimes >= gb.maxFailedTimes
