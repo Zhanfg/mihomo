@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - .github/workflows/prune-integrated-branches.yml
+  pull_request:
+    types: [closed]
   workflow_dispatch:
     inputs:
       apply:
@@ -32,9 +34,47 @@ jobs:
           GH_REPO: ${{ github.repository }}
           EVENT_NAME: ${{ github.event_name }}
           APPLY_INPUT: ${{ inputs.apply }}
+          PR_MERGED: ${{ github.event.pull_request.merged || false }}
+          PR_HEAD: ${{ github.event.pull_request.head.ref || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          PR_BASE: ${{ github.event.pull_request.base.ref || '' }}
+          PR_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha || '' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            # The merged pull request can be squash/rebase merged, so matching
+            # commit ancestry of the source branch is not required.
+            if [[ "$PR_MERGED" != "true" || "$PR_HEAD_REPO" != "$GH_REPO" ||
+                  "$PR_BASE" != "main" || -z "$PR_MERGE_SHA" ||
+                  "$PR_HEAD" == "main" || "$PR_HEAD" == "Alpha" ||
+                  "$PR_HEAD" == "Meta" ]]; then
+              echo "SKIP: not an eligible merged same-repository PR"
+              exit 0
+            fi
+            head_sha=$(gh api "repos/$GH_REPO/branches/$PR_HEAD" --jq '.commit.sha' 2>/dev/null || true)
+            protected=$(gh api "repos/$GH_REPO/branches/$PR_HEAD" --jq '.protected' 2>/dev/null || true)
+            if [[ "$head_sha" != "$PR_HEAD_SHA" || "$protected" != "false" ]]; then
+              echo "SKIP: branch head changed or protected"
+              exit 0
+            fi
+            # Compare merge result against main, never trust the event alone.
+            behind=$(gh api "repos/$GH_REPO/compare/$PR_MERGE_SHA...main" --jq '.behind_by' 2>/dev/null || true)
+            if [[ "$behind" != "0" ]]; then
+              echo "SKIP: merged commit not in main"
+              exit 0
+            fi
+            gh api --paginate "repos/$GH_REPO/pulls?state=open&per_page=100" \
+              --jq '.[] | .head.ref, .base.ref' | sort -u > /tmp/pr-refs.txt
+            if grep -Fxq -- "$PR_HEAD" /tmp/pr-refs.txt; then
+              echo "SKIP: branch still used by an open PR"
+              exit 0
+            fi
+            gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$PR_HEAD" >/dev/null
+            echo "DELETED $PR_HEAD: merged PR with verified exact head SHA"
+            exit 0
+          fi
           # Only the curated historical refs below can be pruned.
           # Keep main, Alpha, Meta, Mitm, memory and all active/diverged work.
           candidates=(
