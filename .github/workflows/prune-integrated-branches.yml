@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - name: Delete only branches fully contained in main and unused by open PRs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -160,6 +163,31 @@ jobs:
               fi
             else
               echo "PREVIEW $branch: verified squash-merged PR #14"
+            fi
+          fi
+          # Pilot the recoverable archival path for one obsolete debug branch.
+          # Direct Git transport is verified with ls-remote before deletion.
+          pilot="debug/smart-core-bisect"
+          if [[ "$apply" == "true" ]] && ! grep -Fxq -- "$pilot" /tmp/pr-refs.txt; then
+            head=$(gh api "repos/$GH_REPO/branches/$pilot" --jq '.commit.sha' 2>/dev/null || true)
+            protected=$(gh api "repos/$GH_REPO/branches/$pilot" --jq '.protected' 2>/dev/null || true)
+            if [[ -n "$head" && "$protected" == "false" ]]; then
+              tag="branch-archive/2026-10-14/$pilot"
+              saved=$(git ls-remote origin "refs/tags/$tag" | awk 'NR==1 {print $1}')
+              if [[ -z "$saved" ]]; then
+                git fetch --no-tags origin "refs/heads/$pilot:refs/remotes/origin/$pilot"
+                git tag "$tag" "$head"
+                git push origin "refs/tags/$tag"
+                saved=$(git ls-remote origin "refs/tags/$tag" | awk 'NR==1 {print $1}')
+              fi
+              current=$(gh api "repos/$GH_REPO/branches/$pilot" --jq '.commit.sha' 2>/dev/null || true)
+              if [[ "$saved" == "$head" && "$current" == "$head" ]]; then
+                git push origin --delete "$pilot"
+                echo "ARCHIVED $pilot => $tag @ $head"
+                ((deleted+=1))
+              else
+                echo "PRESERVE $pilot: remote archive ref could not be verified"
+              fi
             fi
           fi
           echo "deleted=$deleted skipped=$skipped failed=$failed"
