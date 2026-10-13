@@ -13,6 +13,7 @@ on:
       - opt/smart-model-v7
       - opt/smart-expert-v8
       - opt/smart-production-v9
+      - 'fix/smart-*'
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"

@@ -27,16 +27,17 @@ type GroupBase struct {
 	excludeFilterRegs []*regexp2.Regexp
 	excludeTypeArray  []string
 	providers         []P.ProxyProvider
-	failedTestMux     sync.Mutex
-	failedTimes       int
-	failedTime        time.Time
-	failedTesting     atomic.Bool
-	testTimeout       int
-	maxFailedTimes    int
-	emptyFallback     C.Proxy
-	preferUDP         bool
-	preferIPv6        bool
-	penalizeUnstable  bool
+	failedTestMux       sync.Mutex
+	failedTimes         int
+	failedTime          time.Time
+	lastAutoHealthCheck time.Time
+	failedTesting       atomic.Bool
+	testTimeout         int
+	maxFailedTimes      int
+	emptyFallback       C.Proxy
+	preferUDP           bool
+	preferIPv6          bool
+	penalizeUnstable    bool
 
 	// for GetProxies
 	getProxiesMutex  sync.Mutex
@@ -280,45 +281,62 @@ func (gb *GroupBase) URLTest(ctx context.Context, url string, expectedStatus uti
 	}
 }
 
+// autoHealthCheckCooldown bounds failure-triggered full-provider scans during
+// outages. Individual node recovery and scheduled provider probes are separate.
+const autoHealthCheckCooldown = 30 * time.Second
+
+// recordFailedDial counts only failures in the same short window. When the
+// window expires the current failure becomes the first one (not the zeroth).
+func (gb *GroupBase) recordFailedDial(now time.Time) bool {
+	gb.failedTestMux.Lock()
+	defer gb.failedTestMux.Unlock()
+
+	if gb.failedTimes == 0 || now.Sub(gb.failedTime) > time.Duration(gb.testTimeout)*time.Millisecond {
+		gb.failedTimes = 1
+		gb.failedTime = now
+	} else if gb.failedTimes < gb.maxFailedTimes {
+		// Bound the counter while automatic probes are cooling down.
+		gb.failedTimes++
+	}
+	return gb.failedTimes >= gb.maxFailedTimes
+}
+
+// reserveAutomaticHealthCheck ensures concurrent failed dials can request only
+// one provider-wide probe per cooldown interval. The reservation is made before
+// invoking the callback, so a storm cannot queue duplicate checks.
+func (gb *GroupBase) reserveAutomaticHealthCheck(now time.Time) bool {
+	gb.failedTestMux.Lock()
+	defer gb.failedTestMux.Unlock()
+	if gb.failedTesting.Load() ||
+		(!gb.lastAutoHealthCheck.IsZero() && now.Sub(gb.lastAutoHealthCheck) < autoHealthCheckCooldown) {
+		return false
+	}
+	gb.lastAutoHealthCheck = now
+	gb.failedTimes = 0
+	return true
+}
+
 func (gb *GroupBase) onDialFailed(adapterType C.AdapterType, err error, fn func()) {
 	if adapterType == C.Direct || adapterType == C.Compatible || adapterType == C.Reject || adapterType == C.Pass || adapterType == C.RejectDrop {
 		return
 	}
-
-	if errors.Is(err, C.ErrNotSupport) {
+	if err == nil || errors.Is(err, C.ErrNotSupport) {
 		return
 	}
 
 	go func() {
-		if strings.Contains(err.Error(), "connection refused") {
-			fn()
+		now := time.Now()
+		refused := strings.Contains(err.Error(), "connection refused")
+		if !refused && !gb.recordFailedDial(now) {
 			return
 		}
-
-		var trigger bool
-		gb.failedTestMux.Lock()
-		gb.failedTimes++
-		if gb.failedTimes == 1 {
-			log.Debugln("ProxyGroup: %s first failed", gb.Name())
-			gb.failedTime = time.Now()
-		} else {
-			if time.Since(gb.failedTime) > time.Duration(gb.testTimeout)*time.Millisecond {
-				gb.failedTimes = 0
-				gb.failedTestMux.Unlock()
-				return
-			}
-
-			log.Debugln("ProxyGroup: %s failed count: %d", gb.Name(), gb.failedTimes)
-			if gb.failedTimes >= gb.maxFailedTimes {
-				log.Warnln("because %s failed multiple times, activate health check", gb.Name())
-				trigger = true
-			}
+		if !gb.reserveAutomaticHealthCheck(now) {
+			return
 		}
-		gb.failedTestMux.Unlock()
-
-		if trigger {
-			fn()
+		if !refused {
+			log.Warnln("because %s failed multiple times, activate health check", gb.Name())
 		}
+		fn()
 	}()
 }
 
