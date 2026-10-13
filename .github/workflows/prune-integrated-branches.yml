@@ -28,9 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
       - name: Delete only branches fully contained in main and unused by open PRs
         env:
           GH_TOKEN: ${{ github.token }}
@@ -165,86 +162,11 @@ jobs:
               echo "PREVIEW $branch: verified squash-merged PR #14"
             fi
           fi
-          # Legacy experiments can diverge from main. Preserve their exact
-          # commit history as permanent lightweight Git tags before deleting
-          # the mutable branch. Active/release/PR branches are NOT candidates.
-          legacy_candidates=(
-            "dev-conn-prepare"
-            "dev-refactor-udp"
-            "feature/android-ebpf-routing"
-            "feature/ip-family-routing"
-            "feature/mobile-core-lean"
-            "feature/mobile-core-opt"
-            "feature/mobile-core-runtime-final"
-            "feature/mobile-full-opt"
-            "feature/mobile-runtime-ai"
-            "feature/per-target-country-affinity"
-            "feature/smart-vector-store"
-            "fix/android-box-tproxy-loopback"
-            "fix/ipv6-resilience"
-            "fix/mmdb-country-bootstrap"
-            "opt/android-runtime"
-            "opt/smart-box-v8"
-            "opt/smart-distill-v8"
-            "opt/smart-expert-v8"
-            "opt/smart-learning-v7"
-            "opt/smart-link-v2-stage2"
-            "optimize/android-ebpf-smart-core"
-            "test/smart-alpha-routing-sim"
-          )
-          archived=0
-          for branch in "${legacy_candidates[@]}"; do
-            if grep -Fxq -- "$branch" /tmp/pr-refs.txt; then
-              echo "PRESERVE $branch: referenced by an active PR"
-              ((skipped+=1))
-              continue
-            fi
-            head=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
-            protected=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.protected' 2>/dev/null || true)
-            if [[ -z "$head" || "$protected" != "false" ]]; then
-              echo "PRESERVE $branch: not present or protected"
-              ((skipped+=1))
-              continue
-            fi
-            tag="branch-archive/2026-10-14/$branch"
-            if [[ "$apply" != "true" ]]; then
-              echo "PREVIEW $branch => $tag @ $head"
-              continue
-            fi
-            saved=$(git ls-remote origin "refs/tags/$tag" | awk 'NR==1 {print $1}')
-            if [[ -z "$saved" ]]; then
-              if ! git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch"; then
-                echo "PRESERVE $branch: fetch failed" >&2
-                ((failed+=1))
-                continue
-              fi
-              if ! git tag "$tag" "$head" || ! git push origin "refs/tags/$tag"; then
-                echo "PRESERVE $branch: tag creation/push failed" >&2
-                ((failed+=1))
-                continue
-              fi
-              saved=$(git ls-remote origin "refs/tags/$tag" | awk 'NR==1 {print $1}')
-            fi
-            live=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
-            if [[ "$saved" != "$head" || "$live" != "$head" ]]; then
-              echo "PRESERVE $branch: tag or source SHA mismatch" >&2
-              ((failed+=1))
-              continue
-            fi
-            if git push origin --delete "$branch"; then
-              echo "ARCHIVED $branch => $tag @ $head"
-              ((archived+=1))
-            else
-              echo "PRESERVE $branch: delete rejected" >&2
-              ((failed+=1))
-            fi
-          done
-          echo "deleted=$deleted archived=$archived skipped=$skipped failed=$failed"
+          echo "deleted=$deleted skipped=$skipped failed=$failed"
           {
             echo "### Curated integrated branch cleanup"
             echo "Applied: $apply"
             echo "Deleted: $deleted"
-            echo "Archived safely: $archived"
             echo "Skipped: $skipped"
             echo "Failed: $failed"
           } >> "$GITHUB_STEP_SUMMARY"
