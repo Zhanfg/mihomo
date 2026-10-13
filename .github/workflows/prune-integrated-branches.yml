@@ -100,6 +100,28 @@ jobs:
               ((failed+=1))
             fi
           done
+          # A squash-merged PR cannot be proven fully merged by Git ancestry.
+          # Delete only the exact PR #14 head that GitHub marks merged, and
+          # only after the squash result has reached main. Later commits are safe.
+          pr_head=$(gh api "repos/$GH_REPO/pulls/14" --jq '.head.sha')
+          pr_merge=$(gh api "repos/$GH_REPO/pulls/14" --jq '.merge_commit_sha')
+          pr_merged=$(gh api "repos/$GH_REPO/pulls/14" --jq '.merged')
+          branch="fix/smart-healthcheck-storm-20261013"
+          live_head=$(gh api "repos/$GH_REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || true)
+          merge_in_main=$(gh api "repos/$GH_REPO/compare/$pr_merge...main" --jq '.behind_by' 2>/dev/null || true)
+          if [[ "$pr_merged" == "true" && -n "$live_head" && "$pr_head" == "$live_head" && "$merge_in_main" == "0" ]]; then
+            if [[ "$apply" == "true" ]]; then
+              if gh api --method DELETE "repos/$GH_REPO/git/refs/heads/$branch" >/dev/null; then
+                echo "DELETED $branch: verified squash-merged PR #14"
+                ((deleted+=1))
+              else
+                echo "ERROR $branch: deletion rejected" >&2
+                ((failed+=1))
+              fi
+            else
+              echo "PREVIEW $branch: verified squash-merged PR #14"
+            fi
+          fi
           echo "deleted=$deleted skipped=$skipped failed=$failed"
           {
             echo "### Curated integrated branch cleanup"
