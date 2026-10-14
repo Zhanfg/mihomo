@@ -105,3 +105,18 @@ func TestDistillQualityGateRejectsNonfiniteMetrics(t *testing.T) {
 		t.Fatal("infinite RMSE escaped gate")
 	}
 }
+
+func TestJointLocalStudentCorrectionEnvelope(t *testing.T) {
+	for _, tc := range []struct{ prior, learned, want float64 }{
+		{0.8, 0.9, 0.9},
+		{0.8, 0.8 * 1.8, 1.2},
+		{0.8, 0.8 * 0.4, 0.8 / 1.5},
+		{0.8, math.NaN(), 0.8},
+		{0.8, math.Inf(1), 0.8},
+	} {
+		got := BoundLocalStudentCorrection(tc.prior, tc.learned)
+		if math.Abs(got-tc.want) > 1e-12 {
+			t.Fatalf("prior=%v learned=%v got=%v want=%v", tc.prior, tc.learned, got, tc.want)
+		}
+	}
+}
