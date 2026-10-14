@@ -102,8 +102,12 @@ func normalizeOnlineBanditState(state OnlineBanditState) OnlineBanditState {
 		if math.IsNaN(state.Theta[i]) || math.IsInf(state.Theta[i], 0) {
 			state.Theta[i] = 0
 		}
+		state.Theta[i] = math.Max(-0.30, math.Min(0.30, state.Theta[i]))
 		if state.Precision[i] < 1 || math.IsNaN(state.Precision[i]) || math.IsInf(state.Precision[i], 0) {
 			state.Precision[i] = 1
+		}
+		if state.Precision[i] > 4096 {
+			state.Precision[i] = 4096
 		}
 	}
 	if state.Updates < 0 || math.IsNaN(state.Updates) || math.IsInf(state.Updates, 0) {
@@ -290,6 +294,34 @@ func banditQualityFromDelay(ms int64) float64 {
 	return clamp01(math.Exp(-float64(ms) / 1200.0))
 }
 
+// finiteBanditScalar returns a neutral value instead of allowing corrupted
+// rate/loss telemetry to persist NaN coefficients in the online student.
+func finiteBanditScalar(v, lo, hi, fallback float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return fallback
+	}
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// The predictor and learner must consume the same bounded feature domain.
+// Keep the sixth feature as a signed throughput ratio; the others are [0,1].
+func boundedBanditFeatures(x [OnlineBanditDimension]float64) [OnlineBanditDimension]float64 {
+	for i := range x {
+		lo, fallback := 0.0, 0.5
+		if i == 3 {
+			lo, fallback = -1, 0
+		}
+		x[i] = finiteBanditScalar(x[i], lo, 1, fallback)
+	}
+	return x
+}
+
 // OnlineBanditFeatures are deliberately bounded. The student is learning the
 // residual the global/heuristic prior misses, not relearning the whole routing
 // problem from raw strings.
@@ -321,21 +353,20 @@ func OnlineBanditFeatures(input *ModelInput) [OnlineBanditDimension]float64 {
 	} else {
 		x[5] = 1
 	}
-	return x
+	return boundedBanditFeatures(x)
 }
 
 func (state *OnlineBanditState) Predict(prior float64, x [OnlineBanditDimension]float64) (weight, uncertainty float64) {
 	if prior <= 0 || math.IsNaN(prior) || math.IsInf(prior, 0) {
 		return prior, 1
 	}
+	x = boundedBanditFeatures(x)
 	residual := 0.0
 	var variance float64
 	for i := 0; i < OnlineBanditDimension; i++ {
-		residual += state.Theta[i] * x[i]
-		precision := state.Precision[i]
-		if precision < 1 {
-			precision = 1
-		}
+		theta := finiteBanditScalar(state.Theta[i], -0.30, 0.30, 0)
+		residual += theta * x[i]
+		precision := finiteBanditScalar(state.Precision[i], 1, 4096, 1)
 		variance += x[i] * x[i] / precision
 	}
 	// The student can correct a stale/global prior, but cannot erase it after a
@@ -401,6 +432,8 @@ func (state *OnlineBanditState) Update(prior, reward float64, x [OnlineBanditDim
 		sampleScale = 4
 	}
 	scale := float64(sampleScale)
+	x = boundedBanditFeatures(x)
+	*state = normalizeOnlineBanditState(*state)
 
 	predicted, _ := state.Predict(prior, x)
 	targetResidual := math.Log(reward / prior)
@@ -420,6 +453,10 @@ func (state *OnlineBanditState) Update(prior, reward float64, x [OnlineBanditDim
 	if state.ErrorEWMA >= 0.20 {
 		forget = 0.975
 	}
+	// Sampling 4 real observations as one weighted update should age prior
+	// confidence by 4 observations, not by one; otherwise the student becomes
+	// artificially overconfident exactly when Android samples less often.
+	forget = math.Pow(forget, scale)
 	for i := 0; i < OnlineBanditDimension; i++ {
 		precision := state.Precision[i]
 		if precision < 1 {
