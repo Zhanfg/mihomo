@@ -475,6 +475,29 @@ func (state *OnlineBanditState) Update(prior, reward float64, x [OnlineBanditDim
 	return weight, uncertainty
 }
 
+// BoundLocalStudentCorrection limits *combined* online learner correction.
+// Bandit (log residual +/-0.35) and TinyRouter (+/-0.24) are independently
+// bounded, but multiplying them in series would otherwise amplify the same
+// noisy observations by up to exp(0.59). A shared 1.5x envelope keeps the
+// distilled/heuristic teacher as the controlling prior without disabling either
+// learner. The check is cheap and does not allocate or use logarithms.
+func BoundLocalStudentCorrection(prior, learned float64) float64 {
+	if prior <= 0 || math.IsNaN(prior) || math.IsInf(prior, 0) {
+		return learned
+	}
+	if learned <= 0 || math.IsNaN(learned) || math.IsInf(learned, 0) {
+		return prior
+	}
+	const correctionLimit = 1.5
+	if learned > prior*correctionLimit {
+		return prior * correctionLimit
+	}
+	if learned < prior/correctionLimit {
+		return prior / correctionLimit
+	}
+	return learned
+}
+
 // ExplorationBonus applies a bounded UCB-style optimism term. Callers decide
 // the alpha from live link conditions; setting alpha=0 makes ranking purely
 // exploitative during handovers or weak-network recovery.
