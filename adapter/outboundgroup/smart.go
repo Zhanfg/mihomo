@@ -2868,6 +2868,9 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	if teacherPrior > 0 {
 		banditPrior, _ = banditState.Predict(teacherPrior, banditFeatures)
 		calculatedWeight, _ = tinyRouterState.Predict(banditPrior, tinyRouterFeatures)
+		// Both student heads learn from the same completed flow. Respect
+		// one joint correction budget instead of compounding their bounds.
+		calculatedWeight = smart.BoundLocalStudentCorrection(teacherPrior, calculatedWeight)
 	}
 
 	if calculatedWeight > 0 && linkFactor > 0 {
