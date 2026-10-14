@@ -68,12 +68,24 @@ func adjustedCountryDelay(delay uint16, fit smartCountryFit) uint16 {
 // adjustedGreedyWeight combines slow historical evidence with bounded current
 // path stress. The live path can correct stale history, but at most by 14% so a
 // single transient sample cannot erase a node's accumulated record.
+// normalizePathStress keeps malformed/early path observations from poisoning
+// both ranking paths. Unknown stress is neutral, not a hard exclusion.
+func normalizePathStress(stress float64) float64 {
+	if math.IsNaN(stress) || stress <= 0 {
+		return 0
+	}
+	if stress >= 1 {
+		return 1
+	}
+	return stress
+}
+
 func adjustedGreedyWeight(weight float64, fit smartCountryFit, assessment linkprofile.Assessment) float64 {
 	weight = adjustedCountryWeight(weight, fit)
 	if assessment.Condition == linkprofile.ConditionUnknown {
 		return weight
 	}
-	pathFactor := 1.0 - math.Min(0.14, math.Max(0, assessment.Stress)*0.14)
+	pathFactor := 1.0 - normalizePathStress(assessment.Stress)*0.14
 	return weight * pathFactor
 }
 
@@ -85,7 +97,7 @@ func adjustedGreedyDelay(delay uint16, fit smartCountryFit, assessment linkprofi
 	if assessment.Condition == linkprofile.ConditionUnknown {
 		return delay
 	}
-	pathPenalty := uint16(math.Round(math.Min(1, math.Max(0, assessment.Stress)) * 100))
+	pathPenalty := uint16(math.Round(normalizePathStress(assessment.Stress) * 100))
 	return saturatingDelayAdd(delay, pathPenalty)
 }
 
@@ -197,35 +209,33 @@ const (
 // immediately restores the full recovery budget when evidence says the path is
 // changing or failing. This changes only how many alternatives Smart retains;
 // hard eligibility and ranking semantics remain unchanged.
-func greedySelectionBudget(assessment linkprofile.Assessment, epochChanged, recentFailure bool) int {
+// greedyPolicyForState is the sole source of candidate budget and exploration
+// policy. A wider recovery set must never imply exploratory traffic on an
+// unstable network: in recovery we prefer proven alternatives, not optimism.
+func greedyPolicyForState(assessment linkprofile.Assessment, epochChanged, recentFailure bool) (int, float64) {
 	if epochChanged || recentFailure {
-		return greedyRecoveryBudget
+		return greedyRecoveryBudget, 0
 	}
 	switch assessment.Condition {
 	case linkprofile.ConditionWeak, linkprofile.ConditionUnstable:
-		return greedyRecoveryBudget
+		return greedyRecoveryBudget, 0
 	case linkprofile.ConditionHealthy:
-		return greedyHealthyBudget
+		return greedyHealthyBudget, 0.06
+	case linkprofile.ConditionConstrained:
+		return greedyNormalBudget, 0.02
 	default:
-		return greedyNormalBudget
+		return greedyNormalBudget, 0.03
 	}
 }
 
+func greedySelectionBudget(assessment linkprofile.Assessment, epochChanged, recentFailure bool) int {
+	budget, _ := greedyPolicyForState(assessment, epochChanged, recentFailure)
+	return budget
+}
 
 func greedyExplorationAlpha(assessment linkprofile.Assessment, epochChanged, recentFailure bool) float64 {
-	if epochChanged || recentFailure {
-		return 0
-	}
-	switch assessment.Condition {
-	case linkprofile.ConditionWeak, linkprofile.ConditionUnstable:
-		return 0
-	case linkprofile.ConditionHealthy:
-		return 0.06
-	case linkprofile.ConditionConstrained:
-		return 0.02
-	default:
-		return 0.03
-	}
+	_, alpha := greedyPolicyForState(assessment, epochChanged, recentFailure)
+	return alpha
 }
 
 func (s *Smart) currentGreedyPolicy(all []C.Proxy) (budget int, explorationAlpha float64) {
@@ -246,14 +256,13 @@ func (s *Smart) currentGreedyPolicy(all []C.Proxy) (budget int, explorationAlpha
 		}
 	}
 
-	budget = greedySelectionBudget(assessment, epochChanged, recentFailure)
+	budget, explorationAlpha = greedyPolicyForState(assessment, epochChanged, recentFailure)
 	if len(all) > 0 && budget > len(all) {
 		budget = len(all)
 	}
 	if budget < 1 {
 		budget = 1
 	}
-	explorationAlpha = greedyExplorationAlpha(assessment, epochChanged, recentFailure)
 	return
 }
 
