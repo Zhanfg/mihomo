@@ -151,6 +151,33 @@ func normalizeDistillRidge(ridge float64) float64 {
 	return ridge
 }
 
+// distillHoldoutGroup hashes the compact, anonymous expert features, never
+// raw host/IP/node identity or sample order. Repeated observations with the
+// same inputs must land in the same split: row-index splitting allowed near-
+// duplicate connections to appear in both training and holdout, inflating
+// apparent generalization and making the result depend on logging order.
+func distillHoldoutGroup(input *ModelInput) bool {
+	h := uint64(14695981039346656037)
+	bucket := DistilledExpertBucket(input)
+	h ^= uint64(bucket)
+	h *= 1099511628211
+	for _, feature := range ExpertFeatures(input) {
+		bits := math.Float64bits(feature)
+		for i := 0; i < 8; i++ {
+			h ^= (bits >> (uint(i) * 8)) & 0xff
+			h *= 1099511628211
+		}
+	}
+	// Fold upper bits so patterns in discrete features do not bias the
+	// one-in-five split. The split is pure, stable and allocation-free.
+	h ^= h >> 33
+	h *= 0xff51afd7ed558ccd
+	h ^= h >> 33
+	h *= 0xc4ceb9fe1a85ec53
+	h ^= h >> 33
+	return h%5 == 0
+}
+
 func BuildDistillSufficientStats(samples []DistillTrainingSample, ridge float64, source string) (DistillSufficientStats, []DistillTrainingSample) {
 	stats := DistillSufficientStats{
 		SchemaVersion: 1,
@@ -158,12 +185,12 @@ func BuildDistillSufficientStats(samples []DistillTrainingSample, ridge float64,
 		Source:        source,
 	}
 	var holdout []DistillTrainingSample
-	for i, sample := range samples {
+	for _, sample := range samples {
 		if !validDistillTarget(sample.TargetWeight) {
 			continue
 		}
 		bucket := DistilledExpertBucket(&sample.Input)
-		if i%5 == 0 {
+		if distillHoldoutGroup(&sample.Input) {
 			stats.BucketHoldout[bucket]++
 			holdout = append(holdout, sample)
 			continue
@@ -311,6 +338,25 @@ func EvaluateDistilledExpertModel(coeff [8][ExpertFeatureDimension]float64, samp
 func ValidateDistillQuality(metrics DistillMetrics, policy DistillQualityPolicy) error {
 	if policy.MinHoldout <= 0 {
 		policy = DefaultDistillQualityPolicy()
+	}
+	// NaN compares false to every threshold; reject invalid evaluation output
+	// explicitly rather than silently approving a corrupted model artifact.
+	for _, metric := range []struct {
+		name string
+		value float64
+	}{
+		{"MAE", metrics.MeanAbsoluteError},
+		{"RMSE", metrics.RMSE},
+		{"P95", metrics.P95AbsoluteError},
+		{"mean relative", metrics.MeanRelativeError},
+		{"ranking agreement", metrics.RankingAgreement},
+	} {
+		if math.IsNaN(metric.value) || math.IsInf(metric.value, 0) || metric.value < 0 {
+			return fmt.Errorf("invalid distillation %s: %v", metric.name, metric.value)
+		}
+	}
+	if metrics.RankingAgreement > 1 {
+		return fmt.Errorf("invalid distillation ranking agreement: %v", metrics.RankingAgreement)
 	}
 	if metrics.HoldoutSamples < policy.MinHoldout {
 		return fmt.Errorf("distillation holdout too small: %d < %d", metrics.HoldoutSamples, policy.MinHoldout)
