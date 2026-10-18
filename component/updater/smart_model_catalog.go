@@ -71,6 +71,9 @@ func verifySmartModel(path string) error {
 	if _, err := leaves.LGEnsembleFromFile(path, false); err != nil {
 		return fmt.Errorf("incompatible or damaged LightGBM model: %w", err)
 	}
+	if err := lightgbm.ValidateModelFeatureSchema(path); err != nil {
+		return err
+	}
 	return nil
 }
 
