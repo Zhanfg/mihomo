@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/metacubex/mihomo/common/atomic"
@@ -160,4 +161,75 @@ func RegisterLgbmUpdater() {
 			}
 		}
 	}()
+}
+
+// RestoreBundledLiteModel activates the immutable, SHA-256-verified Lite
+// baseline without touching its fallback copy. The recovery is crash-safe:
+// the existing active model is kept until the new model is validated.
+func RestoreBundledLiteModel() error {
+	source := lightgbm.BundledLitePath()
+	if err := lightgbm.VerifyBundledLite(source); err != nil {
+		return fmt.Errorf("offline Lite fallback unavailable: %w", err)
+	}
+	if _, err := leaves.LGEnsembleFromFile(source, false); err != nil {
+		return fmt.Errorf("Lite fallback cannot be parsed: %w", err)
+	}
+
+	dest := C.Path.SmartModel()
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	contents, err := os.ReadFile(source)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".lite-restore-*.bin")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err = tmp.Write(contents); err == nil {
+		err = tmp.Sync()
+	}
+	closeErr := tmp.Close()
+	if err != nil {
+		return err
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if err := lightgbm.VerifyBundledLite(tmpName); err != nil {
+		return err
+	}
+
+	backup := dest + ".before-lite-restore"
+	// Renaming an occupied destination is not portable on Windows. Move the
+	// previous active model aside first, and roll back if activation fails.
+	if err := os.Remove(backup); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	hadOld := false
+	if _, err := os.Stat(dest); err == nil {
+		if err := os.Rename(dest, backup); err != nil {
+			return fmt.Errorf("cannot safeguard previous active model: %w", err)
+		}
+		hadOld = true
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		if hadOld {
+			if restoreErr := os.Rename(backup, dest); restoreErr != nil {
+				return fmt.Errorf("Lite activation failed: %v; rollback failed: %w", err, restoreErr)
+			}
+		}
+		return fmt.Errorf("Lite activation failed: %w", err)
+	}
+	if hadOld {
+		_ = os.Remove(backup)
+	}
+	lightgbm.ReloadModel()
+	return nil
 }
