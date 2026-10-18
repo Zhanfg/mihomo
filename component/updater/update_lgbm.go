@@ -167,6 +167,12 @@ func RegisterLgbmUpdater() {
 // baseline without touching its fallback copy. The recovery is crash-safe:
 // the existing active model is kept until the new model is validated.
 func RestoreBundledLiteModel() error {
+	// Serialize manual Lite restore with scheduled/explicit model updates.
+	if !updatingLgbm.CompareAndSwap(false, true) {
+		return ErrGetLgbmModelUpdateSkip
+	}
+	defer updatingLgbm.Store(false)
+
 	source := lightgbm.BundledLitePath()
 	if err := lightgbm.VerifyBundledLite(source); err != nil {
 		return fmt.Errorf("offline Lite fallback unavailable: %w", err)
