@@ -20,4 +20,4 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Test hook packages with race detector
-        run: go test -race -count=1 ./adapter ./adapter/provider ./tunnel/statistic ./component/smart/lightgbm ./component/updater
+        run: go test -race -count=1 ./adapter ./adapter/provider ./tunnel/statistic ./component/smart ./component/smart/lightgbm ./component/updater
