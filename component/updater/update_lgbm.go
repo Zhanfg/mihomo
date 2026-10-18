@@ -161,3 +161,17 @@ func RegisterLgbmUpdater() {
 		}
 	}()
 }
+
+// RestoreBundledLiteModel activates the immutable Lite baseline. It uses
+// the same validated transactional model switch as larger model presets.
+func RestoreBundledLiteModel() error {
+	if !updatingLgbm.CompareAndSwap(false, true) {
+		return ErrGetLgbmModelUpdateSkip
+	}
+	defer updatingLgbm.Store(false)
+	source := lightgbm.BundledLitePath()
+	if err := lightgbm.VerifyBundledLite(source); err != nil {
+		return fmt.Errorf("offline Lite fallback unavailable: %w", err)
+	}
+	return activateSmartModel(source)
+}
