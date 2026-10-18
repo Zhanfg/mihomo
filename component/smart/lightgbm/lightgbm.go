@@ -496,7 +496,21 @@ func ensureModelAsync(m *WeightModel) {
 				modelLoadMu.Unlock()
 				return
 			}
-			_ = os.Remove(modelPath)
+			log.Warnln("[Smart] Active LightGBM model failed to load; trying bundled Lite fallback")
+		}
+
+		// Offline first: retain and load the immutable bundled Lite baseline.
+		// Do not delete a user's active model or trigger a network request if
+		// a valid offline fallback can serve predictions immediately.
+		litePath := BundledLitePath()
+		if err := VerifyBundledLite(litePath); err == nil {
+			if err := m.loadModel(litePath); err == nil {
+				modelLoadMu.Lock()
+				modelNextRetry = time.Time{}
+				modelLoadMu.Unlock()
+				log.Infoln("[Smart] Loaded verified bundled Lite LightGBM fallback")
+				return
+			}
 		}
 
 		if err := downloadModel(modelPath); err != nil {
