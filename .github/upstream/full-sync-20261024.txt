@@ -1,0 +1,8 @@
+base=cd43cb0b2772e1719fbe195f200edd7c9f1fff24
+smart=462455136157a760937c666bba71afe33b1a809e
+official=91e85eebf0b654c73424f0a215b3c56f6b39614f
+strategy=three-way merge, auto-merge nonconflicting changes, local choice on overlapping hunks
+caution=conflicted files require manual semantic review; integration is not production-approved solely by merge
+conflicts:
+vernesong-Smart-Alpha	component/smart/cachefile.go
+vernesong-Smart-Alpha	component/smart/common.go

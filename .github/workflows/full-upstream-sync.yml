@@ -1,0 +1,111 @@
+name: Mihomo Full Upstream Integration
+
+on:
+  push:
+    branches:
+      - sync/full-upstream-20261024
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: full-upstream-sync-20261024
+  cancel-in-progress: false
+
+jobs:
+  integrate-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Verify official and Smart source ancestry
+        shell: bash
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor 462455136157a760937c666bba71afe33b1a809e HEAD || {
+            git fetch --no-tags https://github.com/vernesong/mihomo.git 462455136157a760937c666bba71afe33b1a809e
+            git merge-base --is-ancestor 462455136157a760937c666bba71afe33b1a809e HEAD
+          }
+          git merge-base --is-ancestor 91e85eebf0b654c73424f0a215b3c56f6b39614f HEAD || {
+            git fetch --no-tags https://github.com/MetaCubeX/mihomo.git 91e85eebf0b654c73424f0a215b3c56f6b39614f
+            git merge-base --is-ancestor 91e85eebf0b654c73424f0a215b3c56f6b39614f HEAD
+          }
+          cat .github/upstream/full-sync-20261024.txt
+          git log -6 --oneline
+          git status --short
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Reconcile merged Go dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          go mod tidy
+          git diff --stat -- go.mod go.sum
+          if ! git diff --quiet -- go.mod go.sum; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add go.mod go.sum
+            git commit -m "fix(upstream): go mod tidy merged dependency graph"
+            git push origin HEAD:refs/heads/sync/full-upstream-20261024
+          fi
+
+      - name: Regress core configuration, Smart, DNS and Sudoku
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          go test ./config ./adapter/outboundgroup ./component/smart/... ./dns ./transport/sudoku/... ./listener/sudoku -count=1 -timeout=15m
+
+      - name: Verify eBPF and Smart model
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags "with_gvisor with_ebpf" ./listener/sing_ebpf ./common/ebpf -count=1 -timeout=10m
+          go run ./cmd/smart-distill -verify
+
+      - name: Build Android arm64 executable
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SHORT="$(git rev-parse --short=7 HEAD)"
+          OUT="mihomo-android-arm64-fullsync-$SHORT"
+          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=fullsync-$SHORT -w -s -buildid=" \
+            -o "dist/$OUT"
+          test -s "dist/$OUT"
+          file "dist/$OUT" | tee dist/ELF_INFO.txt
+          grep -q 'ARM aarch64' dist/ELF_INFO.txt
+          gzip -9 -c "dist/$OUT" > "dist/$OUT.gz"
+          (cd dist && sha256sum "$OUT" "$OUT.gz" > SHA256SUMS)
+          {
+            echo "source_commit=$(git rev-parse HEAD)"
+            echo "target=android/arm64"
+            echo "build_tags=with_gvisor with_ebpf"
+            echo "cgo_enabled=0"
+            echo "smart_upstream=462455136157a760937c666bba71afe33b1a809e"
+            echo "official_upstream=91e85eebf0b654c73424f0a215b3c56f6b39614f"
+            go version
+          } > dist/BUILD_INFO.txt
+          cp .github/upstream/full-sync-20261024.txt dist/UPSTREAM_MERGE_REPORT.txt
+
+      - name: Upload validated full-sync Android core
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-fullsync-android-arm64
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
