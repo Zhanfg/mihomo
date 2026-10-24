@@ -3531,12 +3531,17 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 
 	clone := metadata.Clone()
 	nodeName := proxy.Name()
+	s.probeThrottle.MarkPending(clone.WildcardTarget, nodeName, time.Now())
 	go func() {
 		defer s.finishBackgroundWork()
 		defer done()
+		defer s.probeThrottle.ClearPending(clone.WildcardTarget, nodeName)
 
 		verdict := s.probeVerdict(proxy, clone.Host)
 		if verdict.Action == smart.VerdictIgnore {
+			if verdict.Reason == "probe failed" {
+				s.probeThrottle.MarkUnproven(clone.WildcardTarget, nodeName, time.Now())
+			}
 			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] ignored answer [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 			return
 		}
@@ -3547,6 +3552,7 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 		if _, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, clone.WildcardTarget, int(s.hostFailLimit.Load()), clone.SmartTarget); wtBlocked {
 			return
 		}
+		s.probeThrottle.ClearUnproven(clone.WildcardTarget, nodeName)
 		if verdict.Action == smart.VerdictReachable {
 			smart.NoteHostAnswer(s.configName, s.Name(), clone.Host)
 		} else if smart.NoteHostRefusal(s.configName, s.Name(), clone.Host, nodeName, verdict.Reason) {
