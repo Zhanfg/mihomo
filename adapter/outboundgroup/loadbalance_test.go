@@ -420,7 +420,7 @@ func request(user, host string) *C.Metadata {
 
 // One unit of work walking several destinations is the case both address-derived
 // keys get wrong: the group is meant to hold that work on one egress, and the
-// default key moves it as soon as the host changes.
+// default key changes as soon as the host changes.
 func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 	proxies := balancedProxies(8)
 	hosts := distinctKeys("www.site-%02d.com", 16)
@@ -436,10 +436,10 @@ func TestLoadBalanceHashKeyInUserSurvivesADestinationChange(t *testing.T) {
 	byDestination := strategyConsistentHashing(testUrl, getKey, false, false)
 	seen := map[int]bool{}
 	for _, host := range hosts {
-		seen[indexOf(t, proxies, byDestination(proxies, request("job-1", host), false))] = true
+		seenKeys[getKey(request("job-1", host))] = struct{}{}
 	}
-	require.Greater(t, len(seen), 1,
-		"the default key is expected to move with the destination")
+	require.Len(t, seenKeys, len(hosts),
+		"the default key must change with the destination")
 }
 
 // distinctKeys returns count distinct keys; for hosts, vary the registrable
@@ -466,7 +466,7 @@ func TestLoadBalanceHashKeyInUserSpreadsUsers(t *testing.T) {
 		selected := strategy(proxies, request(user, "a.example.com"), false)
 		seen[indexOf(t, proxies, selected)] = true
 	}
-	require.Greater(t, len(seen), 1)
+	require.Len(t, seenKeys, len(users))
 }
 
 // Sticky sessions keys on source and destination; a client behind one source

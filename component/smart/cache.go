@@ -8,10 +8,18 @@ import (
 	stdatomic "sync/atomic"
 	"time"
 
+	"github.com/metacubex/mihomo/common/cmd"
 	"github.com/metacubex/mihomo/common/lru"
 	"github.com/metacubex/mihomo/common/xsync"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/log"
+)
+
+const (
+	MaxTargetsLimit     = 5000
+	MinTargetsLimit     = 500
+	MaxBatchThreshLimit = 300
+	MinBatchThreshLimit = 50
 )
 
 var (
@@ -32,6 +40,13 @@ var (
 	blockedNodesCache *lru.LruCache[string, map[string]bool]
 
 	hostStatusCache *lru.LruCache[string, *HostStatus]
+
+	globalCacheParams struct {
+		BatchSaveThreshold int
+		MaxTargets         int
+		LastMemoryUsage    float64
+		mutex              sync.RWMutex
+	}
 )
 
 var (
@@ -115,7 +130,6 @@ func InitCache() {
 	cacheReady.Store(true)
 }
 
-// 存储预取结果
 func (s *Store) StorePrefetchResult(group, config string, target string, isUDP bool, proxyNames []string, weights []float64) {
 	if target == "" || len(proxyNames) == 0 {
 		return
@@ -146,7 +160,6 @@ func (s *Store) StorePrefetchResult(group, config string, target string, isUDP b
 	})
 }
 
-// 获取预取结果
 func (s *Store) GetPrefetchResult(group, config string, target string, isUDP bool) ([]string, []float64) {
 	if target == "" {
 		return nil, nil
@@ -386,7 +399,6 @@ func (s *Store) AdjustCacheParameters() {
 	go s.FlushQueue(true)
 }
 
-// 按级别清理内存缓存
 func (s *Store) clearCache(level string, config string, group string) {
 	s.FlushQueue(true)
 

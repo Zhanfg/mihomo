@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -485,10 +486,12 @@ func (p *Proxy) statusRequest(ctx context.Context, rawURL string, handle func(*h
 			if len(via) >= 3 {
 				return http.ErrUseLastResponse
 			}
+			if checkRedirect != nil {
+				return checkRedirect(req, via)
+			}
 			return nil
 		},
 	}
-	defer client.CloseIdleConnections()
 
 	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
