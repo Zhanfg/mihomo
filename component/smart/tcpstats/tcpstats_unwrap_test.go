@@ -8,10 +8,10 @@ import (
 
 type fakeRawConn struct{}
 
-func (f *fakeRawConn) Control(fn func(fd uintptr)) error    { return nil }
-func (f *fakeRawConn) Read(fn func(fd uintptr) bool) error  { return nil }
+func (f *fakeRawConn) Control(fn func(fd uintptr)) error { return nil }
+func (f *fakeRawConn) Read(fn func(fd uintptr) bool) error { return nil }
 func (f *fakeRawConn) Write(fn func(fd uintptr) bool) error { return nil }
-func (f *fakeRawConn) Close() error                         { return nil }
+func (f *fakeRawConn) Close() error { return nil }
 
 type syscallConn struct {
 	net.Conn
@@ -35,7 +35,7 @@ type netConnFallbackWrapper struct {
 	inner net.Conn
 }
 
-func (w *netConnFallbackWrapper) Upstream() any     { return "not a net.Conn" }
+func (w *netConnFallbackWrapper) Upstream() any { return "not a net.Conn" }
 func (w *netConnFallbackWrapper) NetConn() net.Conn { return w.inner }
 
 type reflectFallbackWrapper struct {
@@ -64,9 +64,9 @@ func TestGetTCPStats_UnwrapUpstreamChain(t *testing.T) {
 	inner := &upstreamWrapper{Conn: base, upstream: base}
 	outer := &upstreamWrapper{Conn: inner, upstream: inner}
 
-	GetTCPStats(outer)
+	getTCPStats(outer)
 	if !base.syscallCalled {
-		t.Fatal("expected GetTCPStats to unwrap through the Upstream chain to SyscallConn")
+		t.Fatal("expected getTCPStats to unwrap through the Upstream chain to SyscallConn")
 	}
 }
 
@@ -74,19 +74,19 @@ func TestGetTCPStats_UpstreamFallbackToNetConn(t *testing.T) {
 	base := newBaseConn(t)
 	w := &netConnFallbackWrapper{Conn: base, inner: base}
 
-	GetTCPStats(w)
+	getTCPStats(w)
 	if !base.syscallCalled {
-		t.Fatal("expected GetTCPStats to fall back to NetConn() when Upstream() returns a non-net.Conn")
+		t.Fatal("expected getTCPStats to fall back to NetConn() when Upstream() returns a non-net.Conn")
 	}
 }
 
 func TestGetTCPStats_ReflectFallback(t *testing.T) {
 	base := newBaseConn(t)
-	w := &reflectFallbackWrapper{Conn: base, extra: "non-conn field"}
+	w := &reflectFallbackWrapper{Conn: base}
 
-	GetTCPStats(w)
+	getTCPStats(w)
 	if !base.syscallCalled {
-		t.Fatal("expected GetTCPStats to unwrap the embedded net.Conn via reflection")
+		t.Fatal("expected getTCPStats to unwrap the embedded net.Conn via reflection")
 	}
 }
 
@@ -96,7 +96,7 @@ func TestGetTCPStats_CyclicUpstream(t *testing.T) {
 	defer peer.Close()
 	w := &cyclicWrapper{Conn: client}
 
-	if stats := GetTCPStats(w); stats != nil {
+	if stats := getTCPStats(w); stats != nil {
 		t.Fatal("expected nil stats for a cyclic unwrap chain")
 	}
 }

@@ -36,23 +36,6 @@ const (
 	expectedColumns           = MaxFeatureSize + 12
 )
 
-var (
-	collectMutex   sync.Mutex
-	smartCollector *DataCollector
-)
-
-type DataCollector struct {
-	mutex              sync.Mutex
-	sampleCount        int
-	dataPath           string
-	file               *os.File
-	writer             *csv.Writer
-	configured         bool
-	sizeLimited        bool
-	smartCollectorSize int64
-	lastFileCheck      time.Time
-}
-
 func InitCollector(collectSize float64) {
 	var smartCollectorSize int64
 	if collectSize > 0 {
@@ -96,28 +79,21 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 		if _, err := os.Stat(c.dataPath); os.IsNotExist(err) {
 			log.Infoln("[Smart] Data file was deleted, reinitializing collector")
 			c.configured = false
-			c.sizeLimited = false
 			if c.file != nil {
 				c.file.Close()
 				c.file = nil
 			}
 			c.writer = nil
-		} else {
-			limitReached := c.sizeLimited
-			if !limitReached && c.file != nil {
-				if stat, err := c.file.Stat(); err == nil {
-					limitReached = stat.Size() > c.smartCollectorSize
-				}
-			}
-			if limitReached {
-				c.sizeLimited = true
-				log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.smartCollectorSize/(1024*1024))
-			}
 		}
 	}
 
-	if c.sizeLimited {
-		return
+	// 检查文件大小限制
+	if c.file != nil {
+		stat, err := c.file.Stat()
+		if err == nil && stat.Size() > c.smartCollectorSize {
+			log.Infoln("[Smart] Maximum file size limit reached (%d MB), stopping data collection", c.smartCollectorSize/(1024*1024))
+			return
+		}
 	}
 
 	if !c.configured {
@@ -203,6 +179,7 @@ func (c *DataCollector) AddSample(input *smart.ModelInput, metadata *C.Metadata,
 
 	c.sampleCount++
 
+	// 每100条记录刷新一次
 	if c.sampleCount%100 == 0 {
 		c.writer.Flush()
 	}
@@ -249,11 +226,11 @@ func (c *DataCollector) initializeWriter() error {
 	if needUpgrade {
 		backupPath := c.dataPath + ".bak." + time.Now().Format("20060102150405")
 		os.Rename(c.dataPath, backupPath)
-		log.Infoln("[Smart] Old CSV file does not match the feature schema, backup to %s and create new file", backupPath)
+		log.Infoln("[Smart] Old CSV file does not contain hash columns, backup to %s and create new file", backupPath)
 		fileExists = false
 	}
 
-	file, err := os.OpenFile(c.dataPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
+	file, err := os.OpenFile(c.dataPath, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0644)
 	if err != nil {
 		return err
 	}
