@@ -4,8 +4,6 @@ on:
   push:
     branches:
       - sync/full-upstream-20261024
-    paths:
-      - ".github/workflows/full-upstream-sync.yml"
   workflow_dispatch:
 
 permissions:
@@ -25,64 +23,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Merge pinned Smart and official Alpha
+      - name: Verify official and Smart source ancestry
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git branch --show-current)" = "sync/full-upstream-20261024"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdir -p .github/upstream
-          REPORT="$RUNNER_TEMP/upstream-conflicts.txt"
-          : > "$REPORT"
-          git remote add smart-upstream https://github.com/vernesong/mihomo.git
-          git remote add official-upstream https://github.com/MetaCubeX/mihomo.git
-          git fetch --no-tags smart-upstream 462455136157a760937c666bba71afe33b1a809e
-          SMART_SHA="$(git rev-parse FETCH_HEAD)"
-          git fetch --no-tags official-upstream 91e85eebf0b654c73424f0a215b3c56f6b39614f
-          OFFICIAL_SHA="$(git rev-parse FETCH_HEAD)"
-          merge_source() {
-            local source="$1" label="$2" rc=0
-            git merge --no-ff --no-commit -X ours "$source" || rc=$?
-            if [ "$rc" -ne 0 ]; then
-              if [ -z "$(git ls-files -u)" ]; then
-                echo "Merge failed without identifiable conflicts" >&2
-                exit 1
-              fi
-              git ls-files -u | awk '{print $4}' | sort -u > "$RUNNER_TEMP/conflicts-list.txt"
-              while IFS= read -r path; do
-                printf '%s\t%s\n' "$label" "$path" >> "$REPORT"
-                if git ls-files -u -- "$path" | awk '$3 == 2 {found=1} END {exit !found}'; then
-                  git checkout --ours -- "$path"
-                  git add -- "$path"
-                else
-                  git rm -f -- "$path"
-                fi
-              done < "$RUNNER_TEMP/conflicts-list.txt"
-              if [ -n "$(git ls-files -u)" ]; then
-                echo "Unresolved conflicts remain" >&2
-                git ls-files -u >&2
-                exit 1
-              fi
-            fi
-            git commit -m "merge(upstream): integrate $label at $source preserving our conflict hunks"
+          git merge-base --is-ancestor 462455136157a760937c666bba71afe33b1a809e HEAD || {
+            git fetch --no-tags https://github.com/vernesong/mihomo.git 462455136157a760937c666bba71afe33b1a809e
+            git merge-base --is-ancestor 462455136157a760937c666bba71afe33b1a809e HEAD
           }
-          merge_source "$SMART_SHA" "vernesong-Smart-Alpha"
-          merge_source "$OFFICIAL_SHA" "MetaCubeX-Alpha"
-          {
-            echo "base=cd43cb0b2772e1719fbe195f200edd7c9f1fff24"
-            echo "smart=$SMART_SHA"
-            echo "official=$OFFICIAL_SHA"
-            echo "strategy=three-way merge, auto-merge nonconflicting changes, local choice on overlapping hunks"
-            echo "caution=conflicted files require manual semantic review; integration is not production-approved solely by merge"
-            echo "conflicts:"
-            cat "$REPORT"
-          } > .github/upstream/full-sync-20261024.txt
-          git add .github/upstream/full-sync-20261024.txt
-          git commit -m "docs(upstream): record source pins and conflict resolution report"
-          git log -4 --oneline
+          git merge-base --is-ancestor 91e85eebf0b654c73424f0a215b3c56f6b39614f HEAD || {
+            git fetch --no-tags https://github.com/MetaCubeX/mihomo.git 91e85eebf0b654c73424f0a215b3c56f6b39614f
+            git merge-base --is-ancestor 91e85eebf0b654c73424f0a215b3c56f6b39614f HEAD
+          }
+          cat .github/upstream/full-sync-20261024.txt
+          git log -6 --oneline
           git status --short
-          git push origin HEAD:refs/heads/sync/full-upstream-20261024
 
       - uses: actions/setup-go@v6
         with:
