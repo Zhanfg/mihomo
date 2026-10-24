@@ -1,0 +1,142 @@
+name: Mihomo Full Upstream Integration
+
+on:
+  push:
+    branches:
+      - sync/full-upstream-20261024
+    paths:
+      - ".github/workflows/full-upstream-sync.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: full-upstream-sync-20261024
+  cancel-in-progress: false
+
+jobs:
+  integrate-and-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Merge pinned Smart and official Alpha
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git branch --show-current)" = "sync/full-upstream-20261024"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p .github/upstream
+          REPORT="$RUNNER_TEMP/upstream-conflicts.txt"
+          : > "$REPORT"
+          git remote add smart-upstream https://github.com/vernesong/mihomo.git
+          git remote add official-upstream https://github.com/MetaCubeX/mihomo.git
+          git fetch --no-tags smart-upstream 462455136157a760937c666bba71afe33b1a809e
+          SMART_SHA="$(git rev-parse FETCH_HEAD)"
+          git fetch --no-tags official-upstream 91e85eebf0b654c73424f0a215b3c56f6b39614f
+          OFFICIAL_SHA="$(git rev-parse FETCH_HEAD)"
+          merge_source() {
+            local source="$1" label="$2" rc=0
+            git merge --no-ff --no-commit -X ours "$source" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              if [ -z "$(git ls-files -u)" ]; then
+                echo "Merge failed without identifiable conflicts" >&2
+                exit 1
+              fi
+              git ls-files -u | awk '{print $4}' | sort -u > "$RUNNER_TEMP/conflicts-list.txt"
+              while IFS= read -r path; do
+                printf '%s\t%s\n' "$label" "$path" >> "$REPORT"
+                if git ls-files -u -- "$path" | awk '$3 == 2 {found=1} END {exit !found}'; then
+                  git checkout --ours -- "$path"
+                  git add -- "$path"
+                else
+                  git rm -f -- "$path"
+                fi
+              done < "$RUNNER_TEMP/conflicts-list.txt"
+              if [ -n "$(git ls-files -u)" ]; then
+                echo "Unresolved conflicts remain" >&2
+                git ls-files -u >&2
+                exit 1
+              fi
+            fi
+            git commit -m "merge(upstream): integrate $label at $source preserving our conflict hunks"
+          }
+          merge_source "$SMART_SHA" "vernesong-Smart-Alpha"
+          merge_source "$OFFICIAL_SHA" "MetaCubeX-Alpha"
+          {
+            echo "base=cd43cb0b2772e1719fbe195f200edd7c9f1fff24"
+            echo "smart=$SMART_SHA"
+            echo "official=$OFFICIAL_SHA"
+            echo "strategy=three-way merge, auto-merge nonconflicting changes, local choice on overlapping hunks"
+            echo "caution=conflicted files require manual semantic review; integration is not production-approved solely by merge"
+            echo "conflicts:"
+            cat "$REPORT"
+          } > .github/upstream/full-sync-20261024.txt
+          git add .github/upstream/full-sync-20261024.txt
+          git commit -m "docs(upstream): record source pins and conflict resolution report"
+          git log -4 --oneline
+          git status --short
+          git push origin HEAD:refs/heads/sync/full-upstream-20261024
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+
+      - name: Regress core configuration, Smart, DNS and Sudoku
+        shell: bash
+        run: |
+          set -euo pipefail
+          go version
+          go test ./config ./adapter/outboundgroup ./component/smart/... ./dns ./transport/sudoku/... ./listener/sudoku -count=1 -timeout=15m
+
+      - name: Verify eBPF and Smart model
+        shell: bash
+        run: |
+          set -euo pipefail
+          go test -tags "with_gvisor with_ebpf" ./listener/sing_ebpf ./common/ebpf -count=1 -timeout=10m
+          go run ./cmd/smart-distill -verify
+
+      - name: Build Android arm64 executable
+        shell: bash
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          SHORT="$(git rev-parse --short=7 HEAD)"
+          OUT="mihomo-android-arm64-fullsync-$SHORT"
+          go build -buildvcs=false -tags "with_gvisor with_ebpf" -trimpath \
+            -ldflags "-X github.com/metacubex/mihomo/constant.Version=fullsync-$SHORT -w -s -buildid=" \
+            -o "dist/$OUT"
+          test -s "dist/$OUT"
+          file "dist/$OUT" | tee dist/ELF_INFO.txt
+          grep -q 'ARM aarch64' dist/ELF_INFO.txt
+          gzip -9 -c "dist/$OUT" > "dist/$OUT.gz"
+          (cd dist && sha256sum "$OUT" "$OUT.gz" > SHA256SUMS)
+          {
+            echo "source_commit=$(git rev-parse HEAD)"
+            echo "target=android/arm64"
+            echo "build_tags=with_gvisor with_ebpf"
+            echo "cgo_enabled=0"
+            echo "smart_upstream=462455136157a760937c666bba71afe33b1a809e"
+            echo "official_upstream=91e85eebf0b654c73424f0a215b3c56f6b39614f"
+            go version
+          } > dist/BUILD_INFO.txt
+          cp .github/upstream/full-sync-20261024.txt dist/UPSTREAM_MERGE_REPORT.txt
+
+      - name: Upload validated full-sync Android core
+        uses: actions/upload-artifact@v7
+        with:
+          name: mihomo-fullsync-android-arm64
+          path: dist/*
+          retention-days: 30
+          if-no-files-found: error
