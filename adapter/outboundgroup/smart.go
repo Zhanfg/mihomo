@@ -430,6 +430,7 @@ type Smart struct {
 	recoveryBackoff     map[string]hostRecoveryState
 
 	probeThrottle smart.ProbeThrottle
+	exitCache     *smart.ExitCache
 }
 
 type dialResult struct {
@@ -921,6 +922,15 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	isUDP := metadata != nil && metadata.NetWork == C.UDP
 	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
 	adapter.ObserveProxyPathSuccess(p, isUDP, knownFamily, ipv6, s.country != "" || s.countryAffinity)
+	// Reuse the capability subsystem's already verified egress identity: no
+	// second exit probe, no new radio wake, no speculative sibling-family I/O.
+	if knownFamily && !isUDP && s.exitCache != nil {
+		knownIP, exitIP := adapter.CachedExitIPForProxy(p, ipv6)
+		knownCountry, exitCountry := adapter.CachedExitCountryForProxy(p, ipv6)
+		if knownIP || knownCountry {
+			s.exitCache.Observe(s.configName, s.Name(), p.Name(), ipv6, exitIP, exitCountry, time.Now())
+		}
+	}
 
 	target := metadata.SmartTarget
 	existing, _, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, target)
@@ -2043,6 +2053,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
+	s.exitCache = smart.NewExitCache(s.store)
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.maintenanceWake = make(chan struct{}, 1)

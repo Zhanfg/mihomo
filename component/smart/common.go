@@ -841,6 +841,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 		s.DBBatchDeletePrefix([]string{
 			FormatDBKey(KeyTypeStats, config),
 			FormatDBKey(KeyTypeNode, config),
+			FormatDBKey(KeyTypeExit, config),
 			FormatDBKey(KeyTypeRanking, config),
 			FormatDBKey(KeyTypePrefetch, config),
 			FormatDBKey(KeyTypeHostFailures, config),
@@ -849,6 +850,7 @@ func (s *Store) FlushByLevel(level string, config string, group string) error {
 		s.DBBatchDeletePrefix([]string{
 			FormatDBKey(KeyTypeStats, config, group),
 			FormatDBKey(KeyTypeNode, config, group),
+			FormatDBKey(KeyTypeExit, config, group),
 			FormatDBKey(KeyTypeRanking, config, group),
 			FormatDBKey(KeyTypePrefetch, config, group),
 			FormatDBKey(KeyTypeHostFailures, config, group),
