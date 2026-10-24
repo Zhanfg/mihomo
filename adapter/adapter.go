@@ -292,6 +292,10 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 
 	satisfied = resp != nil && (expectedStatus == nil || expectedStatus.Check(uint16(resp.StatusCode)))
 	t = uint16(time.Since(start) / time.Millisecond)
+	if t == 0 {
+		// Zero latency is interpreted as failure; round successful sub-ms tests up.
+		t = 1
+	}
 	return
 }
 
