@@ -2,6 +2,7 @@ package smart
 
 import (
 	"encoding/json"
+	"github.com/metacubex/mihomo/component/netstate"
 	"net/netip"
 	"strings"
 	"sync"
@@ -21,6 +22,7 @@ type ExitIdentity struct {
 	Region string
 	ASN string
 	Observed int64
+	Epoch uint64 `json:"-"`
 }
 
 type exitCacheKey struct {
@@ -61,13 +63,13 @@ func (c *ExitCache) Observe(config, group, node string, ipv6 bool, ip netip.Addr
 	}
 	region = strings.ToUpper(strings.TrimSpace(region))
 	if !ip.IsValid() && region == "" { return }
-	entry := ExitIdentity{Region: region, Observed: now.Unix()}
+	entry := ExitIdentity{Region: region, Observed: now.Unix(), Epoch: netstate.CurrentEpoch()}
 	if ip.IsValid() { entry.IP = ip.String() }
 	k := exitCacheKey{config, group, node, ipv6}
 
 	c.mu.Lock()
 	if previous, ok := c.items[k]; ok &&
-		previous.IP == entry.IP && previous.Region == entry.Region &&
+		previous.IP == entry.IP && previous.Region == entry.Region && previous.Epoch == entry.Epoch &&
 		now.Unix()-previous.Observed >= 0 &&
 		now.Unix()-previous.Observed < int64(exitIdentityTTL.Seconds()) {
 		c.mu.Unlock()
@@ -111,7 +113,7 @@ func (c *ExitCache) Cached(config, group, node string, ipv6 bool, now time.Time)
 	c.mu.RLock()
 	v, found := c.items[k]
 	c.mu.RUnlock()
-	if !found || v.Observed <= 0 ||
+	if !found || v.Epoch != netstate.CurrentEpoch() || v.Observed <= 0 ||
 		now.Unix()-v.Observed < 0 ||
 		now.Unix()-v.Observed >= int64(exitIdentityTTL.Seconds()) {
 		return ExitIdentity{}, false

@@ -45,3 +45,18 @@ func TestExitCacheBoundedAndConcurrent(t *testing.T) {
 	wg.Wait()
 	if len(c.items)>exitIdentityMaxEntries {t.Fatalf("cache exceeds bound: %d",len(c.items))}
 }
+
+func TestExitCacheCurrentEpochOnly(t *testing.T) {
+	c := NewExitCache(nil)
+	now := time.Unix(1700000000, 0)
+	c.Observe("cfg", "g", "node", false, netip.MustParseAddr("1.1.1.1"), "US", now)
+	key := exitCacheKey{"cfg", "g", "node", false}
+	c.mu.Lock()
+	entry := c.items[key]
+	entry.Epoch = 0 // simulate previous network epoch without changing global test state
+	c.items[key] = entry
+	c.mu.Unlock()
+	if _, ok := c.Cached("cfg", "g", "node", false, now); ok {
+		t.Fatal("stale network epoch accepted as live egress identity")
+	}
+}
