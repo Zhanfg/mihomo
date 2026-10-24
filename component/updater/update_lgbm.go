@@ -32,6 +32,7 @@ func LgbmUpdateInterval() int {
 	return lgbmUpdateInterval
 }
 
+
 func SetLgbmAutoUpdate(newAutoUpdate bool) {
 	lgbmAutoUpdate = newAutoUpdate
 }
@@ -39,6 +40,7 @@ func SetLgbmAutoUpdate(newAutoUpdate bool) {
 func SetLgbmUpdateInterval(newUpdateInterval int) {
 	lgbmUpdateInterval = newUpdateInterval
 }
+
 
 func UpdateLgbmModel() (err error) {
 	modelUrl := lightgbm.LgbmUrl()

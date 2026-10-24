@@ -10,7 +10,6 @@ import (
 	"math/rand"
 	"net"
 	"net/netip"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,9 +41,8 @@ import (
 	"github.com/metacubex/mihomo/log"
 	"github.com/metacubex/mihomo/tunnel"
 	"github.com/metacubex/mihomo/tunnel/statistic"
-
-	"github.com/dlclark/regexp2"
 	"github.com/samber/lo"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -388,7 +386,6 @@ type Smart struct {
 	configName     string
 	selected       string
 	testUrl        string
-	testUrlHost    string
 	expectedStatus string
 	disableUDP     bool
 
@@ -410,11 +407,10 @@ type Smart struct {
 
 	freshNodesGroup singleflight.Group[nodeResult]
 
-	ruleCountCache    xsync.Map[string, int]
-	geoSiteCountCache xsync.Map[string, int]
-	asnDiversity      xsync.Map[string, *xsync.Map[string, bool]]
-	asnRule           xsync.Map[string, string]
-	siteKeyCache      xsync.Map[string, bool]
+	ruleCountCache xsync.Map[string, int]
+	asnDiversity   xsync.Map[string, *xsync.Map[string, bool]]
+	asnRule        xsync.Map[string, string]
+	siteKeyCache   xsync.Map[string, bool]
 
 	suppressStats atomic.Bool
 	suppressCount atomic.Int64
@@ -434,9 +430,6 @@ type Smart struct {
 	recoveryBackoff     map[string]hostRecoveryState
 
 	probeThrottle smart.ProbeThrottle
-	lossSampler   *tcpstats.LossSampler
-
-	exitWatch *smart.ExitWatcher
 }
 
 type dialResult struct {
@@ -451,6 +444,11 @@ type priorityRule struct {
 	regex   *regexp2.Regexp
 	factor  float64
 	isRegex bool
+}
+
+type nodeWithWeight struct {
+	node   string
+	weight float64
 }
 
 type nodeResult struct {
@@ -551,14 +549,13 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 	}
 
 	s.hostFailLimit.Store(int32(s.maxFailedTimes))
-	s.testUrlHost = testUrlHostOf(s.testUrl)
 
 	if smartOption.SampleRate > 0 && smartOption.SampleRate <= 1 {
 		s.sampleRate = smartOption.SampleRate
 	}
 
 	if smartOption.PolicyPriority != "" {
-		s.applyPolicyPriority(smartOption.PolicyPriority)
+		applyPolicyPriority(s, smartOption.PolicyPriority)
 	}
 
 	s.InitSmart()
@@ -718,7 +715,7 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 	connectTime = time.Since(start).Milliseconds()
 
 	if err != nil {
-		// errors that stop the retry loop are not recorded as node failures
+		// err if ShouldStopRetry should not record as failed in node stats and stop retry
 		if tunnel.ShouldStopRetry(err) {
 			return nil, connectTime, err
 		}
@@ -730,20 +727,6 @@ func (s *Smart) singleDialContext(ctx context.Context, proxy C.Proxy, metadata *
 	}
 
 	return c, connectTime, nil
-}
-
-// dialTimeout converts the remembered connect time into a deadline: a node that was slow
-// before fails fast instead of holding the whole batch until the default timeout.
-func (s *Smart) dialTimeout(metadata *C.Metadata, proxy C.Proxy, max time.Duration) time.Duration {
-	historyConnectTime := s.getHistoryConnectStats(metadata, proxy)
-	if historyConnectTime <= 0 {
-		return max
-	}
-	timeout := time.Duration(float64(historyConnectTime)*connectThreshold) * time.Millisecond
-	if timeout > max {
-		return max
-	}
-	return timeout
 }
 
 func (s *Smart) groupDialFailed(proxies []C.Proxy, err error) {
@@ -1177,7 +1160,7 @@ func (s *Smart) Unwrap(metadata *C.Metadata, touch bool) C.Proxy {
 		}
 	}
 
-	proxies, _, _ = s.selectProxies(metadata, proxies)
+	proxies, _ = s.selectProxies(metadata, proxies)
 
 	return proxies[0]
 }
@@ -1191,13 +1174,6 @@ func (s *Smart) SupportUDP() bool {
 }
 
 func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.Conn {
-	s.exitWatch.EnsureLoaded(proxy.Name())
-	if region, asn := s.exitWatch.Label(metadata.WildcardTarget, proxy.Name()); region != "" || asn != "" {
-		metadata.ExitGeoIP = region
-		if s.preferASN {
-			metadata.ExitIPASN = asn
-		}
-	}
 	c.AppendToChains(s)
 
 	start := time.Now()
@@ -1243,13 +1219,6 @@ func (s *Smart) WrapConnWithMetric(c C.Conn, proxy C.Proxy, metadata *C.Metadata
 }
 
 func (s *Smart) WrapPacketConnWithMetric(pc C.PacketConn, proxy C.Proxy, metadata *C.Metadata, connectTime int64) C.PacketConn {
-	s.exitWatch.EnsureLoaded(proxy.Name())
-	if region, asn := s.exitWatch.Label(metadata.WildcardTarget, proxy.Name()); region != "" || asn != "" {
-		metadata.ExitGeoIP = region
-		if s.preferASN {
-			metadata.ExitIPASN = asn
-		}
-	}
 	pc.AppendToChains(s)
 
 	var udpLatency atomic.Int64
@@ -1581,10 +1550,7 @@ func (s *Smart) autoIPFamilyMismatch(metadata *C.Metadata, p C.Proxy) bool {
 
 func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names []string, weights []float64, all []C.Proxy, minCount int, isUDP bool, explorationAlpha float64) []C.Proxy {
 	blockedNodes := s.store.GetBlockedNodes(s.Name(), s.configName)
-	lookupTarget, extraTargets := failLookupTargets(metadata, isUDP)
-	wtFailNodes, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, lookupTarget, int(s.hostFailLimit.Load()), extraTargets...)
-	now := time.Now()
-	s.exitWatch.Backfill(s.ctx, wildcardTarget, all)
+	wtFailNodes, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, wildcardTarget, int(s.hostFailLimit.Load()), metadata.SmartTarget)
 
 	// Explicit require-* directives are strict. auto-ip-family remains
 	// availability-first, but a cached/pinned node that is already PROVEN to
@@ -1650,6 +1616,8 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		proxyByName = s.proxyIndexFor(all)
 	}
 
+	checkNodeUsed := make(map[string]bool, len(names))
+
 	selected := make([]C.Proxy, 0, minCount+1)
 	selectedWeights := make([]float64, 0, minCount+1)
 
@@ -1700,17 +1668,18 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		selected[insertAt] = proxy
 		selectedWeights[insertAt] = effectiveWeight
 	}
-	// a pinned candidate list is used as is, it is not padded from the rest
+
+	// Unwrap result should not filled
 	if weights == nil && len(selected) > 0 {
-		return selected, softSkipped
+		return selected
 	}
 
 	if len(selected) >= len(all) {
-		return selected, softSkipped
+		return selected
 	}
 
 	if len(selected) >= minCount {
-		return selected[:minCount], softSkipped
+		return selected[:minCount]
 	}
 
 	hasPriority := len(s.policyPriority) > 0
@@ -1888,14 +1857,6 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		selected = append(selected, topUp...)
 	}
 
-	rankedSorted := false
-	sortFallback := func() {
-		if !rankedSorted {
-			sort.SliceStable(ranked, func(i, j int) bool { return less(ranked[i].key, ranked[j].key) })
-			rankedSorted = true
-		}
-	}
-
 	if len(selected) == 0 {
 		selected = fallbackCandidates(minCount)
 	}
@@ -1906,27 +1867,14 @@ func (s *Smart) filterProxies(metadata *C.Metadata, wildcardTarget string, names
 		selected = append(selected, s.EmptyFallback())
 	}
 
-	if len(selected) < minCount {
-		sortFallback()
-		for _, kp := range ranked {
-			p := kp.proxy
-			if !p.AliveForTestUrl(s.testUrl) || (isUDP && !p.SupportUDP()) {
-				continue
-			}
-			if s.exitWatch.Defer(wildcardTarget, p.Name(), now, smart.ProbeTimeout) &&
-				s.exitWatch.AllowFallback(wildcardTarget, p.Name(), now, smart.ProbeTimeout) {
-				selected = append(selected, p)
-				break
-			}
-		}
-	}
-	return selected, softSkipped
+	return selected
 }
 
 // selectProxies returns the nodes to dial and whether the target is already pinned to
 // one node: a pinned target is dialed node by node, an unpinned one may race on its
 // first dial, which is the only moment a key can show more than one exit.
-func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Proxy, bool, bool) {
+func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Proxy, bool) {
+	// attach ASN info
 	asnNumber := s.getASNCode(metadata)
 	dstIP := ""
 	if metadata.Host == "" {
@@ -2039,7 +1987,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 			}
 		}
 		if len(resultProxies) > 0 {
-			s.store.StoreUnwrapResult(s.Name(), s.configName, smart.NetScopedTarget(metadata.SmartTarget, isUDP), resultProxies)
+			s.store.StoreUnwrapResult(s.Name(), s.configName, metadata.SmartTarget, resultProxies)
 		}
 	}
 
