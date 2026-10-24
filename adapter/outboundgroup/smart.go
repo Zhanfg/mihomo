@@ -3507,6 +3507,11 @@ sendLoop:
 // The verdict lands after its connection is gone, outside the (target, node) stats lock, so the pin,
 // the membership and the stop-loss have to be re-checked before anything is written.
 func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
+	// Several independent node refusals mean this host is likely inaccessible.
+	// Avoid repeated HTTPS probes until the bounded host hold expires.
+	if smart.HostBackedOff(s.configName, s.Name(), metadata.Host) {
+		return
+	}
 	now := time.Now()
 	if !s.probeThrottle.AllowNode(metadata.WildcardTarget, proxy.Name(), now) {
 		return
@@ -3535,14 +3540,21 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] ignored answer [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 			return
 		}
-		if !s.probeThrottle.AllowHostRecord(clone.Host, verdict, time.Now()) {
-			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] kept, no node reaches the host [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
-			return
-		}
+		// Only live, still-member nodes may change shared host-refusal evidence.
 		if s.selected != "" || !lo.ContainsBy(s.GetProxies(false), func(p C.Proxy) bool { return p.Name() == nodeName }) {
 			return
 		}
 		if _, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, clone.WildcardTarget, int(s.hostFailLimit.Load()), clone.SmartTarget); wtBlocked {
+			return
+		}
+		if verdict.Action == smart.VerdictReachable {
+			smart.NoteHostAnswer(s.configName, s.Name(), clone.Host)
+		} else if smart.NoteHostRefusal(s.configName, s.Name(), clone.Host, nodeName, verdict.Reason) {
+			log.Debugln("[Smart] Probe Group: [%s] - Host: [%s] held after distinct-node refusals", s.Name(), clone.Host)
+			return
+		}
+		if !s.probeThrottle.AllowHostRecord(clone.Host, verdict, time.Now()) {
+			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] kept, no node reaches the host [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 			return
 		}
 
