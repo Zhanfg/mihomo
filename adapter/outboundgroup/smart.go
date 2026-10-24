@@ -431,6 +431,7 @@ type Smart struct {
 
 	probeThrottle smart.ProbeThrottle
 	exitCache     *smart.ExitCache
+	exitWatcher   *smart.ExitRegionWatcher
 }
 
 type dialResult struct {
@@ -2054,6 +2055,7 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
 	s.exitCache = smart.NewExitCache(s.store)
+	s.exitWatcher = smart.NewExitRegionWatcher()
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.maintenanceWake = make(chan struct{}, 1)
@@ -3564,6 +3566,7 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 			return
 		}
 		s.probeThrottle.ClearUnproven(clone.WildcardTarget, nodeName)
+		s.noteMeasuredExitVerdict(clone, nodeName, verdict)
 		if verdict.Action == smart.VerdictReachable {
 			smart.NoteHostAnswer(s.configName, s.Name(), clone.Host)
 		} else if smart.NoteHostRefusal(s.configName, s.Name(), clone.Host, nodeName, verdict.Reason) {
@@ -3588,6 +3591,34 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, clone.SmartTarget)
 		log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] avoided for [%s]: [%s]", s.Name(), nodeName, clone.Host, verdict.TTL, verdict.Reason)
 	}()
+}
+
+
+func (s *Smart) noteMeasuredExitVerdict(metadata *C.Metadata, node string, verdict smart.Verdict) {
+	if s.exitCache == nil || s.exitWatcher == nil || metadata == nil || metadata.SmartTarget == "" {
+		return
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return
+	}
+	entry, ok := s.exitCache.Cached(s.configName, s.Name(), node, ipv6, time.Now())
+	if !ok || entry.IP == "" || entry.Region == "" {
+		return
+	}
+
+	success := verdict.Action == smart.VerdictReachable
+	refused := verdict.Action == smart.VerdictRecord &&
+		(verdict.Reason == "forbidden" || verdict.Reason == "unavailable for legal reasons")
+	if !success && !refused {
+		return
+	}
+	if s.exitWatcher.Observe(metadata.SmartTarget, entry.Region, entry.IP, success, time.Now()) {
+		// Only invalidate stale pin; never blacklist a country, disconnect a
+		// healthy session, or change V11 model weights based on soft evidence.
+		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
+		log.Debugln("[Smart] Independent exit evidence invalidated target pin [%s] after regional refusal", metadata.SmartTarget)
+	}
 }
 
 func (s *Smart) probeVerdict(proxy C.Proxy, host string) smart.Verdict {
