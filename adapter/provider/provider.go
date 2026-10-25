@@ -114,13 +114,15 @@ func (bp *baseProvider) RegisterHealthCheckTask(url string, expectedStatus utils
 
 func (bp *baseProvider) setProxies(proxies []C.Proxy) {
 	bp.mutex.Lock()
-	defer bp.mutex.Unlock()
 	bp.proxies = proxies
 	bp.version += 1
 	bp.healthCheck.setProxies(proxies)
 	if bp.healthCheck.auto() {
 		bp.healthCheck.scheduleCheck()
 	}
+	bp.mutex.Unlock()
+	// UI callbacks may query this provider; never invoke under bp.mutex.
+	notifyProviderUpdate(bp.name)
 }
 
 func (bp *baseProvider) Close() error {
