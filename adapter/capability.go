@@ -945,26 +945,6 @@ func ExitCountryForProxy(p C.Proxy, ipv6 bool) (known bool, country string) {
 	return country != "", country
 }
 
-// CachedExitIPForProxy returns only current-network, unexpired measurements.
-// It never schedules network I/O. A persisted exit IP cannot serve as live proof.
-func CachedExitIPForProxy(p C.Proxy, ipv6 bool) (bool, netip.Addr) {
-	if p == nil {
-		return false, netip.Addr{}
-	}
-	state := capabilityStateForProxy(p)
-	entry := &state.ipv4
-	if ipv6 {
-		entry = &state.ipv6
-	}
-	entry.mu.Lock()
-	defer entry.mu.Unlock()
-	if !entry.known || !entry.ok || entry.epoch != netstate.CurrentEpoch() ||
-		!time.Now().Before(entry.expire) || !entry.exitIP.IsValid() {
-		return false, netip.Addr{}
-	}
-	return true, entry.exitIP.Unmap()
-}
-
 // ExitIPForProxy exposes the cached observed public source address for
 // diagnostics. It schedules the same asynchronous probe when data is absent.
 func ExitIPForProxy(p C.Proxy, ipv6 bool) (known bool, ip netip.Addr) {

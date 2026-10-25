@@ -430,8 +430,6 @@ type Smart struct {
 	recoveryBackoff     map[string]hostRecoveryState
 
 	probeThrottle smart.ProbeThrottle
-	exitCache     *smart.ExitCache
-	exitWatcher   *smart.ExitRegionWatcher
 }
 
 type dialResult struct {
@@ -923,15 +921,6 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	isUDP := metadata != nil && metadata.NetWork == C.UDP
 	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
 	adapter.ObserveProxyPathSuccess(p, isUDP, knownFamily, ipv6, s.country != "" || s.countryAffinity)
-	// Reuse the capability subsystem's already verified egress identity: no
-	// second exit probe, no new radio wake, no speculative sibling-family I/O.
-	if knownFamily && !isUDP && s.exitCache != nil {
-		knownIP, exitIP := adapter.CachedExitIPForProxy(p, ipv6)
-		knownCountry, exitCountry := adapter.CachedExitCountryForProxy(p, ipv6)
-		if knownIP || knownCountry {
-			s.exitCache.Observe(s.configName, s.Name(), p.Name(), ipv6, exitIP, exitCountry, time.Now())
-		}
-	}
 
 	target := metadata.SmartTarget
 	existing, _, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, target)
@@ -2054,8 +2043,6 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
-	s.exitCache = smart.NewExitCache(s.store)
-	s.exitWatcher = smart.NewExitRegionWatcher()
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.maintenanceWake = make(chan struct{}, 1)
@@ -3520,11 +3507,6 @@ sendLoop:
 // The verdict lands after its connection is gone, outside the (target, node) stats lock, so the pin,
 // the membership and the stop-loss have to be re-checked before anything is written.
 func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
-	// Several independent node refusals mean this host is likely inaccessible.
-	// Avoid repeated HTTPS probes until the bounded host hold expires.
-	if smart.HostBackedOff(s.configName, s.Name(), metadata.Host) {
-		return
-	}
 	now := time.Now()
 	if !s.probeThrottle.AllowNode(metadata.WildcardTarget, proxy.Name(), now) {
 		return
@@ -3544,37 +3526,23 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 
 	clone := metadata.Clone()
 	nodeName := proxy.Name()
-	s.probeThrottle.MarkPending(clone.WildcardTarget, nodeName, time.Now())
 	go func() {
 		defer s.finishBackgroundWork()
 		defer done()
-		defer s.probeThrottle.ClearPending(clone.WildcardTarget, nodeName)
 
 		verdict := s.probeVerdict(proxy, clone.Host)
 		if verdict.Action == smart.VerdictIgnore {
-			if verdict.Reason == "probe failed" {
-				s.probeThrottle.MarkUnproven(clone.WildcardTarget, nodeName, time.Now())
-			}
 			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] ignored answer [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
-			return
-		}
-		// Only live, still-member nodes may change shared host-refusal evidence.
-		if s.selected != "" || !lo.ContainsBy(s.GetProxies(false), func(p C.Proxy) bool { return p.Name() == nodeName }) {
-			return
-		}
-		if _, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, clone.WildcardTarget, int(s.hostFailLimit.Load()), clone.SmartTarget); wtBlocked {
-			return
-		}
-		s.probeThrottle.ClearUnproven(clone.WildcardTarget, nodeName)
-		s.noteMeasuredExitVerdict(clone, nodeName, verdict)
-		if verdict.Action == smart.VerdictReachable {
-			smart.NoteHostAnswer(s.configName, s.Name(), clone.Host)
-		} else if smart.NoteHostRefusal(s.configName, s.Name(), clone.Host, nodeName, verdict.Reason) {
-			log.Debugln("[Smart] Probe Group: [%s] - Host: [%s] held after distinct-node refusals", s.Name(), clone.Host)
 			return
 		}
 		if !s.probeThrottle.AllowHostRecord(clone.Host, verdict, time.Now()) {
 			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] kept, no node reaches the host [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
+			return
+		}
+		if s.selected != "" || !lo.ContainsBy(s.GetProxies(false), func(p C.Proxy) bool { return p.Name() == nodeName }) {
+			return
+		}
+		if _, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, clone.WildcardTarget, int(s.hostFailLimit.Load()), clone.SmartTarget); wtBlocked {
 			return
 		}
 
@@ -3591,34 +3559,6 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, clone.SmartTarget)
 		log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] avoided for [%s]: [%s]", s.Name(), nodeName, clone.Host, verdict.TTL, verdict.Reason)
 	}()
-}
-
-
-func (s *Smart) noteMeasuredExitVerdict(metadata *C.Metadata, node string, verdict smart.Verdict) {
-	if s.exitCache == nil || s.exitWatcher == nil || metadata == nil || metadata.SmartTarget == "" {
-		return
-	}
-	knownFamily, ipv6 := metadataIPFamily(metadata)
-	if !knownFamily {
-		return
-	}
-	entry, ok := s.exitCache.Cached(s.configName, s.Name(), node, ipv6, time.Now())
-	if !ok || entry.IP == "" || entry.Region == "" {
-		return
-	}
-
-	success := verdict.Action == smart.VerdictReachable
-	refused := verdict.Action == smart.VerdictRecord &&
-		(verdict.Reason == "forbidden" || verdict.Reason == "unavailable for legal reasons")
-	if !success && !refused {
-		return
-	}
-	if s.exitWatcher.Observe(metadata.SmartTarget, entry.Region, entry.IP, success, time.Now()) {
-		// Only invalidate stale pin; never blacklist a country, disconnect a
-		// healthy session, or change V11 model weights based on soft evidence.
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, metadata.SmartTarget)
-		log.Debugln("[Smart] Independent exit evidence invalidated target pin [%s] after regional refusal", metadata.SmartTarget)
-	}
 }
 
 func (s *Smart) probeVerdict(proxy C.Proxy, host string) smart.Verdict {
