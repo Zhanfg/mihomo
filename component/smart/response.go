@@ -75,10 +75,8 @@ type (
 	}
 
 	probeNodeState struct {
-		lastProbe     time.Time
-		lastFailure   time.Time
-		pendingSince time.Time
-		unprovenSince time.Time
+		lastProbe   time.Time
+		lastFailure time.Time
 	}
 
 	probeWindow struct {
@@ -244,9 +242,6 @@ func (t *ProbeThrottle) AllowNode(target, node string, now time.Time) bool {
 	key := probeKey(target, node)
 	state := t.nodes[key]
 	if state != nil {
-		if !state.pendingSince.IsZero() && now.Sub(state.pendingSince) < ProbeTimeout+2*time.Second {
-			return false
-		}
 		interval := probeMinIntervalPerNode
 		if !state.lastFailure.IsZero() && now.Sub(state.lastFailure) < probeRecentFailureWindow {
 			interval = probeMinIntervalAfterFailure
