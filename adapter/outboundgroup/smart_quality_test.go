@@ -13,7 +13,7 @@ import (
 // byte the node had nothing to answer, so every speculative TLS connection a
 // browser opens and closes unused cost the node a 24-hour block. The fork's
 // own stall detector draws the line the same way.
-func TestNoResponseVerdictNeedsTheClientToHaveSentSomething(t *testing.T) {
+func TestSingleNoResponseCannotQuarantineHealthySmartNode(t *testing.T) {
 	const (
 		group          = "quality-group"
 		config         = "config"
@@ -30,7 +30,7 @@ func TestNoResponseVerdictNeedsTheClientToHaveSentSomething(t *testing.T) {
 		wantCode     smart.BlockCode
 	}{
 		{name: "client sent nothing", uploadTotal: 0, wantDegraded: false, wantCode: smart.BlockNone},
-		{name: "client sent a request and got nothing back", uploadTotal: 1, wantDegraded: true, wantCode: smart.BlockNoResponse},
+		{name: "client sent a request and got nothing back", uploadTotal: 1, wantDegraded: false, wantCode: smart.BlockNone},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			s := sweepGroup(group + testCase.name)
@@ -39,8 +39,8 @@ func TestNoResponseVerdictNeedsTheClientToHaveSentSomething(t *testing.T) {
 			s.maxFailedTimes = 3
 			s.hostFailLimit.Store(1_000)
 
-			// Host is empty so the abnormal-status branch below cannot run a
-			// live StatusTest through a nil proxy.
+			// A single TLS close is soft evidence even if the client sent data.
+			// Host stays empty to keep this test independent of live probes.
 			metadata := &C.Metadata{
 				WildcardTarget: wildcardTarget, SmartBlock: "normal",
 				NetWork: C.TCP, DstPort: 443,
