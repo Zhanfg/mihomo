@@ -75,8 +75,10 @@ type (
 	}
 
 	probeNodeState struct {
-		lastProbe   time.Time
-		lastFailure time.Time
+		lastProbe     time.Time
+		lastFailure   time.Time
+		pendingSince time.Time
+		unprovenSince time.Time
 	}
 
 	probeWindow struct {
@@ -146,7 +148,7 @@ func ClassifyProbeError(err error) Verdict {
 		return record(probeDefaultBlockTTL, "unknown certificate authority")
 	}
 	if isTimeout(err) {
-		return record(probeTransientBlockTTL, "probe timed out")
+		return ignore("probe timed out")
 	}
 	return ignore("probe failed")
 }
@@ -242,6 +244,9 @@ func (t *ProbeThrottle) AllowNode(target, node string, now time.Time) bool {
 	key := probeKey(target, node)
 	state := t.nodes[key]
 	if state != nil {
+		if !state.pendingSince.IsZero() && now.Sub(state.pendingSince) < ProbeTimeout+2*time.Second {
+			return false
+		}
 		interval := probeMinIntervalPerNode
 		if !state.lastFailure.IsZero() && now.Sub(state.lastFailure) < probeRecentFailureWindow {
 			interval = probeMinIntervalAfterFailure
@@ -393,4 +398,16 @@ func ResponseProbeEligible(metadata *C.Metadata, downloadTotalMB float64, isUDP 
 // API and CDN subdomains answer the root path with a 403 that says nothing about the node.
 func ProbeURL(host string) string {
 	return "https://" + host + probePath
+}
+
+
+// ResponseProbeEligibleForTraffic filters out speculative TLS opens/closes,
+// fast cancellations, and tiny probes that are common on mobile/TUN networks.
+// A qualifying observation may only be used for soft diagnostic telemetry.
+func ResponseProbeEligibleForTraffic(metadata *C.Metadata, uploadTotalMB, downloadTotalMB float64, durationMS int64, isUDP bool) bool {
+	const minUploadMB = 1024.0 / (1024.0 * 1024.0)
+	if metadata == nil || durationMS < 5000 || uploadTotalMB < minUploadMB {
+		return false
+	}
+	return ResponseProbeEligible(metadata, downloadTotalMB, isUDP)
 }

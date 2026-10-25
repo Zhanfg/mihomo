@@ -430,6 +430,8 @@ type Smart struct {
 	recoveryBackoff     map[string]hostRecoveryState
 
 	probeThrottle smart.ProbeThrottle
+	exitCache     *smart.ExitCache
+	exitWatcher   *smart.ExitRegionWatcher
 }
 
 type dialResult struct {
@@ -921,6 +923,15 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 	isUDP := metadata != nil && metadata.NetWork == C.UDP
 	s.lastWinner.Store(smartWinnerState{Name: p.Name(), FamilyKnown: knownFamily, IPv6: ipv6, UDP: isUDP})
 	adapter.ObserveProxyPathSuccess(p, isUDP, knownFamily, ipv6, s.country != "" || s.countryAffinity)
+	// Reuse the capability subsystem's already verified egress identity: no
+	// second exit probe, no new radio wake, no speculative sibling-family I/O.
+	if knownFamily && !isUDP && s.exitCache != nil {
+		knownIP, exitIP := adapter.CachedExitIPForProxy(p, ipv6)
+		knownCountry, exitCountry := adapter.CachedExitCountryForProxy(p, ipv6)
+		if knownIP || knownCountry {
+			s.exitCache.Observe(s.configName, s.Name(), p.Name(), ipv6, exitIP, exitCountry, time.Now())
+		}
+	}
 
 	target := metadata.SmartTarget
 	existing, _, _ := s.store.GetUnwrapAffinity(s.Name(), s.configName, target)
@@ -956,8 +967,14 @@ func (s *Smart) adoptUnwrapWinner(metadata *C.Metadata, p C.Proxy) {
 			s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
 		}
 	default:
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, target)
-		s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
+		// Several hosts can share SmartTarget while needing different routes.
+		// A successful alternative does not prove the previous cached winner
+		// failed: preserve its pin when it remains a group member.
+		stillPresent := lo.ContainsBy(s.GetProxies(false), func(candidate C.Proxy) bool { return candidate.Name() == existing[0] })
+		if !preserveSmartPin(existing[0], p.Name(), stillPresent) {
+			s.store.DeleteUnwrapResult(s.Name(), s.configName, target)
+			s.store.StoreUnwrapResultWithCountry(s.Name(), s.configName, target, []C.Proxy{p}, country)
+		}
 	}
 }
 
@@ -2043,6 +2060,8 @@ func (s *Smart) selectProxies(metadata *C.Metadata, proxies []C.Proxy) ([]C.Prox
 
 func (s *Smart) InitSmart() {
 	s.store = cachefile.GetSmartStore()
+	s.exitCache = smart.NewExitCache(s.store)
+	s.exitWatcher = smart.NewExitRegionWatcher()
 
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.maintenanceWake = make(chan struct{}, 1)
@@ -2926,7 +2945,11 @@ func (s *Smart) recordConnectionStats(metadata *C.Metadata, proxy C.Proxy,
 	locked = false
 
 	if isDegraded || failedBlock {
-		s.closeStalledConnections(metadata, proxyName, target)
+		// A probabilistic failure can steer the NEXT flow, not terminate
+		// unrelated TUN sockets. Only explicit manual blocks may close stalls.
+		if shouldForceCloseSmartSessions(blockCode) {
+			s.closeStalledConnections(metadata, proxyName, target)
+		}
 		s.store.DeleteUnwrapResult(s.Name(), s.configName, target)
 	}
 
@@ -3145,7 +3168,9 @@ func (s *Smart) checkNodeQuality(
 	}
 
 	if newWeight > 0 && newWeight < smart.AllowedWeight {
-		return newWeight, true, true, smart.BlockLowWeight
+		// Model uncertainty/ranking is not proof the transport is broken.
+		// The low score already demotes the node naturally for future dials.
+		return newWeight, false, false, smart.BlockNone
 	}
 
 	if err != nil {
@@ -3176,18 +3201,18 @@ func (s *Smart) checkNodeQuality(
 	// carry it a 24-hour block for the target. The fork's own stall detector
 	// already draws the line here: tunnel/statistic/tracker.go refuses to
 	// record a stall unless the upload counter moved.
-	if connectionDuration > 100 && downloadTotal == 0 && uploadTotal > 0 && metadata.DstPort == 443 && !isUDP {
-		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected no response to a sent request...",
-			s.Name(), proxyName, networkType, addressDisplay)
-		return newWeight, true, true, smart.BlockNoResponse
-	}
+	// A single 100ms TLS close without a response can be browser speculation,
+	// an application cancellation, an idle socket, or a server-side refusal.
+	// None of these justify quarantining the proxy or closing other sessions.
+	// Longer request/no-answer observations may initiate a *soft* diagnostic
+	// probe; only actual transport evidence controls future failover.
 
 	// Whether a near-empty HTTPS close was answered with an error or limit page
 	// is probed after the close, off this goroutine and outside the (target,
 	// node) stats lock, and rate limited per node, per target and globally;
 	// probeAfterClose records whatever it finds. It used to be a synchronous
 	// probe here, under that lock.
-	if smart.ResponseProbeEligible(metadata, downloadTotal, isUDP) {
+	if smart.ResponseProbeEligibleForTraffic(metadata, uploadTotal, downloadTotal, connectionDuration, isUDP) {
 		s.probeAfterClose(metadata, proxy)
 		return newWeight, false, false, smart.BlockNone
 	}
@@ -3196,7 +3221,9 @@ func (s *Smart) checkNodeQuality(
 	if lossRate >= 0.1 || emaLossRate >= 0.05 {
 		log.Debugln("[Smart] Connection Group: [%s] - Node: [%s] - Network: [%s] - Address: [%s] detected high packet loss [current: %.2f%%, history EMA: %.2f%%]...",
 			s.Name(), proxyName, networkType, addressDisplay, lossRate*100, emaLossRate*100)
-		return newWeight, true, true, smart.BlockPacketLoss
+		// Retransmissions are already fed to the predictor. Mobile handovers
+		// and common-mode packet loss must not turn into a node quarantine.
+		return newWeight, false, false, smart.BlockNone
 	}
 
 	return newWeight, false, false, smart.BlockNone
@@ -3246,6 +3273,16 @@ func hostStatusAppliesToEveryScope(isDegraded, failedBlock, checked bool, blockC
 // all the rule's working traffic and the reconnect storm fed the next degrade.
 // A connection that is on another node, idle, or still getting answers is not
 // stuck, whatever happened to its neighbour.
+
+// Passive observations must never tear down already-established sessions.
+func shouldForceCloseSmartSessions(code smart.BlockCode) bool {
+	return code == smart.BlockManual
+}
+
+func preserveSmartPin(existing, newWinner string, existingStillMember bool) bool {
+	return existing != "" && existing != newWinner && existingStillMember
+}
+
 func (s *Smart) closeStalledConnections(metadata *C.Metadata, proxyName, target string) {
 	if proxyName == "" {
 		return
@@ -3483,8 +3520,9 @@ func (s *Smart) checkHostStatus() {
 					s.store.UpdateHostStatus(s.Name(), s.configName, it.wildcardTarget, metadata, it.nodeName, s.maxFailedTimes, limit, false, true, smart.BlockNone, 0)
 					log.Debugln("[Smart] Recheck Group: [%s] - Node: [%s] - Host: [%s] recovered [%s]", s.Name(), it.nodeName, it.host, verdict.Reason)
 				case smart.VerdictRecord:
-					s.store.UpdateHostStatus(s.Name(), s.configName, it.wildcardTarget, metadata, it.nodeName, s.maxFailedTimes, limit, true, true, smart.BlockAbnormalStatus, verdict.TTL)
-					log.Debugln("[Smart] Recheck Group: [%s] - Node: [%s] - Host: [%s] avoided for [%s]: [%s]", s.Name(), it.nodeName, it.host, verdict.TTL, verdict.Reason)
+					// HTTP status, TLS error or probe timeout alone cannot re-block a
+					// healthy node or prolong an old quarantine: preserve diagnosis.
+					log.Debugln("[Smart] Recheck Group: [%s] - Node: [%s] - Host: [%s] inconclusive [%s]", s.Name(), it.nodeName, it.host, verdict.Reason)
 				default:
 					log.Debugln("[Smart] Recheck Group: [%s] - Node: [%s] - Host: [%s] left unchanged [%s]", s.Name(), it.nodeName, it.host, verdict.Reason)
 				}
@@ -3507,6 +3545,11 @@ sendLoop:
 // The verdict lands after its connection is gone, outside the (target, node) stats lock, so the pin,
 // the membership and the stop-loss have to be re-checked before anything is written.
 func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
+	// Several independent node refusals mean this host is likely inaccessible.
+	// Avoid repeated HTTPS probes until the bounded host hold expires.
+	if smart.HostBackedOff(s.configName, s.Name(), metadata.Host) {
+		return
+	}
 	now := time.Now()
 	if !s.probeThrottle.AllowNode(metadata.WildcardTarget, proxy.Name(), now) {
 		return
@@ -3526,23 +3569,37 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 
 	clone := metadata.Clone()
 	nodeName := proxy.Name()
+	s.probeThrottle.MarkPending(clone.WildcardTarget, nodeName, time.Now())
 	go func() {
 		defer s.finishBackgroundWork()
 		defer done()
+		defer s.probeThrottle.ClearPending(clone.WildcardTarget, nodeName)
 
 		verdict := s.probeVerdict(proxy, clone.Host)
 		if verdict.Action == smart.VerdictIgnore {
+			if verdict.Reason == "probe failed" || verdict.Reason == "probe timed out" {
+				s.probeThrottle.MarkUnproven(clone.WildcardTarget, nodeName, time.Now())
+			}
 			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] ignored answer [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 			return
 		}
-		if !s.probeThrottle.AllowHostRecord(clone.Host, verdict, time.Now()) {
-			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] kept, no node reaches the host [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
-			return
-		}
+		// Only live, still-member nodes may change shared host-refusal evidence.
 		if s.selected != "" || !lo.ContainsBy(s.GetProxies(false), func(p C.Proxy) bool { return p.Name() == nodeName }) {
 			return
 		}
 		if _, _, _, wtBlocked := s.store.GetHostStatus(s.Name(), s.configName, clone.WildcardTarget, int(s.hostFailLimit.Load()), clone.SmartTarget); wtBlocked {
+			return
+		}
+		s.probeThrottle.ClearUnproven(clone.WildcardTarget, nodeName)
+		s.noteMeasuredExitVerdict(clone, nodeName, verdict)
+		if verdict.Action == smart.VerdictReachable {
+			smart.NoteHostAnswer(s.configName, s.Name(), clone.Host)
+		} else if smart.NoteHostRefusal(s.configName, s.Name(), clone.Host, nodeName, verdict.Reason) {
+			log.Debugln("[Smart] Probe Group: [%s] - Host: [%s] held after distinct-node refusals", s.Name(), clone.Host)
+			return
+		}
+		if !s.probeThrottle.AllowHostRecord(clone.Host, verdict, time.Now()) {
+			log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] kept, no node reaches the host [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 			return
 		}
 
@@ -3552,13 +3609,41 @@ func (s *Smart) probeAfterClose(metadata *C.Metadata, proxy C.Proxy) {
 			return
 		}
 
+		// Preserve status/exit witness and rate-limit data, but do not turn
+		// an arbitrary /robots.txt HTTP answer into a proxy quarantine, pin
+		// invalidation, or a forced close of other active connections.
 		s.probeThrottle.NoteFailure(clone.WildcardTarget, nodeName, time.Now())
-		s.markNodeFailure(clone, nodeName, true, true, smart.BlockAbnormalStatus, verdict.TTL)
-		// Only what is stuck on the node: see closeStalledConnections.
-		s.closeStalledConnections(clone, nodeName, clone.SmartTarget)
-		s.store.DeleteUnwrapResult(s.Name(), s.configName, clone.SmartTarget)
-		log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] avoided for [%s]: [%s]", s.Name(), nodeName, clone.Host, verdict.TTL, verdict.Reason)
+		s.probeThrottle.MarkUnproven(clone.WildcardTarget, nodeName, time.Now())
+		log.Debugln("[Smart] Probe Group: [%s] - Node: [%s] - Host: [%s] soft evidence [%s]", s.Name(), nodeName, clone.Host, verdict.Reason)
 	}()
+}
+
+
+func (s *Smart) noteMeasuredExitVerdict(metadata *C.Metadata, node string, verdict smart.Verdict) {
+	if s.exitCache == nil || s.exitWatcher == nil || metadata == nil || metadata.SmartTarget == "" {
+		return
+	}
+	knownFamily, ipv6 := metadataIPFamily(metadata)
+	if !knownFamily {
+		return
+	}
+	entry, ok := s.exitCache.Cached(s.configName, s.Name(), node, ipv6, time.Now())
+	if !ok || entry.IP == "" || entry.Region == "" {
+		return
+	}
+
+	success := verdict.Action == smart.VerdictReachable
+	refused := verdict.Action == smart.VerdictRecord &&
+		(verdict.Reason == "forbidden" || verdict.Reason == "unavailable for legal reasons")
+	if !success && !refused {
+		return
+	}
+	if s.exitWatcher.Observe(metadata.SmartTarget, entry.Region, entry.IP, success, time.Now()) {
+		// /robots.txt cross-region refusals are diagnostic, not proof of
+		// a broken transport. Preserve the working pin; actual dial failure
+		// and expiry remain responsible for selecting another node.
+		log.Debugln("[Smart] Regional refusal evidence observed for [%s], preserving healthy target pin", metadata.SmartTarget)
+	}
 }
 
 func (s *Smart) probeVerdict(proxy C.Proxy, host string) smart.Verdict {
