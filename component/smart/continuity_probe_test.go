@@ -2,7 +2,7 @@ package smart
 
 import (
 	"context"
-	"net/http"
+	"github.com/metacubex/http"
 	"testing"
 	"time"
 
