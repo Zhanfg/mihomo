@@ -109,7 +109,7 @@ type tcControl struct {
 	SelfBypassMark uint32
 	SelfBypassMarkMask uint32
 	NetworkGeneration uint32
-
+}
 
 type tcAssignKey struct {
 	Family             uint8
@@ -129,7 +129,7 @@ type TCAssignment struct {
 	Path           uint8
 	SourceMACValid uint8
 	NetworkGeneration uint32
-
+}
 
 type tcRuntime struct {
 	maps     map[string]*CiliumEBPF.Map
