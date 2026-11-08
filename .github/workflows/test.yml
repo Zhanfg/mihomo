@@ -67,6 +67,9 @@ jobs:
       - name: Verify Go env
         run: go env
 
+      - name: Apply verified P0 WireGuard IPv6 receiver overlays
+        run: node tools/prepare-wireguard-p0-overlay.mjs
+
       - name: Remove inbound test for macOS
         if: ${{ runner.os == 'macOS' }}
         run: |

@@ -71,6 +71,9 @@ jobs:
           git log -1 --oneline
           go version
 
+      - name: Apply verified P0 WireGuard IPv6 receiver overlays
+        run: node tools/prepare-wireguard-p0-overlay.mjs
+
       - name: IP-family capability regressions
         shell: bash
         run: |

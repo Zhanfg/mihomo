@@ -36,6 +36,9 @@ jobs:
         go mod download
         go mod tidy
 
+    - name: Apply verified P0 WireGuard IPv6 receiver overlays
+      run: node tools/prepare-wireguard-p0-overlay.mjs
+
     - name: Apply patch to sing-tun (idempotent)
       run: |
         SING_TUN_VERSION=$(go list -m github.com/metacubex/sing-tun | awk '{print $2}')

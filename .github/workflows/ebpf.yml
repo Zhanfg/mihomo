@@ -96,6 +96,9 @@ jobs:
           echo "runner:   $("${clang}" --version | head -n 1)"
           echo "expected: $(sed -n 's/^clang: //p' common/ebpf/internal/bpfgen/manifest.txt)"
 
+      - name: Apply verified P0 WireGuard IPv6 receiver overlays
+        run: node tools/prepare-wireguard-p0-overlay.mjs
+
       - name: Check the generated eBPF objects are current
         env:
           ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
