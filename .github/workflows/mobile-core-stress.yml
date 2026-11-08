@@ -17,6 +17,7 @@ on:
       - "component/netchange/**"
       - "component/mmdb/**"
       - "component/keepalive/**"
+      - "component/dialer/**"
       - "dns/**"
       - "listener/sing_ebpf/**"
       - "common/ebpf/**"
