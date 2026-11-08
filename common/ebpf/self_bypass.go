@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"bufio"
+	cryptorand "crypto/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,6 +31,9 @@ type SelfBypass struct {
 	programs []*CiliumEBPF.Program
 	links    []link.Link
 	mode     atomic.Uint32
+	mark uint32
+	markMask uint32
+	markEnabled bool
 }
 
 type SelfBypassCgroupConfig struct {
@@ -69,7 +73,72 @@ func NewSelfBypass() (*SelfBypass, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create eBPF self-bypass socket map")
 	}
-	return &SelfBypass{sockets: sockets}, nil
+	mark, mask, enabled := probeSelfBypassSocketMark()
+	return &SelfBypass{sockets: sockets, mark: mark, markMask: mask, markEnabled: enabled}, nil
+}
+
+// probeSelfBypassSocketMark tests SO_MARK without an outbound connection.
+// A failure is non-fatal: rootless and Android SELinux paths retain cookies.
+func probeSelfBypassSocketMark() (mark, mask uint32, enabled bool) {
+	var randomByte [1]byte
+	if _, err := cryptorand.Read(randomByte[:]); err != nil {
+		return 0, 0, false
+	}
+	mark = uint32(randomByte[0])
+	if mark == 0 {
+		mark = 0xa7
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer unix.Close(fd)
+	if err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, int(mark)); err != nil {
+		return 0, 0, false
+	}
+	verify, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK)
+	if err != nil || uint32(verify)&0xff != mark {
+		return 0, 0, false
+	}
+	return mark, 0xff, true
+}
+
+func (b *SelfBypass) SocketMarkConfig() (mark, mask uint32, enabled bool) {
+	if b == nil {
+		return 0, 0, false
+	}
+	return b.mark, b.markMask, b.markEnabled
+}
+
+// applySocketMark preserves routing bits and leaves occupied low bits intact.
+// Cookie registration is always retained as a fallback in case OEM hooks
+// overwrite the mark after this callback.
+func (b *SelfBypass) applySocketMark(raw syscall.RawConn) (bool, error) {
+	if !b.markEnabled || b.mark == 0 || b.markMask == 0 {
+		return false, nil
+	}
+	var applied bool
+	err := control.Raw(raw, func(fd uintptr) error {
+		value, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK)
+		if err != nil {
+			return err
+		}
+		current := uint32(value)
+		if current&b.markMask != 0 {
+			return nil
+		}
+		next := current | (b.mark & b.markMask)
+		if err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(next)); err != nil {
+			return err
+		}
+		verify, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK)
+		if err != nil || uint32(verify)&b.markMask != b.mark {
+			return E.New("socket did not retain eBPF self-bypass mark")
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
 }
 
 // Map returns the map that must be shared with the local TC programs.
@@ -332,7 +401,12 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 	}
 	b.access.RLock()
 	defer b.access.RUnlock()
-	if b.sockets == nil || b.CgroupAttached() {
+	if b.sockets == nil {
+		return nil
+	}
+	// SO_MARK is a fast-path hint, never a substitute for the cookie fallback.
+	_, _ = b.applySocketMark(rawConn)
+	if b.CgroupAttached() {
 		return nil
 	}
 	var cookie uint64
