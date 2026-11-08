@@ -17,10 +17,10 @@ func addControlToListenConfig(lc *net.ListenConfig, fn controlFn) {
 				return
 			}
 		}
-		if err = ApplySocketProtect(network, address, c); err != nil {
+		if err = fn(context.Background(), network, address, c); err != nil {
 			return
 		}
-		return fn(context.Background(), network, address, c)
+		return ApplySocketProtect(network, address, c)
 	}
 }
 
@@ -37,9 +37,9 @@ func addControlToDialer(d *net.Dialer, fn controlFn) {
 				return
 			}
 		}
-		if err = ApplySocketProtect(network, address, c); err != nil {
+		if err = fn(ctx, network, address, c); err != nil {
 			return
 		}
-		return fn(ctx, network, address, c)
+		return ApplySocketProtect(network, address, c)
 	}
 }
