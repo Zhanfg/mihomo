@@ -100,6 +100,7 @@ type Inbound struct {
 	policyAccess sync.RWMutex
 
 	selfBypass       *ECommon.SelfBypass
+	selfBypassCloseMu sync.Mutex
 	selfBypassCgroup bool
 	processTracker   *ECommon.ProcessTracker
 
@@ -868,14 +869,25 @@ func (i *Inbound) Close() error {
 			processTrackerErr = i.processTracker.Close()
 			i.processTracker = nil
 		}
-		var selfBypassErr error
-		if i.selfBypass != nil {
-			selfBypassErr = i.selfBypass.Close()
-			i.selfBypass = nil
-		}
-		closeErr = E.Errors(monitorErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
+		closeErr = E.Errors(monitorErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr)
 	})
-	return closeErr
+	// A failed kernel detach cannot release the self-bypass map or program
+	// handles. Keep the owner and retry its detach on subsequent Close calls;
+	// closeOnce still protects the rest of the shutdown from running twice.
+	return E.Errors(closeErr, i.closeSelfBypass())
+}
+
+func (i *Inbound) closeSelfBypass() error {
+	i.selfBypassCloseMu.Lock()
+	defer i.selfBypassCloseMu.Unlock()
+	if i.selfBypass == nil {
+		return nil
+	}
+	if err := i.selfBypass.Close(); err != nil {
+		return err
+	}
+	i.selfBypass = nil
+	return nil
 }
 
 func (i *Inbound) Address() string {
