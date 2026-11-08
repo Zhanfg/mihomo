@@ -251,6 +251,24 @@ func (m *Manager) Snapshot() *Snapshot {
 	}
 }
 
+// TrafficSummary is intentionally independent of individual live tracker
+// details. A dashboard can poll it without copying all connection metadata.
+type TrafficSummary struct {
+	DownloadTotal   int64  `json:"downloadTotal"`
+	UploadTotal     int64  `json:"uploadTotal"`
+	ConnectionCount int    `json:"connectionCount"`
+	Memory          uint64 `json:"memory"`
+}
+
+func (m *Manager) Summary() TrafficSummary {
+	return TrafficSummary{
+		DownloadTotal: m.downloadTotal.Load(),
+		UploadTotal: m.uploadTotal.Load(),
+		ConnectionCount: m.connections.Size(),
+		Memory: m.Memory(),
+	}
+}
+
 func (m *Manager) updateMemory() {
 	stat, err := memory.GetMemoryInfo(m.pid)
 	if err != nil {
