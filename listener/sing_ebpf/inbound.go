@@ -100,10 +100,10 @@ type Inbound struct {
 	// data plane may be building a backend from the snapshot.
 	policyAccess sync.RWMutex
 
-	selfBypass       *ECommon.SelfBypass
+	selfBypass        *ECommon.SelfBypass
 	selfBypassCloseMu sync.Mutex
-	selfBypassCgroup bool
-	processTracker   *ECommon.ProcessTracker
+	selfBypassCgroup  bool
+	processTracker    *ECommon.ProcessTracker
 
 	listeners         internalListenerSet
 	udpClientTable    udpClientTable
@@ -519,18 +519,18 @@ func (i *Inbound) start() error {
 	var dataPlane *tcDataPlane
 	if localTCEnabled || sharedSocketAssignEnabled {
 		backendConfig := ECommon.TCConfig{
-			ListenerPort:     i.listeners.selectedPort(),
-			EnableLocal:      localTCEnabled,
-			EnableShared:     sharedSocketAssignEnabled,
-			EnableIPv4:       true,
-			EnableLocalIPv6:  i.localIPv6,
-			EnableSharedIPv6: i.sharedIPv6,
-			EnableTCP:        i.enableTCP,
-			EnableUDP:        i.enableUDP,
-			Policy:           i.policySnapshot(),
-			TrackProcess:     i.processTracker != nil,
+			ListenerPort:      i.listeners.selectedPort(),
+			EnableLocal:       localTCEnabled,
+			EnableShared:      sharedSocketAssignEnabled,
+			EnableIPv4:        true,
+			EnableLocalIPv6:   i.localIPv6,
+			EnableSharedIPv6:  i.sharedIPv6,
+			EnableTCP:         i.enableTCP,
+			EnableUDP:         i.enableUDP,
+			Policy:            i.policySnapshot(),
+			TrackProcess:      i.processTracker != nil,
 			NetworkGeneration: uint32(netstate.CurrentEpoch() & 0x7fffffff),
-			FakeIPICMPReply:  i.fakeIPICMPReply,
+			FakeIPICMPReply:   i.fakeIPICMPReply,
 		}
 		if i.selfBypass != nil {
 			backendConfig.SelfBypassMap = i.selfBypass.Map()

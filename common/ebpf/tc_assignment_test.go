@@ -67,11 +67,11 @@ func TestLookupAssignmentKeyIncludesInterfaceIndex(t *testing.T) {
 	// An entry written for one interface index.
 	writeTestAssignment(t, backend, ProtocolUDP, source, destination, reusedIndex, TCAssignment{
 		NetworkGeneration: 1,
-		SocketCookie:   0x1111,
-		InterfaceIndex: reusedIndex,
-		SourceMAC:      MACAddress{0xaa, 0, 0, 0, 0, 1},
-		Path:           TCPathShared,
-		SourceMACValid: 1,
+		SocketCookie:      0x1111,
+		InterfaceIndex:    reusedIndex,
+		SourceMAC:         MACAddress{0xaa, 0, 0, 0, 0, 1},
+		Path:              TCPathShared,
+		SourceMACValid:    1,
 	})
 
 	// The same flow and the same index read the same key.
@@ -102,8 +102,8 @@ func TestLookupAssignmentRemovesEntryOnRequest(t *testing.T) {
 
 	writeTestAssignment(t, backend, ProtocolTCP, source, destination, 0, TCAssignment{
 		NetworkGeneration: 1,
-		SocketCookie: 0x2222,
-		Path:         TCPathDelivery,
+		SocketCookie:      0x2222,
+		Path:              TCPathDelivery,
 	})
 
 	assignment, err := backend.LookupAssignment(ProtocolTCP, source, destination, 0, true)
@@ -131,8 +131,8 @@ func TestLookupAssignmentKeepsEntryWhenNotAsked(t *testing.T) {
 
 	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 7, TCAssignment{
 		NetworkGeneration: 1,
-		SocketCookie: 0x3333,
-		Path:         TCPathShared,
+		SocketCookie:      0x3333,
+		Path:              TCPathShared,
 	})
 
 	for range 3 {
@@ -145,7 +145,6 @@ func TestLookupAssignmentKeepsEntryWhenNotAsked(t *testing.T) {
 		}
 	}
 }
-
 
 func TestLookupAssignmentRejectsRetiredNetworkGeneration(t *testing.T) {
 	backend := newTestAssignmentBackend(t)

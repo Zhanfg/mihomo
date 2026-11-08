@@ -3,8 +3,8 @@
 package ebpf
 
 import (
-	"net/netip"
 	"golang.org/x/sys/unix"
+	"net/netip"
 	"slices"
 	"sync"
 	"unsafe"
@@ -69,8 +69,8 @@ type TCConfig struct {
 	Policy            CompiledPolicy
 	RoutingMark       uint32
 	SelfBypassMap     *CiliumEBPF.Map
-	SelfBypassMark uint32
-	SelfBypassMask uint32
+	SelfBypassMark    uint32
+	SelfBypassMask    uint32
 	NetworkGeneration uint32
 	TrackProcess      bool
 	// FakeIPICMPReply loads the independent fakeip_icmp object (see
@@ -93,22 +93,22 @@ type tcPortKey struct {
 }
 
 type tcControl struct {
-	Enabled           uint32
-	Flags             uint32
-	DeliveryInterface uint32
-	RoutingMark       uint32
-	ListenerPort      uint16
-	LocalDNSMode      DNSMode
-	SharedDNSMode     DNSMode
-	DeliveryMAC       MACAddress
-	Reserved          uint16
-	FakeIPIPv4Prefix  [4]byte
-	FakeIPIPv4Mask    [4]byte
-	FakeIPIPv6Prefix  [16]byte
-	FakeIPIPv6Mask    [16]byte
-	SelfBypassMark uint32
+	Enabled            uint32
+	Flags              uint32
+	DeliveryInterface  uint32
+	RoutingMark        uint32
+	ListenerPort       uint16
+	LocalDNSMode       DNSMode
+	SharedDNSMode      DNSMode
+	DeliveryMAC        MACAddress
+	Reserved           uint16
+	FakeIPIPv4Prefix   [4]byte
+	FakeIPIPv4Mask     [4]byte
+	FakeIPIPv6Prefix   [16]byte
+	FakeIPIPv6Mask     [16]byte
+	SelfBypassMark     uint32
 	SelfBypassMarkMask uint32
-	NetworkGeneration uint32
+	NetworkGeneration  uint32
 }
 
 type tcAssignKey struct {
@@ -123,11 +123,11 @@ type tcAssignKey struct {
 }
 
 type TCAssignment struct {
-	SocketCookie   uint64
-	InterfaceIndex uint32
-	SourceMAC      MACAddress
-	Path           uint8
-	SourceMACValid uint8
+	SocketCookie      uint64
+	InterfaceIndex    uint32
+	SourceMAC         MACAddress
+	Path              uint8
+	SourceMACValid    uint8
 	NetworkGeneration uint32
 }
 
@@ -234,15 +234,15 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		return nil, err
 	}
 	controlValue := tcControl{
-		Flags:             tcFlags(config, policy),
-		DeliveryInterface: config.DeliveryInterface,
-		RoutingMark:       config.RoutingMark,
-		SelfBypassMark:    config.SelfBypassMark,
+		Flags:              tcFlags(config, policy),
+		DeliveryInterface:  config.DeliveryInterface,
+		RoutingMark:        config.RoutingMark,
+		SelfBypassMark:     config.SelfBypassMark,
 		SelfBypassMarkMask: checkedTCBypassMask(config.RoutingMark, config.SelfBypassMark, config.SelfBypassMask),
-		NetworkGeneration: config.NetworkGeneration,
-		ListenerPort:      config.ListenerPort,
-		LocalDNSMode:      policy.local.DNSMode,
-		SharedDNSMode:     policy.sharedDNSMode,
+		NetworkGeneration:  config.NetworkGeneration,
+		ListenerPort:       config.ListenerPort,
+		LocalDNSMode:       policy.local.DNSMode,
+		SharedDNSMode:      policy.sharedDNSMode,
 	}
 	if len(includeIPv4)+len(includeIPv6) > 0 {
 		controlValue.Flags |= 1 << 12

@@ -26,13 +26,13 @@ const selfBypassSocketCapacity = 65536
 // map is populated by cgroup hooks when the process has an exclusive cgroup,
 // or by the socket control callback when cgroup attachment is unavailable.
 type SelfBypass struct {
-	access   sync.RWMutex
-	sockets  *CiliumEBPF.Map
-	programs []*CiliumEBPF.Program
-	links    []link.Link
-	mode     atomic.Uint32
-	mark uint32
-	markMask uint32
+	access      sync.RWMutex
+	sockets     *CiliumEBPF.Map
+	programs    []*CiliumEBPF.Program
+	links       []link.Link
+	mode        atomic.Uint32
+	mark        uint32
+	markMask    uint32
 	markEnabled bool
 }
 
