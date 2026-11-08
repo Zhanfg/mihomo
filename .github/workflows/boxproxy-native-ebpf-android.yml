@@ -229,7 +229,8 @@ jobs:
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
-            echo "base=liuran001/mihomo:Alpha"
+            echo "base=Zhanfg/mihomo:main"
+            echo "smart_ebpf_reference=liuran001/mihomo:Alpha"
             echo "boxproxy_schema=listeners.type=ebpf"
             echo "target=android/arm64"
             echo "tags=with_gvisor with_ebpf"
