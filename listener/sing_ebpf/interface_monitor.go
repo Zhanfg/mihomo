@@ -616,6 +616,11 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 		// will never run again only delays the exit's own disarm.
 		return tcUpdateOutcome{}
 	}
+	if err := i.updateTCNetworkGeneration(uint32(startEpoch & 0x7fffffff)); err != nil {
+		i.interfaceWarnings.infrastructure.warn(i.logWarn, "advance TC network generation: ", err)
+		outcome.general = tcSharedRewriteRecoverable
+		return
+	}
 	outcome.bypassRuleSet = i.retryBypassRuleSetIfNeeded()
 	outcome.fakeIPRanges = i.retryFakeIPRangesIfNeeded()
 	defaultInterface := i.monitoredDefaultInterfaceName()
@@ -704,6 +709,17 @@ func (i *Inbound) updateCgroupHostAddresses(hostAddresses []netip.Addr) error {
 		return nil
 	}
 	return cgroupBackend.UpdateHostAddresses(hostAddresses)
+}
+
+// A network handover advances the kernel-visible flow generation before we
+// reconcile interfaces. The existing UDP reader lock stays separate.
+func (i *Inbound) updateTCNetworkGeneration(generation uint32) error {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil || i.tcDataPlane.backend == nil {
+		return nil
+	}
+	return i.tcDataPlane.backend.SetNetworkGeneration(generation)
 }
 
 func (i *Inbound) repairTCInfrastructure() (bool, error) {
