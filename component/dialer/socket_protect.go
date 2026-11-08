@@ -61,25 +61,59 @@ func UnregisterSocketProtectFunc() {
 	DefaultSocketProtect.Store((protectFn)(nil))
 }
 
-// ApplySocketProtect invokes the active socket-protect function, if any. It is
-// exposed so socket-creation paths outside this package (for example inbound
-// listener control chains) can register their sockets with the eBPF inbound.
+// A connection attempt owns the rollback callbacks for any cookie-map entries
+// inserted by its ControlContext hook. Only failed dials roll these back.
+type socketProtectScopeKey struct{}
+type socketProtectScope struct {
+	access sync.Mutex
+	undo []func()
+}
+
+func withSocketProtectScope(ctx context.Context) (context.Context, *socketProtectScope) {
+	socketProtectOwners.RLock()
+	active := len(socketProtectOwners.hooks) != 0
+	socketProtectOwners.RUnlock()
+	if !active { return ctx, nil } // avoid allocations in the ordinary fast path
+	scope := &socketProtectScope{}
+	return context.WithValue(ctx, socketProtectScopeKey{}, scope), scope
+}
+
+// RegisterSocketProtectRollback is a no-op outside a scoped dial attempt.
+func RegisterSocketProtectRollback(ctx context.Context, cleanup func()) {
+	if ctx == nil || cleanup == nil { return }
+	scope, ok := ctx.Value(socketProtectScopeKey{}).(*socketProtectScope)
+	if !ok { return }
+	scope.access.Lock()
+	scope.undo = append(scope.undo, cleanup)
+	scope.access.Unlock()
+}
+
+func (s *socketProtectScope) Rollback() {
+	if s == nil { return }
+	s.access.Lock()
+	undo := s.undo
+	s.undo = nil
+	s.access.Unlock()
+	for i := len(undo) - 1; i >= 0; i-- { undo[i]() }
+}
+
+// ApplySocketProtect preserves the original context-free listener API.
 func ApplySocketProtect(network, address string, c syscall.RawConn) error {
+	return ApplySocketProtectContext(context.Background(), network, address, c)
+}
+
+// ApplySocketProtectContext propagates only the dial-scoped cleanup context;
+// vendor/legacy hook signatures remain unchanged.
+func ApplySocketProtectContext(ctx context.Context, network, address string, c syscall.RawConn) error {
 	if fn, loaded := DefaultSocketProtect.Load().(protectFn); loaded && fn != nil {
-		if err := fn(context.Background(), network, address, c); err != nil {
-			return err
-		}
+		if err := fn(ctx, network, address, c); err != nil { return err }
 	}
 	socketProtectOwners.RLock()
 	hooks := make([]protectFn, 0, len(socketProtectOwners.hooks))
-	for _, fn := range socketProtectOwners.hooks {
-		hooks = append(hooks, fn)
-	}
+	for _, fn := range socketProtectOwners.hooks { hooks = append(hooks, fn) }
 	socketProtectOwners.RUnlock()
 	for _, fn := range hooks {
-		if err := fn(context.Background(), network, address, c); err != nil {
-			return err
-		}
+		if err := fn(ctx, network, address, c); err != nil { return err }
 	}
 	return nil
 }
