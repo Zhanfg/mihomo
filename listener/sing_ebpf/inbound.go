@@ -541,8 +541,13 @@ func (i *Inbound) start() error {
 		if err != nil {
 			return err
 		}
-		if err = i.listeners.registerTCTCPListeners(backend); err != nil {
-			return E.Errors(err, backend.Close())
+		backend, err = registerTCTCPListenersOrDirect(
+			backend,
+			i.listeners.registerTCTCPListeners,
+			func() (*ECommon.TCBackend, error) { return ECommon.PrepareTCDirectTCP(backendConfig) },
+		)
+		if err != nil {
+			return err
 		}
 		tcIPv6Enabled := localTCEnabled && i.localIPv6 || sharedSocketAssignEnabled && i.sharedIPv6
 		dataPlane, err = startTCDataPlane(
