@@ -23,12 +23,15 @@ import (
 	"github.com/metacubex/http"
 )
 
+// This fork must never self-upgrade to a foreign core without Smart/eBPF support.
+// Missing release metadata fails closed until this repository publishes
+// compatible artifacts with version.txt. The upstream channels are not safe.
 const (
-	baseReleaseURL    = "https://github.com/MetaCubeX/mihomo/releases/latest/download/"
-	versionReleaseURL = "https://github.com/MetaCubeX/mihomo/releases/latest/download/version.txt"
+	baseReleaseURL    = "https://github.com/Zhanfg/mihomo/releases/latest/download/"
+	versionReleaseURL = "https://github.com/Zhanfg/mihomo/releases/latest/download/version.txt"
 
-	baseAlphaURL    = "https://github.com/liuran001/mihomo/releases/download/Prerelease-Alpha/"
-	versionAlphaURL = "https://github.com/liuran001/mihomo/releases/download/Prerelease-Alpha/version.txt"
+	baseAlphaURL    = "https://github.com/Zhanfg/mihomo/releases/download/Prerelease-Alpha/"
+	versionAlphaURL = "https://github.com/Zhanfg/mihomo/releases/download/Prerelease-Alpha/version.txt"
 
 	// MaxPackageFileSize is a maximum package file length in bytes. The largest
 	// package whose size is limited by this constant currently has the size of

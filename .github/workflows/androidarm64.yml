@@ -1,6 +1,10 @@
 name: Build Android ARM64
 on:
   workflow_dispatch:
+  push:
+    branches: ['sync/p0-*']
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -15,11 +19,21 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    - name: Set up Go
+    # Preserve the MetaCubeX Go toolchain for manual mainline releases, but
+    # do not make P0 validation depend on the unavailable GitHub release CDN.
+    - name: Set up MetaCubeX Go for mainline release
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/Alpha'
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
       with:
         go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
         go-version: '1.26'
+
+    - name: Set up official Go for P0 validation
+      if: github.ref != 'refs/heads/main' && github.ref != 'refs/heads/Alpha'
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.26.x'
+        cache: true
 
     - name: Verify Go installation
       run: go version
@@ -31,6 +45,9 @@ jobs:
       run: |
         go mod download
         go mod tidy
+
+    - name: Apply verified P0 WireGuard IPv6 receiver overlays
+      run: node tools/prepare-wireguard-p0-overlay.mjs
 
     - name: Apply patch to sing-tun (idempotent)
       run: |
@@ -78,7 +95,7 @@ jobs:
         grep -B2 "if s.listenAddr.Is4()" redirect_server.go || echo "Dual-stack change not found"
 
     - name: Modify the Update Link
-      run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/TanakaLun/mihomo|g' ./component/updater/update_core.go
+      run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
 
     - name: Update CA
       run: |
@@ -90,7 +107,7 @@ jobs:
       run: |
         BRANCH_NAME="${GITHUB_REF#refs/heads/}"
         SHORT_HASH=$(git rev-parse --short HEAD)
-        VERSION="TanakaLun-${SHORT_HASH}"
+        VERSION="Zhanfg-${SHORT_HASH}"
         VERSION="${VERSION//\//-}"
         echo "VERSION=${VERSION}" >> $GITHUB_ENV
         echo "BUILDTIME=$(date)" >> $GITHUB_ENV
@@ -110,6 +127,7 @@ jobs:
     - name: Set NDK environment
       run: |
         NDK_PATH=${{ steps.setup-ndk.outputs.ndk-path }}
+        echo "ANDROID_NDK_HOME=${NDK_PATH}" >> $GITHUB_ENV
         echo "CC=${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
         echo "CGO_ENABLED=1" >> $GITHUB_ENV
         echo "GOOS=android" >> $GITHUB_ENV

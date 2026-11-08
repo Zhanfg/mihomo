@@ -3,6 +3,7 @@
 package ebpf
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -89,4 +90,38 @@ func TestSelfBypassSocketAddrHooks(t *testing.T) {
 	if len(ipv4Only) != 1 || ipv4Only[0].attachType != CiliumEBPF.AttachCGroupInet4Connect {
 		t.Fatalf("unexpected IPv4-only self-bypass hooks: %+v", ipv4Only)
 	}
+}
+
+func TestSelfBypassFailedDialCookieRemoval(t *testing.T) {
+	owner, err := NewSelfBypass()
+	if err != nil {
+		t.Skipf("eBPF map capability unavailable: %v", err)
+	}
+	defer owner.Close()
+
+	socket, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Skipf("local socket unavailable: %v", err)
+	}
+	defer socket.Close()
+	raw, err := socket.SyscallConn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookie, err := owner.RegisterSocketWithCookie(raw)
+	if err != nil {
+		t.Fatalf("register socket cookie: %v", err)
+	}
+	if cookie == 0 {
+		t.Fatal("userspace socket registration returned no cookie")
+	}
+	var value uint32
+	if err := owner.Map().Lookup(&cookie, &value); err != nil || value != 1 {
+		t.Fatalf("expected live cookie entry, value=%d err=%v", value, err)
+	}
+	owner.UnregisterSocketCookie(cookie)
+	if err := owner.Map().Lookup(&cookie, &value); err == nil {
+		t.Fatal("failed dial cookie survived explicit cleanup")
+	}
+	owner.UnregisterSocketCookie(cookie) // safe and idempotent
 }

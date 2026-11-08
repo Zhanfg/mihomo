@@ -581,6 +581,15 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 	if ctx.Err() != nil {
 		return
 	}
+	// A handover can race the netlink snapshot or a multi-step TC reconcile.
+	// Do not commit a state derived from an obsolete network epoch. If the
+	// epoch advances after the first check, schedule a follow-up reconcile.
+	startEpoch := netstate.CurrentEpoch()
+	defer func() {
+		if ctx.Err() == nil && netstate.CurrentEpoch() != startEpoch && outcome.general != tcSharedRewriteUnrecoverable {
+			outcome.general = tcSharedRewriteRecoverable
+		}
+	}()
 	// Refreshing the interface inventory is a full netlink dump and touches no
 	// inbound state, so it stays outside lifecycleAccess. The packet path takes
 	// that lock for read on every datagram and Go's RWMutex parks new readers as
@@ -595,11 +604,22 @@ func (i *Inbound) updateTCInterfaces(ctx context.Context) (outcome tcUpdateOutco
 
 	i.lifecycleAccess.Lock()
 	defer i.lifecycleAccess.Unlock()
+	if netstate.CurrentEpoch() != startEpoch {
+		// A newer network snapshot is already pending; avoid acting on stale
+		// interface inventory and schedule an immediate recovery pass.
+		outcome.general = tcSharedRewriteRecoverable
+		return
+	}
 	if ctx.Err() != nil {
 		// Shutting down. Report nothing at all, including the inventory failure
 		// above: the loop is about to exit, and arming a retry for a pass that
 		// will never run again only delays the exit's own disarm.
 		return tcUpdateOutcome{}
+	}
+	if err := i.updateTCNetworkGeneration(uint32(startEpoch & 0x7fffffff)); err != nil {
+		i.interfaceWarnings.infrastructure.warn(i.logWarn, "advance TC network generation: ", err)
+		outcome.general = tcSharedRewriteRecoverable
+		return
 	}
 	outcome.bypassRuleSet = i.retryBypassRuleSetIfNeeded()
 	outcome.fakeIPRanges = i.retryFakeIPRangesIfNeeded()
@@ -689,6 +709,17 @@ func (i *Inbound) updateCgroupHostAddresses(hostAddresses []netip.Addr) error {
 		return nil
 	}
 	return cgroupBackend.UpdateHostAddresses(hostAddresses)
+}
+
+// A network handover advances the kernel-visible flow generation before we
+// reconcile interfaces. The existing UDP reader lock stays separate.
+func (i *Inbound) updateTCNetworkGeneration(generation uint32) error {
+	i.tcDataPlaneAccess.RLock()
+	defer i.tcDataPlaneAccess.RUnlock()
+	if i.tcDataPlane == nil || i.tcDataPlane.backend == nil {
+		return nil
+	}
+	return i.tcDataPlane.backend.SetNetworkGeneration(generation)
 }
 
 func (i *Inbound) repairTCInfrastructure() (bool, error) {

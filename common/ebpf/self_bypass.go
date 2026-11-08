@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"bufio"
+	cryptorand "crypto/rand"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,11 +26,14 @@ const selfBypassSocketCapacity = 65536
 // map is populated by cgroup hooks when the process has an exclusive cgroup,
 // or by the socket control callback when cgroup attachment is unavailable.
 type SelfBypass struct {
-	access   sync.RWMutex
-	sockets  *CiliumEBPF.Map
-	programs []*CiliumEBPF.Program
-	links    []link.Link
-	mode     atomic.Uint32
+	access      sync.RWMutex
+	sockets     *CiliumEBPF.Map
+	programs    []*CiliumEBPF.Program
+	links       []link.Link
+	mode        atomic.Uint32
+	mark        uint32
+	markMask    uint32
+	markEnabled bool
 }
 
 type SelfBypassCgroupConfig struct {
@@ -69,7 +73,72 @@ func NewSelfBypass() (*SelfBypass, error) {
 	if err != nil {
 		return nil, E.Cause(err, "create eBPF self-bypass socket map")
 	}
-	return &SelfBypass{sockets: sockets}, nil
+	mark, mask, enabled := probeSelfBypassSocketMark()
+	return &SelfBypass{sockets: sockets, mark: mark, markMask: mask, markEnabled: enabled}, nil
+}
+
+// probeSelfBypassSocketMark tests SO_MARK without an outbound connection.
+// A failure is non-fatal: rootless and Android SELinux paths retain cookies.
+func probeSelfBypassSocketMark() (mark, mask uint32, enabled bool) {
+	var randomByte [1]byte
+	if _, err := cryptorand.Read(randomByte[:]); err != nil {
+		return 0, 0, false
+	}
+	mark = uint32(randomByte[0])
+	if mark == 0 {
+		mark = 0xa7
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer unix.Close(fd)
+	if err = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, int(mark)); err != nil {
+		return 0, 0, false
+	}
+	verify, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK)
+	if err != nil || uint32(verify)&0xff != mark {
+		return 0, 0, false
+	}
+	return mark, 0xff, true
+}
+
+func (b *SelfBypass) SocketMarkConfig() (mark, mask uint32, enabled bool) {
+	if b == nil {
+		return 0, 0, false
+	}
+	return b.mark, b.markMask, b.markEnabled
+}
+
+// applySocketMark preserves routing bits and leaves occupied low bits intact.
+// Cookie registration is always retained as a fallback in case OEM hooks
+// overwrite the mark after this callback.
+func (b *SelfBypass) applySocketMark(raw syscall.RawConn) (bool, error) {
+	if !b.markEnabled || b.mark == 0 || b.markMask == 0 {
+		return false, nil
+	}
+	var applied bool
+	err := control.Raw(raw, func(fd uintptr) error {
+		value, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK)
+		if err != nil {
+			return err
+		}
+		current := uint32(value)
+		if current&b.markMask != 0 {
+			return nil
+		}
+		next := current | (b.mark & b.markMask)
+		if err = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, int(next)); err != nil {
+			return err
+		}
+		verify, err := unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK)
+		if err != nil || uint32(verify)&b.markMask != b.mark {
+			return E.New("socket did not retain eBPF self-bypass mark")
+		}
+		applied = true
+		return nil
+	})
+	return applied, err
 }
 
 // Map returns the map that must be shared with the local TC programs.
@@ -324,16 +393,30 @@ func selfBypassSocketAddrInstructions(mapFD int) asm.Instructions {
 	}
 }
 
-// RegisterSocket records a socket created by sing-box when cgroup hooks cannot
-// be attached. It performs one SO_COOKIE read and one map update per socket.
+// RegisterSocket records a socket created by mihomo when cgroup hooks are
+// unavailable. It preserves the legacy error contract.
 func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
+	_, err := b.RegisterSocketWithCookie(rawConn)
+	return err
+}
+
+// RegisterSocketWithCookie returns a cookie only when this invocation wrote a
+// map entry. The caller can use it to roll back a dial that failed after the
+// socket's control callback (including TCP connect errors).
+func (b *SelfBypass) RegisterSocketWithCookie(rawConn syscall.RawConn) (uint64, error) {
 	if b == nil {
-		return nil
+		return 0, nil
 	}
 	b.access.RLock()
 	defer b.access.RUnlock()
-	if b.sockets == nil || b.CgroupAttached() {
-		return nil
+	if b.sockets == nil {
+		return 0, nil
+	}
+	// Marking is optional. Never replace the cookie fallback with SO_MARK,
+	// because vendor routing controls may change the mark after our callback.
+	_, _ = b.applySocketMark(rawConn)
+	if b.CgroupAttached() {
+		return 0, nil
 	}
 	var cookie uint64
 	err := control.Raw(rawConn, func(fd uintptr) error {
@@ -342,16 +425,29 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 		return err
 	})
 	if err != nil {
-		return E.Cause(err, "read socket cookie for eBPF self-bypass")
+		return 0, E.Cause(err, "read socket cookie for eBPF self-bypass")
 	}
 	if cookie == 0 {
-		return E.New("socket returned an empty eBPF self-bypass cookie")
+		return 0, E.New("socket returned an empty eBPF self-bypass cookie")
 	}
 	value := uint32(1)
 	if err = b.sockets.Update(&cookie, &value, CiliumEBPF.UpdateAny); err != nil {
-		return E.Cause(err, "register eBPF self-bypass socket")
+		return 0, E.Cause(err, "register eBPF self-bypass socket")
 	}
-	return nil
+	return cookie, nil
+}
+
+// UnregisterSocketCookie removes a registration owned by a failed dial. A
+// closed owner is harmless: its map and all registrations are already gone.
+func (b *SelfBypass) UnregisterSocketCookie(cookie uint64) {
+	if b == nil || cookie == 0 {
+		return
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.sockets != nil {
+		_ = b.sockets.Delete(&cookie)
+	}
 }
 
 func processCgroupExclusive(path string) (bool, error) {
@@ -438,11 +534,22 @@ func (b *SelfBypass) closeHooks() error {
 		return nil
 	}
 	var closeErr error
+	var linksOpen bool
 	for index := len(b.links) - 1; index >= 0; index-- {
-		if b.links[index] != nil {
-			closeErr = E.Errors(closeErr, b.links[index].Close())
+		if b.links[index] == nil {
+			continue
+		}
+		if err := b.links[index].Close(); err != nil {
+			// Keep the link and its program alive for a retry; dropping both
+			// handles could leave an unmanageable cgroup hook attached.
+			linksOpen = true
+			closeErr = E.Errors(closeErr, err)
+		} else {
 			b.links[index] = nil
 		}
+	}
+	if linksOpen {
+		return closeErr
 	}
 	for index := len(b.programs) - 1; index >= 0; index-- {
 		if b.programs[index] != nil {
@@ -461,6 +568,13 @@ func (b *SelfBypass) Close() error {
 	b.access.Lock()
 	defer b.access.Unlock()
 	closeErr := b.closeHooks()
+	// A failed detach must not destroy the map still used by an attached
+	// kernel program. Preserve references so a subsequent Close can retry.
+	for _, programLink := range b.links {
+		if programLink != nil {
+			return closeErr
+		}
+	}
 	if b.sockets != nil {
 		closeErr = E.Errors(closeErr, b.sockets.Close())
 		b.sockets = nil
