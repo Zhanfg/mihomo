@@ -615,7 +615,8 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 		return TCAssignment{}, err
 	}
 	if assignment.NetworkGeneration != b.control.NetworkGeneration {
-		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))
+		// Do not delete here: the kernel may have replaced a stale value with a
+		// current generation between lookup and deletion on another CPU.
 		return TCAssignment{}, unix.ENOENT
 	}
 	if remove {
