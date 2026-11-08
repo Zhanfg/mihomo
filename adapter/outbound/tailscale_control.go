@@ -28,6 +28,7 @@ func (t *Tailscale) TailscaleStatus(ctx context.Context) map[string]any {
 		"hostname":  t.option.Hostname,
 		"authKey":   t.option.AuthKey != "",
 		"ephemeral": t.option.Ephemeral,
+		"serve": t.serveSummary(),
 	}
 	if started {
 		out["state"] = state.String()
@@ -149,3 +150,14 @@ func (t *Tailscale) TailscaleLogout(ctx context.Context) error {
 	return lc.Logout(ctx)
 }
 
+
+func (t *Tailscale) serveSummary() []map[string]any {
+	list := make([]map[string]any, 0, len(t.option.Serve))
+	for _, service := range t.option.Serve {
+		list = append(list, map[string]any{
+			"port": service.Port,
+			"target": service.Target,
+		})
+	}
+	return list
+}
