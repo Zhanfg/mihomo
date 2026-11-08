@@ -15,6 +15,16 @@ func (s *Subscriber[T]) Emit(item T) {
 	s.buffer <- item
 }
 
+// TryEmit never blocks core processing on a saturated telemetry subscriber.
+func (s *Subscriber[T]) TryEmit(item T) bool {
+	select {
+	case s.buffer <- item:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Subscriber[T]) Out() Subscription[T] {
 	return s.buffer
 }

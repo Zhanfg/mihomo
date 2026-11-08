@@ -10,6 +10,7 @@ type Observable[T any] struct {
 	listener map[Subscription[T]]*Subscriber[T]
 	mux      sync.Mutex
 	done     bool
+	lossy    bool
 	stopCh   chan struct{}
 }
 
@@ -17,7 +18,11 @@ func (o *Observable[T]) process() {
 	for item := range o.iterable {
 		o.mux.Lock()
 		for _, sub := range o.listener {
-			sub.Emit(item)
+			if o.lossy {
+				sub.TryEmit(item)
+			} else {
+				sub.Emit(item)
+			}
 		}
 		o.mux.Unlock()
 	}
@@ -74,4 +79,14 @@ func NewObservable[T any](iter Iterable[T]) *Observable[T] {
 	}
 	go observable.process()
 	return observable
+}
+
+// NewLossyObservable is for dashboard telemetry that must not hold the core
+// hostage when a browser or WebSocket subscriber stops reading.
+func NewLossyObservable[T any](iter Iterable[T]) *Observable[T] {
+	o := NewObservable[T](iter)
+	o.mux.Lock()
+	o.lossy = true
+	o.mux.Unlock()
+	return o
 }
