@@ -1,0 +1,60 @@
+name: P0 eBPF Object Regeneration
+
+# Runs only for the isolated P0 integration branch and never pushes to main.
+on:
+  push:
+    branches:
+      - sync/p0-multisource-20261108
+    paths:
+      - 'common/ebpf/native/tc.bpf.c'
+      - '.github/workflows/p0-ebpf-regenerate.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: p0-bpfgen-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate:
+    if: github.ref == 'refs/heads/sync/p0-multisource-20261108'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: true
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r29
+      - name: Format changed Go sources and generate pinned BPF programs
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          gofmt -w common/ebpf/tc.go common/ebpf/tc_test.go common/ebpf/tc_assignment_test.go common/ebpf/tc_network_generation_test.go common/ebpf/self_bypass.go component/dialer/control.go listener/sing_ebpf/inbound.go listener/sing_ebpf/interface_monitor.go
+          go mod download
+          node tools/prepare-wireguard-p0-overlay.mjs
+          make ebpf_generate
+          test -s common/ebpf/internal/bpfgen/tc_bpfel.o
+          test -s common/ebpf/internal/bpfgen/tc_bpfeb.o
+      - name: Commit only formatted sources and generated BPF artifacts
+        run: |
+          set -euo pipefail
+          git add common/ebpf/internal/bpfgen
+          git add common/ebpf/tc.go common/ebpf/tc_test.go common/ebpf/tc_assignment_test.go common/ebpf/tc_network_generation_test.go common/ebpf/self_bypass.go component/dialer/control.go listener/sing_ebpf/inbound.go listener/sing_ebpf/interface_monitor.go
+          if git diff --cached --quiet; then
+            echo 'BPF programs already match source.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'build(p0): synchronize TC eBPF generated objects and Go formatting'
+          git push origin HEAD:refs/heads/sync/p0-multisource-20261108
