@@ -463,8 +463,20 @@ func (i *Inbound) start() error {
 		}
 	}
 	if i.selfBypass != nil {
-		i.unregisterProtect = dialer.RegisterSocketProtectOwner(func(_ context.Context, network, address string, rawConn syscall.RawConn) error {
-			return i.selfBypass.RegisterSocket(rawConn)
+		// Capture the owner, not the mutable inbound field, so concurrent
+		// shutdown cannot turn a previously copied callback into a nil deref.
+		bypassOwner := i.selfBypass
+		i.unregisterProtect = dialer.RegisterSocketProtectOwner(func(ctx context.Context, network, address string, rawConn syscall.RawConn) error {
+			cookie, err := bypassOwner.RegisterSocketWithCookie(rawConn)
+			if err != nil {
+				return err
+			}
+			if cookie != 0 {
+				dialer.RegisterSocketProtectRollback(ctx, func() {
+					bypassOwner.UnregisterSocketCookie(cookie)
+				})
+			}
+			return nil
 		})
 		i.protectRegistered = true
 	}
