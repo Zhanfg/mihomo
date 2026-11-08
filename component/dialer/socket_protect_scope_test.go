@@ -90,3 +90,56 @@ func TestSocketProtectRollbackIdempotent(t *testing.T) {
 		t.Fatalf("rollback cleanup ran %d times", count)
 	}
 }
+
+func TestSocketProtectRunsOnlyOnceAfterNestedControls(t *testing.T) {
+	var sequence []string
+	owner := RegisterSocketProtectOwner(func(ctx context.Context, network, address string, raw syscall.RawConn) error {
+		sequence = append(sequence, "protect")
+		return nil
+	})
+	defer owner()
+
+	d := &net.Dialer{}
+	for _, stage := range []string{"transport", "interface", "routing-mark"} {
+		label := stage
+		addControlToDialer(d, func(ctx context.Context, network, address string, raw syscall.RawConn) error {
+			sequence = append(sequence, label)
+			return nil
+		})
+	}
+	if err := d.ControlContext(context.Background(), "tcp4", "127.0.0.1:443", nil); err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{"transport", "interface", "routing-mark", "protect"}
+	if len(sequence) != len(expected) {
+		t.Fatalf("unexpected control chain order/call count: %v", sequence)
+	}
+	for i := range expected {
+		if sequence[i] != expected[i] {
+			t.Fatalf("stage %d = %q, want %q; sequence=%v", i, sequence[i], expected[i], sequence)
+		}
+	}
+}
+
+func TestNestedControlsPreserveSocketProtectRollbackScope(t *testing.T) {
+	var cleanups int
+	owner := RegisterSocketProtectOwner(func(ctx context.Context, _, _ string, _ syscall.RawConn) error {
+		RegisterSocketProtectRollback(ctx, func() { cleanups++ })
+		return nil
+	})
+	defer owner()
+	ctx, scope := withSocketProtectScope(context.Background())
+	if scope == nil {
+		t.Fatal("missing protect scope")
+	}
+	d := &net.Dialer{}
+	addControlToDialer(d, func(context.Context, string, string, syscall.RawConn) error { return nil })
+	addControlToDialer(d, func(context.Context, string, string, syscall.RawConn) error { return nil })
+	if err := d.ControlContext(ctx, "tcp4", "127.0.0.1:443", nil); err != nil {
+		t.Fatal(err)
+	}
+	scope.Rollback()
+	if cleanups != 1 {
+		t.Fatalf("nested controls registered %d rollback hooks, want exactly one", cleanups)
+	}
+}
