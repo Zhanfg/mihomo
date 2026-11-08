@@ -30,6 +30,7 @@ on:
       - "component/netstate/**"
       - "component/netchange/**"
       - "component/keepalive/**"
+      - "component/dialer/**"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
