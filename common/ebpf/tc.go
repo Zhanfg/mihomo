@@ -4,6 +4,7 @@ package ebpf
 
 import (
 	"net/netip"
+	"golang.org/x/sys/unix"
 	"slices"
 	"sync"
 	"unsafe"
@@ -68,6 +69,9 @@ type TCConfig struct {
 	Policy            CompiledPolicy
 	RoutingMark       uint32
 	SelfBypassMap     *CiliumEBPF.Map
+	SelfBypassMark uint32
+	SelfBypassMask uint32
+	NetworkGeneration uint32
 	TrackProcess      bool
 	// FakeIPICMPReply loads the independent fakeip_icmp object (see
 	// tc_fakeip_icmp.go) and attaches it wherever this TC data plane already
@@ -102,7 +106,10 @@ type tcControl struct {
 	FakeIPIPv4Mask    [4]byte
 	FakeIPIPv6Prefix  [16]byte
 	FakeIPIPv6Mask    [16]byte
-}
+	SelfBypassMark uint32
+	SelfBypassMarkMask uint32
+	NetworkGeneration uint32
+
 
 type tcAssignKey struct {
 	Family             uint8
@@ -121,7 +128,8 @@ type TCAssignment struct {
 	SourceMAC      MACAddress
 	Path           uint8
 	SourceMACValid uint8
-}
+	NetworkGeneration uint32
+
 
 type tcRuntime struct {
 	maps     map[string]*CiliumEBPF.Map
@@ -177,6 +185,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if config.RoutingMark == 0 {
 		config.RoutingMark = DefaultTCRoutingMark
 	}
+	config.NetworkGeneration = normalizeTCNetworkGeneration(config.NetworkGeneration)
 	policy := config.Policy
 	var err error
 	uidEntries := policy.uidEntries
@@ -228,6 +237,9 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		Flags:             tcFlags(config, policy),
 		DeliveryInterface: config.DeliveryInterface,
 		RoutingMark:       config.RoutingMark,
+		SelfBypassMark:    config.SelfBypassMark,
+		SelfBypassMarkMask: checkedTCBypassMask(config.RoutingMark, config.SelfBypassMark, config.SelfBypassMask),
+		NetworkGeneration: config.NetworkGeneration,
 		ListenerPort:      config.ListenerPort,
 		LocalDNSMode:      policy.local.DNSMode,
 		SharedDNSMode:     policy.sharedDNSMode,
@@ -386,9 +398,52 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 		return err
 	}
 	previous := b.control.RoutingMark
+	previousMask := b.control.SelfBypassMarkMask
 	b.control.RoutingMark = mark
+	if mark&b.control.SelfBypassMarkMask != 0 {
+		b.control.SelfBypassMarkMask = 0 // retain cookie fallback on routing mark collision
+	}
 	if err := b.updateControlLocked(); err != nil {
 		b.control.RoutingMark = previous
+		b.control.SelfBypassMarkMask = previousMask
+		return err
+	}
+	return nil
+}
+
+const tcNetworkGenerationMask uint32 = 0x7fffffff
+
+func normalizeTCNetworkGeneration(generation uint32) uint32 {
+	generation &= tcNetworkGenerationMask
+	if generation == 0 {
+		return 1
+	}
+	return generation
+}
+
+func checkedTCBypassMask(routeMark, mark, mask uint32) uint32 {
+	if mark == 0 || mask == 0 || mark&mask != mark || routeMark&mask != 0 {
+		return 0
+	}
+	return mask
+}
+
+// SetNetworkGeneration fences assignments belonging to earlier link
+// incarnations. The kernel also tags new assignments with this value.
+func (b *TCBackend) SetNetworkGeneration(generation uint32) error {
+	generation = normalizeTCNetworkGeneration(generation)
+	b.access.Lock()
+	defer b.access.Unlock()
+	if err := b.requireUsableLocked(); err != nil {
+		return err
+	}
+	if b.control.NetworkGeneration == generation {
+		return nil
+	}
+	previous := b.control.NetworkGeneration
+	b.control.NetworkGeneration = generation
+	if err := b.updateControlLocked(); err != nil {
+		b.control.NetworkGeneration = previous
 		return err
 	}
 	return nil
@@ -558,6 +613,10 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 	var assignment TCAssignment
 	if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&assignment)); err != nil {
 		return TCAssignment{}, err
+	}
+	if assignment.NetworkGeneration != b.control.NetworkGeneration {
+		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))
+		return TCAssignment{}, unix.ENOENT
 	}
 	if remove {
 		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))
