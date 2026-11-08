@@ -145,3 +145,32 @@ func TestLookupAssignmentKeepsEntryWhenNotAsked(t *testing.T) {
 		}
 	}
 }
+
+
+func TestLookupAssignmentRejectsRetiredNetworkGeneration(t *testing.T) {
+	backend := newTestAssignmentBackend(t)
+	backend.control.NetworkGeneration = 2
+	source := netip.MustParseAddrPort("10.0.0.2:41003")
+	destination := netip.MustParseAddrPort("10.0.0.1:53")
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 9, TCAssignment{
+		NetworkGeneration: 1,
+		SocketCookie:      0x4444,
+		Path:              TCPathShared,
+	})
+	if _, err := backend.LookupAssignment(ProtocolUDP, source, destination, 9, false); err == nil {
+		t.Fatal("a network-epoch stale assignment was returned")
+	}
+	// Stale reads must never delete a concurrently refreshed kernel value.
+	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 9, TCAssignment{
+		NetworkGeneration: 2,
+		SocketCookie:      0x5555,
+		Path:              TCPathShared,
+	})
+	current, err := backend.LookupAssignment(ProtocolUDP, source, destination, 9, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.SocketCookie != 0x5555 || current.NetworkGeneration != 2 {
+		t.Fatalf("fresh assignment lost after network switch: %+v", current)
+	}
+}
