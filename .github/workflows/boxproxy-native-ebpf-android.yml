@@ -82,6 +82,9 @@ jobs:
       - name: Apply verified P0 WireGuard IPv6 receiver overlays
         run: node tools/prepare-wireguard-p0-overlay.mjs
 
+      - name: Backport pinned sing-tun single-packet GRO optimization
+        run: node tools/apply-sing-tun-p1-gro.mjs
+
       - name: IP-family capability regressions
         shell: bash
         run: |
