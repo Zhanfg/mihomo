@@ -52,6 +52,7 @@ type Manager struct {
 func (m *Manager) Join(c Tracker) {
 	m.connections.Store(c.ID(), c)
 	m.joinSmartTarget(c)
+	notifyRequestJoin(c)
 }
 
 func (m *Manager) Leave(c Tracker) {

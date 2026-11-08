@@ -359,6 +359,7 @@ func initCountryDatabaseAsync() {
 }
 
 type SmartOption struct {
+	LearningScope   string  `group:"learning-scope,omitempty"`
 	PolicyPriority  string  `group:"policy-priority,omitempty"`
 	UseLightGBM     bool    `group:"uselightgbm,omitempty"`
 	CollectData     bool    `group:"collectdata,omitempty"`
@@ -507,7 +508,10 @@ func NewSmart(option GroupCommonOption, smartOption SmartOption, emptyFallback C
 		option.URL = C.DefaultTestURL
 	}
 
-	configName := getConfigFilename()
+	configName, scopeErr := scopedSmartConfigName(getConfigFilename(), smartOption.LearningScope)
+	if scopeErr != nil {
+		return nil, scopeErr
+	}
 	country := strings.ToUpper(strings.TrimSpace(smartOption.Country))
 	if country != "" {
 		if len(country) != 2 || country[0] < 'A' || country[0] > 'Z' || country[1] < 'A' || country[1] > 'Z' {

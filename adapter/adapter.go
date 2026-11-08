@@ -213,7 +213,7 @@ func (p *Proxy) URLTest(ctx context.Context, url string, expectedStatus utils.In
 		if state.history.Len() > defaultHistoriesNum {
 			state.history.Pop()
 		}
-
+		notifyURLTestHook(url, p.Name(), record.Delay)
 	}()
 
 	unifiedDelay := UnifiedDelay.Load()
