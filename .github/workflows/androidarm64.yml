@@ -94,6 +94,9 @@ jobs:
         echo "Checking redirect_server.go for dual-stack changes:"
         grep -B2 "if s.listenAddr.Is4()" redirect_server.go || echo "Dual-stack change not found"
 
+    - name: Backport pinned sing-tun single-packet GRO optimization
+      run: node tools/apply-sing-tun-p1-gro.mjs
+
     - name: Modify the Update Link
       run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
 
