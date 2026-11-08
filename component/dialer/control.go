@@ -40,6 +40,6 @@ func addControlToDialer(d *net.Dialer, fn controlFn) {
 		if err = fn(ctx, network, address, c); err != nil {
 			return
 		}
-		return ApplySocketProtect(network, address, c)
+		return ApplySocketProtectContext(ctx, network, address, c)
 	}
 }
