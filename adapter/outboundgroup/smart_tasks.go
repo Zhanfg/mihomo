@@ -421,6 +421,51 @@ func runSmartActivityTaskSchedule(
 	}
 }
 
+// runStalledSweep waits for an upload instead of repeatedly scanning the
+// connection table of an idle phone. It keeps a 15-second cadence while a
+// reply is pending and responds to foreground/background state changes.
+func runStalledSweep(
+	ctx context.Context,
+	interval, jitter time.Duration,
+	background func() (bool, <-chan struct{}),
+	upload func() <-chan struct{},
+	sweep func() bool,
+) {
+	timer := time.NewTimer(interval + jitter)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		// Arm before scanning. A concurrent write either appears in Range
+		// or closes this channel, so the next scan cannot miss an upload.
+		uploaded := upload()
+		pending := false
+		if paused, _ := background(); !paused {
+			pending = sweep()
+		}
+		for !pending {
+			paused, changed := background()
+			if paused {
+				uploaded = nil
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-uploaded:
+				pending = true
+			case <-changed:
+				if paused {
+					pending = true
+				}
+			}
+		}
+		timer.Reset(interval)
+	}
+}
+
 // runTrafficDrivenSweep replaces a permanent periodic ticker with a traffic
 // edge plus a timer that exists only while useful. A short burst gets one
 // delayed sweep after stalledReplyAfter; continuous traffic keeps the historic
@@ -603,7 +648,7 @@ func (r *smartGlobalTaskRun) cleanupOrphanedGroups() {
 // stalledReplyAfter and the group carrying it currently avoids the member it is
 // on. Idle connections and ones still getting answers are left alone, as is
 // everything on a member the group still dials.
-func (r *smartGlobalTaskRun) closeStalledConnections() {
+func (r *smartGlobalTaskRun) closeStalledConnections() (pending bool) {
 	now := time.Now()
 	type groupView struct {
 		proxyByName  map[string]C.Proxy
@@ -623,6 +668,10 @@ func (r *smartGlobalTaskRun) closeStalledConnections() {
 		// Two atomic loads, and they reject nearly every connection, so they go
 		// before anything that walks the chain or reads the store.
 		info := tracker.Info()
+		if !info.ReplyPending() {
+			return true
+		}
+		pending = true
 		if !info.AwaitingReply(now, stalledReplyAfter) {
 			return true
 		}
@@ -646,6 +695,7 @@ func (r *smartGlobalTaskRun) closeStalledConnections() {
 		}
 		return true
 	})
+	return pending
 }
 
 // admitGroupsByName indexes the registered groups that are not closing by
@@ -675,13 +725,18 @@ func (r *smartGlobalTaskRun) start() {
 	}()
 	go func() {
 		defer r.wg.Done()
-		runTrafficDrivenSweep(
+		runStalledSweep(
 			r.ctx,
-			statistic.DefaultManager.TrafficWake(),
-			statistic.DefaultManager.TrafficActive,
-			r.closeStalledConnections,
-			stalledReplyAfter,
 			stalledSweepInterval,
+			smartTaskJitter(),
+			power.BackgroundState,
+			statistic.DefaultManager.UploadSignal,
+			func() bool {
+				if tunnel.Status() != tunnel.Running {
+					return false
+				}
+				return r.closeStalledConnections()
+			},
 		)
 	}()
 }
