@@ -438,11 +438,22 @@ func (b *SelfBypass) closeHooks() error {
 		return nil
 	}
 	var closeErr error
+	var linksOpen bool
 	for index := len(b.links) - 1; index >= 0; index-- {
-		if b.links[index] != nil {
-			closeErr = E.Errors(closeErr, b.links[index].Close())
+		if b.links[index] == nil {
+			continue
+		}
+		if err := b.links[index].Close(); err != nil {
+			// Keep the link and its program alive for a retry; dropping both
+			// handles could leave an unmanageable cgroup hook attached.
+			linksOpen = true
+			closeErr = E.Errors(closeErr, err)
+		} else {
 			b.links[index] = nil
 		}
+	}
+	if linksOpen {
+		return closeErr
 	}
 	for index := len(b.programs) - 1; index >= 0; index-- {
 		if b.programs[index] != nil {
@@ -461,6 +472,13 @@ func (b *SelfBypass) Close() error {
 	b.access.Lock()
 	defer b.access.Unlock()
 	closeErr := b.closeHooks()
+	// A failed detach must not destroy the map still used by an attached
+	// kernel program. Preserve references so a subsequent Close can retry.
+	for _, programLink := range b.links {
+		if programLink != nil {
+			return closeErr
+		}
+	}
 	if b.sockets != nil {
 		closeErr = E.Errors(closeErr, b.sockets.Close())
 		b.sockets = nil

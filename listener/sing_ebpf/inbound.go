@@ -369,6 +369,11 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	inbound.bypassRuleSetTags = slices.Clone(options.BypassRuleSet)
 	inbound.udpTimeout.Store(int64(resolveUDPTimeout(options.UDPTimeout)))
 	if err := inbound.compilePolicy(); err != nil {
+		// The map was created before policy compilation. Do not leak it if
+		// rule/provider validation fails before any data plane is attached.
+		if inbound.selfBypass != nil {
+			_ = inbound.selfBypass.Close()
+		}
 		return nil, err
 	}
 	if err := inbound.start(); err != nil {
