@@ -18,6 +18,7 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -528,10 +529,16 @@ func (i *Inbound) start() error {
 			EnableUDP:        i.enableUDP,
 			Policy:           i.policySnapshot(),
 			TrackProcess:     i.processTracker != nil,
+			NetworkGeneration: uint32(netstate.CurrentEpoch() & 0x7fffffff),
 			FakeIPICMPReply:  i.fakeIPICMPReply,
 		}
 		if i.selfBypass != nil {
 			backendConfig.SelfBypassMap = i.selfBypass.Map()
+			mark, mask, enabled := i.selfBypass.SocketMarkConfig()
+			if enabled {
+				backendConfig.SelfBypassMark = mark
+				backendConfig.SelfBypassMask = mask
+			}
 		}
 		var err error
 		backend, err = ECommon.PrepareTC(backendConfig)
