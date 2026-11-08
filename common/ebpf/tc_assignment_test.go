@@ -27,6 +27,7 @@ func newTestAssignmentBackend(t *testing.T) *TCBackend {
 	backend := &TCBackend{}
 	backend.runtime = &tcRuntime{maps: map[string]*CiliumEBPF.Map{"tc_assignment": assignmentMap}}
 	backend.assignmentMapFD = assignmentMap.FD()
+	backend.control.NetworkGeneration = 1
 	return backend
 }
 
@@ -65,6 +66,7 @@ func TestLookupAssignmentKeyIncludesInterfaceIndex(t *testing.T) {
 
 	// An entry written for one interface index.
 	writeTestAssignment(t, backend, ProtocolUDP, source, destination, reusedIndex, TCAssignment{
+		NetworkGeneration: 1,
 		SocketCookie:   0x1111,
 		InterfaceIndex: reusedIndex,
 		SourceMAC:      MACAddress{0xaa, 0, 0, 0, 0, 1},
@@ -99,6 +101,7 @@ func TestLookupAssignmentRemovesEntryOnRequest(t *testing.T) {
 	destination := netip.MustParseAddrPort("10.0.0.1:443")
 
 	writeTestAssignment(t, backend, ProtocolTCP, source, destination, 0, TCAssignment{
+		NetworkGeneration: 1,
 		SocketCookie: 0x2222,
 		Path:         TCPathDelivery,
 	})
@@ -127,6 +130,7 @@ func TestLookupAssignmentKeepsEntryWhenNotAsked(t *testing.T) {
 	destination := netip.MustParseAddrPort("10.0.0.1:53")
 
 	writeTestAssignment(t, backend, ProtocolUDP, source, destination, 7, TCAssignment{
+		NetworkGeneration: 1,
 		SocketCookie: 0x3333,
 		Path:         TCPathShared,
 	})
