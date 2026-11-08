@@ -393,21 +393,30 @@ func selfBypassSocketAddrInstructions(mapFD int) asm.Instructions {
 	}
 }
 
-// RegisterSocket records a socket created by sing-box when cgroup hooks cannot
-// be attached. It performs one SO_COOKIE read and one map update per socket.
+// RegisterSocket records a socket created by mihomo when cgroup hooks are
+// unavailable. It preserves the legacy error contract.
 func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
+	_, err := b.RegisterSocketWithCookie(rawConn)
+	return err
+}
+
+// RegisterSocketWithCookie returns a cookie only when this invocation wrote a
+// map entry. The caller can use it to roll back a dial that failed after the
+// socket's control callback (including TCP connect errors).
+func (b *SelfBypass) RegisterSocketWithCookie(rawConn syscall.RawConn) (uint64, error) {
 	if b == nil {
-		return nil
+		return 0, nil
 	}
 	b.access.RLock()
 	defer b.access.RUnlock()
 	if b.sockets == nil {
-		return nil
+		return 0, nil
 	}
-	// SO_MARK is a fast-path hint, never a substitute for the cookie fallback.
+	// Marking is optional. Never replace the cookie fallback with SO_MARK,
+	// because vendor routing controls may change the mark after our callback.
 	_, _ = b.applySocketMark(rawConn)
 	if b.CgroupAttached() {
-		return nil
+		return 0, nil
 	}
 	var cookie uint64
 	err := control.Raw(rawConn, func(fd uintptr) error {
@@ -416,16 +425,29 @@ func (b *SelfBypass) RegisterSocket(rawConn syscall.RawConn) error {
 		return err
 	})
 	if err != nil {
-		return E.Cause(err, "read socket cookie for eBPF self-bypass")
+		return 0, E.Cause(err, "read socket cookie for eBPF self-bypass")
 	}
 	if cookie == 0 {
-		return E.New("socket returned an empty eBPF self-bypass cookie")
+		return 0, E.New("socket returned an empty eBPF self-bypass cookie")
 	}
 	value := uint32(1)
 	if err = b.sockets.Update(&cookie, &value, CiliumEBPF.UpdateAny); err != nil {
-		return E.Cause(err, "register eBPF self-bypass socket")
+		return 0, E.Cause(err, "register eBPF self-bypass socket")
 	}
-	return nil
+	return cookie, nil
+}
+
+// UnregisterSocketCookie removes a registration owned by a failed dial. A
+// closed owner is harmless: its map and all registrations are already gone.
+func (b *SelfBypass) UnregisterSocketCookie(cookie uint64) {
+	if b == nil || cookie == 0 {
+		return
+	}
+	b.access.RLock()
+	defer b.access.RUnlock()
+	if b.sockets != nil {
+		_ = b.sockets.Delete(&cookie)
+	}
 }
 
 func processCgroupExclusive(path string) (bool, error) {
