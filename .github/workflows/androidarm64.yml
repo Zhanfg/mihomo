@@ -1,6 +1,10 @@
 name: Build Android ARM64
 on:
   workflow_dispatch:
+  push:
+    branches: ['sync/p0-*']
+  pull_request:
+    branches: [main]
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -78,7 +82,7 @@ jobs:
         grep -B2 "if s.listenAddr.Is4()" redirect_server.go || echo "Dual-stack change not found"
 
     - name: Modify the Update Link
-      run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/TanakaLun/mihomo|g' ./component/updater/update_core.go
+      run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
 
     - name: Update CA
       run: |
@@ -90,7 +94,7 @@ jobs:
       run: |
         BRANCH_NAME="${GITHUB_REF#refs/heads/}"
         SHORT_HASH=$(git rev-parse --short HEAD)
-        VERSION="TanakaLun-${SHORT_HASH}"
+        VERSION="Zhanfg-${SHORT_HASH}"
         VERSION="${VERSION//\//-}"
         echo "VERSION=${VERSION}" >> $GITHUB_ENV
         echo "BUILDTIME=$(date)" >> $GITHUB_ENV

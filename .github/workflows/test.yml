@@ -7,12 +7,14 @@ on:
       - ".github/ISSUE_TEMPLATE/**"
     branches:
       - Alpha
+      - main
       - 'sync/**'
     tags:
       - "v*"
   pull_request:
     branches:
       - Alpha
+      - main
 
 concurrency:
   group: test-${{ github.ref }}

@@ -17,6 +17,8 @@ on:
   push:
     branches:
       - Alpha
+      - main
+      - 'sync/**'
     paths:
       - "common/ebpf/**"
       - "listener/sing_ebpf/**"
@@ -24,6 +26,7 @@ on:
   pull_request:
     branches:
       - Alpha
+      - main
     paths:
       - "common/ebpf/**"
       - "listener/sing_ebpf/**"
