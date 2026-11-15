@@ -1,4 +1,4 @@
-name: Upstream Watch (Review Queue + P1 Baseline CI)
+name: Upstream Watch (State Branch + P1 Baseline CI)
 
 on:
   schedule:
@@ -36,14 +36,15 @@ jobs:
           python3 -m unittest discover -s scripts/ci -p 'test_upstream_watch.py' -v
 
   monitor:
-    name: Poll vetted upstreams, queue changes and dispatch P1 checks
+    name: Poll vetted upstreams, record state and dispatch P1 checks
     needs: validate
     if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 8
     permissions:
       contents: read
-      issues: write
+      contents: write
+      pull-requests: write
       actions: write
     steps:
       - uses: actions/checkout@v6
