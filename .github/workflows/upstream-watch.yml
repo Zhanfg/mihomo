@@ -1,0 +1,55 @@
+name: Upstream Watch (Review Queue + P1 Baseline CI)
+
+on:
+  schedule:
+    # Every five minutes, offset from the top of each hour.
+    - cron: '3-58/5 * * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/upstream-watch.yml'
+      - 'scripts/ci/upstream_watch.py'
+      - 'scripts/ci/upstream_sources.json'
+      - 'scripts/ci/test_upstream_watch.py'
+
+permissions: {}
+
+concurrency:
+  group: mihomo-upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate watcher without credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Syntax, manifest and offline regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m py_compile scripts/ci/upstream_watch.py scripts/ci/test_upstream_watch.py
+          python3 scripts/ci/upstream_watch.py --check
+          python3 -m unittest discover -s scripts/ci -p 'test_upstream_watch.py' -v
+
+  monitor:
+    name: Poll vetted upstreams, queue changes and dispatch P1 checks
+    needs: validate
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      issues: write
+      actions: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Watch upstream and optionally dispatch existing candidate workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/ci/upstream_watch.py
