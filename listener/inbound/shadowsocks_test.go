@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/metacubex/mihomo/adapter/outbound"
-	"github.com/metacubex/mihomo/component/generator"
 	C "github.com/metacubex/mihomo/constant"
 	"github.com/metacubex/mihomo/listener/inbound"
 	"github.com/metacubex/mihomo/transport/jls"
@@ -313,11 +312,11 @@ func TestInboundShadowSocks_MultiUsers(t *testing.T) {
 				if strings.Contains(cipher, "-128-") {
 					bits = 128
 				}
-				key, err := generator.GenShadowsocksPassword(bits)
-				if err != nil {
-					panic(err)
+				key := make([]byte, bits/8)
+				if _, err := rand.Read(key); err != nil {
+					t.Fatal(err)
 				}
-				return key
+				return base64.StdEncoding.EncodeToString(key)
 			}
 
 			is2022 := strings.HasPrefix(cipher, "2022-")
