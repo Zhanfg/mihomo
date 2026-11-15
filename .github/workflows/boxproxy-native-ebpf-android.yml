@@ -7,6 +7,7 @@ on:
       - main
       - integration/boxproxy-native-ebpf
       - 'fix/smart-*'
+      - 'sync/p0-*'
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
@@ -29,6 +30,7 @@ on:
       - "component/netstate/**"
       - "component/netchange/**"
       - "component/keepalive/**"
+      - "component/dialer/**"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
@@ -70,6 +72,9 @@ jobs:
           git log -1 --oneline
           go version
 
+      - name: Apply verified P0 WireGuard IPv6 receiver overlays
+        run: node tools/prepare-wireguard-p0-overlay.mjs
+
       - name: IP-family capability regressions
         shell: bash
         run: |
@@ -101,14 +106,21 @@ jobs:
             | tee SMART_STATS_EVENT_BENCH.txt
 
       - name: Current Smart model smoke
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           MODEL=/tmp/Model.bin
-          curl -fsSL --retry 3 --retry-delay 2 \
-            https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin \
-            -o "$MODEL"
-          test "$(stat -c%s "$MODEL")" -gt 1000000
+          # Fetch the immutable upstream model. Release CDN sometimes returns
+          # HTTP 504; the official GitHub release asset API is a fallback.
+          MODEL_ASSET=https://github.com/vernesong/mihomo/releases/download/LightGBM-Model/Model.bin
+          if ! curl -fsSL --retry 3 --retry-delay 2 "$MODEL_ASSET" -o "$MODEL"; then
+            gh api -H "Accept: application/octet-stream" \
+              /repos/vernesong/mihomo/releases/assets/530723858 > "$MODEL"
+          fi
+          test "$(stat -c%s "$MODEL")" -eq 9345218
+          echo "23633022a815fb34e510befe1c176ba50af3ced48f08b172454f4cd6b8327788  $MODEL" | sha256sum -c -
           MIHOMO_SMART_MODEL="$MODEL" CGO_ENABLED=0 \
             go test ./component/smart/lightgbm -run '^TestCurrentModelSmoke$' -count=1
           MIHOMO_SMART_MODEL="$MODEL" CGO_ENABLED=0 \
@@ -217,7 +229,8 @@ jobs:
           {
             echo "source=$HEAD_SHA"
             echo "version=$VERSION"
-            echo "base=liuran001/mihomo:Alpha"
+            echo "base=Zhanfg/mihomo:main"
+            echo "smart_ebpf_reference=liuran001/mihomo:Alpha"
             echo "boxproxy_schema=listeners.type=ebpf"
             echo "target=android/arm64"
             echo "tags=with_gvisor with_ebpf"

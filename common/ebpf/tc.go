@@ -3,6 +3,7 @@
 package ebpf
 
 import (
+	"golang.org/x/sys/unix"
 	"net/netip"
 	"slices"
 	"sync"
@@ -68,6 +69,9 @@ type TCConfig struct {
 	Policy            CompiledPolicy
 	RoutingMark       uint32
 	SelfBypassMap     *CiliumEBPF.Map
+	SelfBypassMark    uint32
+	SelfBypassMask    uint32
+	NetworkGeneration uint32
 	TrackProcess      bool
 	// FakeIPICMPReply loads the independent fakeip_icmp object (see
 	// tc_fakeip_icmp.go) and attaches it wherever this TC data plane already
@@ -89,19 +93,22 @@ type tcPortKey struct {
 }
 
 type tcControl struct {
-	Enabled           uint32
-	Flags             uint32
-	DeliveryInterface uint32
-	RoutingMark       uint32
-	ListenerPort      uint16
-	LocalDNSMode      DNSMode
-	SharedDNSMode     DNSMode
-	DeliveryMAC       MACAddress
-	Reserved          uint16
-	FakeIPIPv4Prefix  [4]byte
-	FakeIPIPv4Mask    [4]byte
-	FakeIPIPv6Prefix  [16]byte
-	FakeIPIPv6Mask    [16]byte
+	Enabled            uint32
+	Flags              uint32
+	DeliveryInterface  uint32
+	RoutingMark        uint32
+	ListenerPort       uint16
+	LocalDNSMode       DNSMode
+	SharedDNSMode      DNSMode
+	DeliveryMAC        MACAddress
+	Reserved           uint16
+	FakeIPIPv4Prefix   [4]byte
+	FakeIPIPv4Mask     [4]byte
+	FakeIPIPv6Prefix   [16]byte
+	FakeIPIPv6Mask     [16]byte
+	SelfBypassMark     uint32
+	SelfBypassMarkMask uint32
+	NetworkGeneration  uint32
 }
 
 type tcAssignKey struct {
@@ -116,11 +123,12 @@ type tcAssignKey struct {
 }
 
 type TCAssignment struct {
-	SocketCookie   uint64
-	InterfaceIndex uint32
-	SourceMAC      MACAddress
-	Path           uint8
-	SourceMACValid uint8
+	SocketCookie      uint64
+	InterfaceIndex    uint32
+	SourceMAC         MACAddress
+	Path              uint8
+	SourceMACValid    uint8
+	NetworkGeneration uint32
 }
 
 type tcRuntime struct {
@@ -152,6 +160,15 @@ func PrepareTC(config TCConfig) (*TCBackend, error) {
 	return prepareTC(config, false)
 }
 
+// PrepareTCDirectTCP prepares a TC backend whose TCP programs look up the
+// internal listener directly instead of through the listener SOCKMAP. Use it
+// when a backend from PrepareTC loaded the SOCKMAP programs but the kernel
+// refused to insert the real listening socket (RegisterTCPListener reporting
+// EOPNOTSUPP).
+func PrepareTCDirectTCP(config TCConfig) (*TCBackend, error) {
+	return prepareTC(config, true)
+}
+
 func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if config.ListenerPort == 0 {
 		return nil, E.New("invalid TC eBPF listener port")
@@ -168,6 +185,7 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 	if config.RoutingMark == 0 {
 		config.RoutingMark = DefaultTCRoutingMark
 	}
+	config.NetworkGeneration = normalizeTCNetworkGeneration(config.NetworkGeneration)
 	policy := config.Policy
 	var err error
 	uidEntries := policy.uidEntries
@@ -216,12 +234,15 @@ func prepareTC(config TCConfig, forceLegacyTCP bool) (*TCBackend, error) {
 		return nil, err
 	}
 	controlValue := tcControl{
-		Flags:             tcFlags(config, policy),
-		DeliveryInterface: config.DeliveryInterface,
-		RoutingMark:       config.RoutingMark,
-		ListenerPort:      config.ListenerPort,
-		LocalDNSMode:      policy.local.DNSMode,
-		SharedDNSMode:     policy.sharedDNSMode,
+		Flags:              tcFlags(config, policy),
+		DeliveryInterface:  config.DeliveryInterface,
+		RoutingMark:        config.RoutingMark,
+		SelfBypassMark:     config.SelfBypassMark,
+		SelfBypassMarkMask: checkedTCBypassMask(config.RoutingMark, config.SelfBypassMark, config.SelfBypassMask),
+		NetworkGeneration:  config.NetworkGeneration,
+		ListenerPort:       config.ListenerPort,
+		LocalDNSMode:       policy.local.DNSMode,
+		SharedDNSMode:      policy.sharedDNSMode,
 	}
 	if len(includeIPv4)+len(includeIPv6) > 0 {
 		controlValue.Flags |= 1 << 12
@@ -377,9 +398,52 @@ func (b *TCBackend) SetRoutingMark(mark uint32) error {
 		return err
 	}
 	previous := b.control.RoutingMark
+	previousMask := b.control.SelfBypassMarkMask
 	b.control.RoutingMark = mark
+	if mark&b.control.SelfBypassMarkMask != 0 {
+		b.control.SelfBypassMarkMask = 0 // retain cookie fallback on routing mark collision
+	}
 	if err := b.updateControlLocked(); err != nil {
 		b.control.RoutingMark = previous
+		b.control.SelfBypassMarkMask = previousMask
+		return err
+	}
+	return nil
+}
+
+const tcNetworkGenerationMask uint32 = 0x7fffffff
+
+func normalizeTCNetworkGeneration(generation uint32) uint32 {
+	generation &= tcNetworkGenerationMask
+	if generation == 0 {
+		return 1
+	}
+	return generation
+}
+
+func checkedTCBypassMask(routeMark, mark, mask uint32) uint32 {
+	if mark == 0 || mask == 0 || mark&mask != mark || routeMark&mask != 0 {
+		return 0
+	}
+	return mask
+}
+
+// SetNetworkGeneration fences assignments belonging to earlier link
+// incarnations. The kernel also tags new assignments with this value.
+func (b *TCBackend) SetNetworkGeneration(generation uint32) error {
+	generation = normalizeTCNetworkGeneration(generation)
+	b.access.Lock()
+	defer b.access.Unlock()
+	if err := b.requireUsableLocked(); err != nil {
+		return err
+	}
+	if b.control.NetworkGeneration == generation {
+		return nil
+	}
+	previous := b.control.NetworkGeneration
+	b.control.NetworkGeneration = generation
+	if err := b.updateControlLocked(); err != nil {
+		b.control.NetworkGeneration = previous
 		return err
 	}
 	return nil
@@ -499,6 +563,11 @@ func (b *TCBackend) SetDeliveryInterface(interfaceIndex uint32, hardwareAddress 
 	return nil
 }
 
+// RegisterTCPListener publishes the internal TCP listening socket to the
+// SOCKMAP-based TCP programs; it is a no-op for direct TCP lookup. It must run
+// before any program is attached: a kernel can load the SOCKMAP programs yet
+// still reject the real listener with EOPNOTSUPP, and the caller then has to
+// rebuild the backend with PrepareTCDirectTCP.
 func (b *TCBackend) RegisterTCPListener(ipv6 bool, fd int) error {
 	if !b.tcpListenerMap {
 		return nil
@@ -544,6 +613,11 @@ func (b *TCBackend) LookupAssignment(protocol uint8, source, destination netip.A
 	var assignment TCAssignment
 	if err = lookupMap(b.assignmentMapFD, unsafe.Pointer(&key), unsafe.Pointer(&assignment)); err != nil {
 		return TCAssignment{}, err
+	}
+	if assignment.NetworkGeneration != b.control.NetworkGeneration {
+		// Do not delete here: the kernel may have replaced a stale value with a
+		// current generation between lookup and deletion on another CPU.
+		return TCAssignment{}, unix.ENOENT
 	}
 	if remove {
 		_ = deleteMap(b.assignmentMapFD, unsafe.Pointer(&key))

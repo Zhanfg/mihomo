@@ -140,7 +140,18 @@ func listenConfig(network, address string, rAddrPort netip.AddrPort, opt option)
 	return lc, address, nil
 }
 
-func dialContext(ctx context.Context, network string, destination netip.Addr, port string, opt option) (net.Conn, error) {
+func dialContext(ctx context.Context, network string, destination netip.Addr, port string, opt option) (conn net.Conn, err error) {
+	// A failure to establish the connection must remove the socket-cookie
+	// entries registered by this attempt. Each Happy-Eyeballs/racing attempt
+	// gets its own scope; successful sockets retain their bypass metadata.
+	ctx, protectScope := withSocketProtectScope(ctx)
+	if protectScope != nil {
+		defer func() {
+			if err != nil {
+				protectScope.Rollback()
+			}
+		}()
+	}
 	var address string
 	destination, port = resolver.LookupIP4P(destination, port)
 	address = net.JoinHostPort(destination.String(), port)

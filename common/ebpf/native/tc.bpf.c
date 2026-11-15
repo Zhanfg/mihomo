@@ -85,6 +85,9 @@ struct sb_tc_control {
     __u8 fakeip_ipv4_mask[4];
     __u8 fakeip_ipv6_prefix[16];
     __u8 fakeip_ipv6_mask[16];
+    __u32 self_bypass_mark;
+    __u32 self_bypass_mark_mask;
+    __u32 network_generation;
 };
 
 struct sb_tc_uid_key {
@@ -138,9 +141,10 @@ struct sb_tc_assign_value {
     __u8 source_mac[6];
     __u8 path;
     __u8 source_mac_valid;
+    __u32 network_generation;
 };
 
-_Static_assert(sizeof(struct sb_tc_control) == 72, "sb_tc_control ABI size");
+_Static_assert(sizeof(struct sb_tc_control) == 84, "sb_tc_control ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, delivery_ifindex) == 8,
     "sb_tc_control delivery_ifindex ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, routing_mark) == 12,
@@ -149,6 +153,9 @@ _Static_assert(__builtin_offsetof(struct sb_tc_control, listener_port) == 16,
     "sb_tc_control listener_port ABI offset");
 _Static_assert(__builtin_offsetof(struct sb_tc_control, fakeip_ipv6_mask) == 54,
     "sb_tc_control fakeip_ipv6_mask ABI offset");
+_Static_assert(__builtin_offsetof(struct sb_tc_control, self_bypass_mark) == 72, "TC self bypass mark ABI");
+_Static_assert(__builtin_offsetof(struct sb_tc_control, network_generation) == 80, "TC network generation ABI");
+_Static_assert(__builtin_offsetof(struct sb_tc_assign_value, network_generation) == 20, "TC assignment network generation ABI");
 _Static_assert(sizeof(struct sb_tc_assign_key) == 44, "sb_tc_assign_key ABI size");
 _Static_assert(sizeof(struct sb_tc_assign_value) == 24, "sb_tc_assign_value ABI size");
 _Static_assert(__builtin_offsetof(struct sb_tc_assign_value, socket_cookie) == 0,
@@ -660,14 +667,16 @@ NOINLINE int assign_socket(struct __sk_buff *skb, const struct sb_tc_control *co
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
     struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 &&
+            existing->network_generation == control->network_generation ? existing->socket_cookie : 0U,
+        .network_generation = control->network_generation,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex ||
+        existing->ifindex != value.ifindex || existing->network_generation != value.network_generation ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
@@ -701,14 +710,16 @@ NOINLINE int assign_socket_legacy(struct __sk_buff *skb, const struct sb_tc_cont
         assignment_key.interface_index = skb->ifindex;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
     struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 &&
+            existing->network_generation == control->network_generation ? existing->socket_cookie : 0U,
+        .network_generation = control->network_generation,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex ||
+        existing->ifindex != value.ifindex || existing->network_generation != value.network_generation ||
         existing->path != value.path || existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
@@ -739,14 +750,16 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
     assignment_key.interface_index = path == SB_TC_PATH_SHARED ? skb->ifindex : 0U;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, &assignment_key);
     struct sb_tc_assign_value value = {
-        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 ? existing->socket_cookie : 0U,
+        .socket_cookie = path == SB_TC_PATH_DELIVERY && existing != 0 &&
+            existing->network_generation == control->network_generation ? existing->socket_cookie : 0U,
+        .network_generation = control->network_generation,
         .ifindex = skb->ifindex,
         .path = path,
         .source_mac_valid = source_mac_valid,
     };
     __builtin_memcpy(value.source_mac, source_mac, 6U);
     bool assignment_changed = existing == 0 || existing->socket_cookie != value.socket_cookie ||
-        existing->ifindex != value.ifindex || existing->path != value.path ||
+        existing->ifindex != value.ifindex || existing->network_generation != value.network_generation || existing->path != value.path ||
         existing->source_mac_valid != value.source_mac_valid;
     if (!assignment_changed && source_mac_valid) assignment_changed = !source_mac_equal(existing->source_mac, value.source_mac);
     if (assignment_changed && map_update(&tc_assignment, &assignment_key, &value, BPF_ANY) != 0) {
@@ -764,11 +777,16 @@ NOINLINE int assign_udp_socket(struct __sk_buff *skb, const struct sb_tc_control
     return TC_ACT_OK;
 }
 
-INLINE void record_local_socket_cookie(const struct sb_tc_assign_key *key, __u64 socket_cookie) {
+INLINE void record_local_socket_cookie(const struct sb_tc_control *control,
+    const struct sb_tc_assign_key *key, __u64 socket_cookie) {
     if (socket_cookie == 0U) return;
     struct sb_tc_assign_value *existing = map_lookup(&tc_assignment, key);
-    if (existing != 0 && existing->socket_cookie == socket_cookie) return;
-    struct sb_tc_assign_value value = {.socket_cookie = socket_cookie};
+    if (existing != 0 && existing->socket_cookie == socket_cookie &&
+        existing->network_generation == control->network_generation) return;
+    struct sb_tc_assign_value value = {
+        .socket_cookie = socket_cookie,
+        .network_generation = control->network_generation,
+    };
     map_update(&tc_assignment, key, &value, BPF_ANY);
 }
 
@@ -798,6 +816,11 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     const struct sb_tc_control *control = load_control();
     if (control == 0 || control->enabled == 0U || control->delivery_ifindex == 0U) return TC_ACT_UNSPEC;
     if (skb->ingress_ifindex != 0U) return TC_ACT_UNSPEC;
+    // Fast bypass when the socket mark matches this process. Cookie lookup is
+    // still the fallback when marking is unavailable or an OEM resets it.
+    if (control->self_bypass_mark_mask != 0U &&
+        (skb->mark & control->self_bypass_mark_mask) == control->self_bypass_mark)
+        return TC_ACT_UNSPEC;
     __u64 socket_cookie = get_socket_cookie(skb);
     __u32 socket_metadata_value = socket_metadata(socket_cookie);
     if ((socket_metadata_value & SB_EBPF_SOCKET_METADATA_SELF_BYPASS) != 0U) return TC_ACT_UNSPEC;
@@ -805,7 +828,7 @@ INLINE int local_egress_mark(struct __sk_buff *skb, bool ethernet, bool track_pr
     __u8 source_mac[6];
     if (!parse_flow(skb, control, SB_TC_FLAG_LOCAL_IPV6, ethernet, &key, source_mac)) return TC_ACT_UNSPEC;
     if (!local_selected(skb, control, &key, socket_metadata_value)) return TC_ACT_UNSPEC;
-    if (track_process) record_local_socket_cookie(&key, socket_cookie);
+    if (track_process) record_local_socket_cookie(control, &key, socket_cookie);
     return redirect_local(skb, control, ethernet);
 }
 

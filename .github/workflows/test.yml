@@ -7,12 +7,14 @@ on:
       - ".github/ISSUE_TEMPLATE/**"
     branches:
       - Alpha
+      - main
       - 'sync/**'
     tags:
       - "v*"
   pull_request:
     branches:
       - Alpha
+      - main
 
 concurrency:
   group: test-${{ github.ref }}
@@ -56,7 +58,6 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
-          go-download-base-url: 'https://github.com/MetaCubeX/go/releases/download/build'
           go-version: ${{ matrix.go-version }}
 
       - name: Verify Go installation
@@ -64,6 +65,9 @@ jobs:
 
       - name: Verify Go env
         run: go env
+
+      - name: Apply verified P0 WireGuard IPv6 receiver overlays
+        run: node tools/prepare-wireguard-p0-overlay.mjs
 
       - name: Remove inbound test for macOS
         if: ${{ runner.os == 'macOS' }}

@@ -18,6 +18,7 @@ import (
 	"github.com/metacubex/mihomo/common/atomic"
 	ECommon "github.com/metacubex/mihomo/common/ebpf"
 	"github.com/metacubex/mihomo/component/dialer"
+	"github.com/metacubex/mihomo/component/netstate"
 	"github.com/metacubex/mihomo/component/resolver"
 	C "github.com/metacubex/mihomo/constant"
 	P "github.com/metacubex/mihomo/constant/provider"
@@ -99,9 +100,10 @@ type Inbound struct {
 	// data plane may be building a backend from the snapshot.
 	policyAccess sync.RWMutex
 
-	selfBypass       *ECommon.SelfBypass
-	selfBypassCgroup bool
-	processTracker   *ECommon.ProcessTracker
+	selfBypass        *ECommon.SelfBypass
+	selfBypassCloseMu sync.Mutex
+	selfBypassCgroup  bool
+	processTracker    *ECommon.ProcessTracker
 
 	listeners         internalListenerSet
 	udpClientTable    udpClientTable
@@ -151,6 +153,7 @@ type Inbound struct {
 	dnsBypassSet       *netipx.IPSet
 
 	protectRegistered bool
+	unregisterProtect func()
 
 	closeOnce sync.Once
 }
@@ -368,6 +371,11 @@ func New(ctx context.Context, options LC.EBPF, tunnel C.Tunnel, additions ...inb
 	inbound.bypassRuleSetTags = slices.Clone(options.BypassRuleSet)
 	inbound.udpTimeout.Store(int64(resolveUDPTimeout(options.UDPTimeout)))
 	if err := inbound.compilePolicy(); err != nil {
+		// The map was created before policy compilation. Do not leak it if
+		// rule/provider validation fails before any data plane is attached.
+		if inbound.selfBypass != nil {
+			_ = inbound.selfBypass.Close()
+		}
 		return nil, err
 	}
 	if err := inbound.start(); err != nil {
@@ -455,8 +463,20 @@ func (i *Inbound) start() error {
 		}
 	}
 	if i.selfBypass != nil {
-		dialer.RegisterSocketProtectFunc(func(_ context.Context, network, address string, rawConn syscall.RawConn) error {
-			return i.selfBypass.RegisterSocket(rawConn)
+		// Capture the owner, not the mutable inbound field, so concurrent
+		// shutdown cannot turn a previously copied callback into a nil deref.
+		bypassOwner := i.selfBypass
+		i.unregisterProtect = dialer.RegisterSocketProtectOwner(func(ctx context.Context, network, address string, rawConn syscall.RawConn) error {
+			cookie, err := bypassOwner.RegisterSocketWithCookie(rawConn)
+			if err != nil {
+				return err
+			}
+			if cookie != 0 {
+				dialer.RegisterSocketProtectRollback(ctx, func() {
+					bypassOwner.UnregisterSocketCookie(cookie)
+				})
+			}
+			return nil
 		})
 		i.protectRegistered = true
 	}
@@ -511,20 +531,26 @@ func (i *Inbound) start() error {
 	var dataPlane *tcDataPlane
 	if localTCEnabled || sharedSocketAssignEnabled {
 		backendConfig := ECommon.TCConfig{
-			ListenerPort:     i.listeners.selectedPort(),
-			EnableLocal:      localTCEnabled,
-			EnableShared:     sharedSocketAssignEnabled,
-			EnableIPv4:       true,
-			EnableLocalIPv6:  i.localIPv6,
-			EnableSharedIPv6: i.sharedIPv6,
-			EnableTCP:        i.enableTCP,
-			EnableUDP:        i.enableUDP,
-			Policy:           i.policySnapshot(),
-			TrackProcess:     i.processTracker != nil,
-			FakeIPICMPReply:  i.fakeIPICMPReply,
+			ListenerPort:      i.listeners.selectedPort(),
+			EnableLocal:       localTCEnabled,
+			EnableShared:      sharedSocketAssignEnabled,
+			EnableIPv4:        true,
+			EnableLocalIPv6:   i.localIPv6,
+			EnableSharedIPv6:  i.sharedIPv6,
+			EnableTCP:         i.enableTCP,
+			EnableUDP:         i.enableUDP,
+			Policy:            i.policySnapshot(),
+			TrackProcess:      i.processTracker != nil,
+			NetworkGeneration: uint32(netstate.CurrentEpoch() & 0x7fffffff),
+			FakeIPICMPReply:   i.fakeIPICMPReply,
 		}
 		if i.selfBypass != nil {
 			backendConfig.SelfBypassMap = i.selfBypass.Map()
+			mark, mask, enabled := i.selfBypass.SocketMarkConfig()
+			if enabled {
+				backendConfig.SelfBypassMark = mark
+				backendConfig.SelfBypassMask = mask
+			}
 		}
 		var err error
 		backend, err = ECommon.PrepareTC(backendConfig)
@@ -541,8 +567,13 @@ func (i *Inbound) start() error {
 		if err != nil {
 			return err
 		}
-		if err = i.listeners.registerTCTCPListeners(backend); err != nil {
-			return E.Errors(err, backend.Close())
+		backend, err = registerTCTCPListenersOrDirect(
+			backend,
+			i.listeners.registerTCTCPListeners,
+			func() (*ECommon.TCBackend, error) { return ECommon.PrepareTCDirectTCP(backendConfig) },
+		)
+		if err != nil {
+			return err
 		}
 		tcIPv6Enabled := localTCEnabled && i.localIPv6 || sharedSocketAssignEnabled && i.sharedIPv6
 		dataPlane, err = startTCDataPlane(
@@ -821,7 +852,10 @@ func (i *Inbound) Close() error {
 		i.stopDatapathReporter()
 		i.stopDNSRelays()
 		if i.protectRegistered {
-			dialer.UnregisterSocketProtectFunc()
+			if i.unregisterProtect != nil {
+				i.unregisterProtect()
+				i.unregisterProtect = nil
+			}
 			i.protectRegistered = false
 		}
 		i.stopFakeIPTracking()
@@ -854,14 +888,25 @@ func (i *Inbound) Close() error {
 			processTrackerErr = i.processTracker.Close()
 			i.processTracker = nil
 		}
-		var selfBypassErr error
-		if i.selfBypass != nil {
-			selfBypassErr = i.selfBypass.Close()
-			i.selfBypass = nil
-		}
-		closeErr = E.Errors(monitorErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr, selfBypassErr)
+		closeErr = E.Errors(monitorErr, sharedRewriteErr, disableErr, listenerErr, udpReplySocketErr, dataPlaneErr, cgroupErr, routeErr, processTrackerErr)
 	})
-	return closeErr
+	// A failed kernel detach cannot release the self-bypass map or program
+	// handles. Keep the owner and retry its detach on subsequent Close calls;
+	// closeOnce still protects the rest of the shutdown from running twice.
+	return E.Errors(closeErr, i.closeSelfBypass())
+}
+
+func (i *Inbound) closeSelfBypass() error {
+	i.selfBypassCloseMu.Lock()
+	defer i.selfBypassCloseMu.Unlock()
+	if i.selfBypass == nil {
+		return nil
+	}
+	if err := i.selfBypass.Close(); err != nil {
+		return err
+	}
+	i.selfBypass = nil
+	return nil
 }
 
 func (i *Inbound) Address() string {
