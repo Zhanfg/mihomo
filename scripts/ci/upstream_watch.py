@@ -208,6 +208,7 @@ def watch(gh, sources, do_dispatch=True):
     ensure_state_branch(gh)
     state, blob_sha = read_state(gh)
     initial = state is None
+    old_heads = dict(state["heads"]) if state else {}
     if initial:
         state = {"version": 1, "heads": {}, "history": [], "pending_ci": False}
     changed = []
@@ -223,10 +224,8 @@ def watch(gh, sources, do_dispatch=True):
         "version": 1, "heads": heads, "history": (state["history"] + changed)[-30:],
         "pending_ci": pending, "last_changed": observed_at if changed else state.get("last_changed"),
     }
-    if initial or changed or pending or state["heads"] != (read_state_cache := heads if initial else old_heads):
-        pass
     # Save only real changes; no commit every five minutes.
-    if initial or changed or pending or state["heads"] != (old_heads if not initial else {}):
+    if initial or changed or pending or heads != old_heads:
         blob_sha = save_state(gh, state, blob_sha)
     summary = report(sources, changed, heads, gh.repo)
     if changed:
