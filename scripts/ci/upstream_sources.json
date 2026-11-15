@@ -1,0 +1,71 @@
+[
+  {
+    "name": "official-alpha",
+    "repo": "MetaCubeX/mihomo",
+    "kind": "branch",
+    "ref": "Alpha",
+    "priority": "critical"
+  },
+  {
+    "name": "official-main",
+    "repo": "MetaCubeX/mihomo",
+    "kind": "branch",
+    "ref": "main",
+    "priority": "high"
+  },
+  {
+    "name": "official-release",
+    "repo": "MetaCubeX/mihomo",
+    "kind": "release",
+    "priority": "critical"
+  },
+  {
+    "name": "smart-liuran",
+    "repo": "liuran001/mihomo",
+    "kind": "branch",
+    "ref": "Alpha",
+    "priority": "high"
+  },
+  {
+    "name": "smart-vernesong",
+    "repo": "vernesong/mihomo",
+    "kind": "branch",
+    "ref": "Alpha",
+    "priority": "high"
+  },
+  {
+    "name": "tun-metacubex",
+    "repo": "MetaCubeX/sing-tun",
+    "kind": "branch",
+    "ref": "meta",
+    "priority": "high"
+  },
+  {
+    "name": "tun-sagernet",
+    "repo": "SagerNet/sing-tun",
+    "kind": "branch",
+    "ref": "dev",
+    "priority": "watch"
+  },
+  {
+    "name": "ebpf-cilium",
+    "repo": "cilium/ebpf",
+    "kind": "branch",
+    "ref": "main",
+    "priority": "watch"
+  },
+  {
+    "name": "chizi-sing-ebpf",
+    "repo": "CHIZI-0618/sing-ebpf",
+    "kind": "branch",
+    "ref": "dev",
+    "priority": "critical"
+  },
+  {
+    "name": "chizi-sing-box",
+    "repo": "CHIZI-0618/sing-box",
+    "kind": "branch",
+    "ref": "ebpf-inbound",
+    "priority": "high"
+  }
+]
