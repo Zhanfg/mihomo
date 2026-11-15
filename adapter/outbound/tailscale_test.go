@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	C "github.com/metacubex/mihomo/constant"
+
 	"github.com/metacubex/tailscale/ipn"
 	"github.com/metacubex/tailscale/tsnet"
 )
@@ -331,5 +333,25 @@ func TestTailscaleExitNodeRetryCannotMutateReplacedServer(t *testing.T) {
 	}
 	if tailscale.backendReady.Load() {
 		t.Fatal("stale exit-node retry marked replacement generation ready")
+	}
+}
+
+func TestTailscaleEagerStartSkippedDuringConfigCheck(t *testing.T) {
+	routes := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/24")}
+	serve := []tailscaleServeTarget{{port: 80, network: "tcp", address: "127.0.0.1:9099"}}
+	t.Cleanup(func() { C.SetConfigCheck(false) })
+
+	if tailscaleEagerStart(nil, nil) {
+		t.Fatal("unconfigured Tailscale Serve must not start a backend")
+	}
+	if !tailscaleEagerStart(routes, nil) {
+		t.Fatal("advertised routes should start the backend eagerly")
+	}
+	if !tailscaleEagerStart(nil, serve) {
+		t.Fatal("explicit Serve targets should start the backend eagerly")
+	}
+	C.SetConfigCheck(true)
+	if tailscaleEagerStart(routes, nil) || tailscaleEagerStart(nil, serve) {
+		t.Fatal("configuration check must not start the backend eagerly")
 	}
 }

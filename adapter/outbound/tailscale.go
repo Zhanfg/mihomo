@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"runtime"
 	"strings"
@@ -83,6 +84,8 @@ type Tailscale struct {
 	advertisedRoutes []netip.Prefix
 	udpFlows         chan struct{}
 	inboundTunnel    C.Tunnel
+	serveTargets     []tailscaleServeTarget
+	serveServers     []*http.Server
 
 	unregisterDNSResolver func()
 }
@@ -127,6 +130,7 @@ type TailscaleOption struct {
 	ExitNodeAllowLANAccess *bool    `proxy:"exit-node-allow-lan-access,omitempty"`
 	AdvertiseRoutes        []string `proxy:"advertise-routes,omitempty"`
 	AdvertiseExitNode      bool     `proxy:"advertise-exit-node,omitempty"`
+	Serve                  []TailscaleServeOption `proxy:"serve,omitempty"`
 }
 
 // parseAdvertiseRoutes builds the AdvertiseRoutes prefix list from the
@@ -203,6 +207,10 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 	if _, err := buildTailscaleMaskedPrefs(option); err != nil {
 		return nil, err
 	}
+	serveTargets, err := parseTailscaleServe(option.Serve)
+	if err != nil {
+		return nil, err
+	}
 	if option.StateDir == "" {
 		option.StateDir = "tailscale"
 	}
@@ -232,6 +240,7 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		cancel:           cancel,
 		backendInitGate:  newTailscaleBackendInitGate(),
 		advertisedRoutes: advertisedRoutes,
+		serveTargets:     serveTargets,
 		udpFlows:         make(chan struct{}, 1024),
 	}
 	outbound.dialer = option.NewDialer(outbound.DialOptions())
@@ -306,15 +315,27 @@ func NewTailscale(option TailscaleOption) (*Tailscale, error) {
 		} else {
 			log.Warnln("[Tailscale](%s) advertise-routes configured but no tunnel available; inbound flows will be rejected", option.Name)
 		}
-		// Advertised routes mean this node serves the tailnet (subnet router
-		// or exit node), so bring the backend up eagerly instead of waiting
-		// for the first locally-routed connection. Do this in the background:
-		// tsnet startup may need to wait for state files, control-plane reachability,
-		// or Android's network to come out of Doze. A transient failure must not
-		// prevent the rest of the configuration (and VPN) from starting.
-		go outbound.startWithRetry()
+	}
+	// Advertised routes and explicitly configured Serve targets require a
+	// background tsnet instance. An unconfigured Serve must not start one.
+	if tailscaleServesTailnet(advertisedRoutes, serveTargets) {
+		if tailscaleEagerStart(advertisedRoutes, serveTargets) {
+			go outbound.startWithRetry()
+		} else {
+			log.Debugln("[Tailscale](%s) configuration check: skip eager backend start", option.Name)
+		}
 	}
 	return outbound, nil
+}
+
+func tailscaleServesTailnet(advertisedRoutes []netip.Prefix, serveTargets []tailscaleServeTarget) bool {
+	return len(advertisedRoutes) > 0 || len(serveTargets) > 0
+}
+
+// tailscaleEagerStart avoids starting a second tsnet instance while mihomo -t
+// validates configuration against the same persistent state directory.
+func tailscaleEagerStart(advertisedRoutes []netip.Prefix, serveTargets []tailscaleServeTarget) bool {
+	return tailscaleServesTailnet(advertisedRoutes, serveTargets) && !C.ConfigCheck()
 }
 
 func (t *Tailscale) start() error {
@@ -411,6 +432,7 @@ func (t *Tailscale) startLocked() error {
 		return t.startErr
 	}
 	t.startErr = nil
+	t.startServeLocked(server)
 	go t.watchBackendStateFor(server, generation, gate)
 	return nil
 }
@@ -420,6 +442,7 @@ func (t *Tailscale) closeStartedServer() error {
 		return nil
 	}
 	server := t.server
+	t.closeServeLocked()
 	// Retire the instance before attempting Close. A Close error must not make
 	// a tsnet.Server look reusable: Start is one-shot on that object.
 	t.serverStarted.Store(false)

@@ -29,6 +29,9 @@ func (t *Tailscale) TailscaleStatus(ctx context.Context) map[string]any {
 		"authKey":   t.option.AuthKey != "",
 		"ephemeral": t.option.Ephemeral,
 	}
+	if len(t.option.Serve) != 0 {
+		out["serve"] = t.serveSummary()
+	}
 	if started {
 		out["state"] = state.String()
 	} else {
@@ -149,3 +152,16 @@ func (t *Tailscale) TailscaleLogout(ctx context.Context) error {
 	return lc.Logout(ctx)
 }
 
+
+// serveSummary reports configured Serve targets without exposing Tailscale
+// authentication material. Serve has no per-target credential field.
+func (t *Tailscale) serveSummary() []map[string]any {
+	list := make([]map[string]any, 0, len(t.option.Serve))
+	for _, service := range t.option.Serve {
+		list = append(list, map[string]any{
+			"port":   service.Port,
+			"target": service.Target,
+		})
+	}
+	return list
+}
