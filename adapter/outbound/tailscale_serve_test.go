@@ -5,12 +5,14 @@ package outbound
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	C "github.com/metacubex/mihomo/constant"
@@ -135,3 +137,31 @@ func TestTailscaleServeHandlerUnixTarget(t *testing.T) {
 }
 
 func mustServeOrigin() *url.URL { return &url.URL{Scheme: "http", Host: "tailscale-serve"} }
+
+func TestTailscaleStatusServeMetadataDoesNotExposeAuthKey(t *testing.T) {
+	const authKey = "tskey-secret-must-not-appear"
+	tailscale := &Tailscale{
+		Base: NewBase(BaseOption{Name: "serve-test", Type: C.Tailscale}),
+		option: TailscaleOption{
+			Name:    "serve-test",
+			AuthKey: authKey,
+			Serve: []TailscaleServeOption{
+				{Port: 8443, Target: "unix:run/webui.sock"},
+			},
+		},
+	}
+	status := tailscale.TailscaleStatus(context.Background())
+	if configured, ok := status["authKey"].(bool); !ok || !configured {
+		t.Fatalf("authKey must report presence only: %#v", status["authKey"])
+	}
+	if _, ok := status["auth-key"]; ok {
+		t.Fatal("raw auth key field must not be exposed")
+	}
+	serve, ok := status["serve"].([]map[string]any)
+	if !ok || len(serve) != 1 || serve[0]["port"] != uint16(8443) || serve[0]["target"] != "unix:run/webui.sock" {
+		t.Fatalf("unexpected Serve metadata: %#v", status["serve"])
+	}
+	if strings.Contains(fmt.Sprint(status), authKey) {
+		t.Fatal("status leaked the configured authentication key")
+	}
+}
