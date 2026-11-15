@@ -34,3 +34,22 @@ func TestNativeFakeIPHostPrecedenceContract(t *testing.T) {
         if !strings.Contains(string(sh), required) { t.Fatal("shared mandatory safety bypass missing: ", required) }
     }
 }
+
+func TestNativeFakeIPHostPriorityMatchesTC(t *testing.T) {
+    tc, err := os.ReadFile("native/tc.bpf.c")
+    if err != nil { t.Fatal(err) }
+    for _, function := range []string{"local_selected", "shared_selected"} {
+        prefix := "INLINE bool " + function + "("
+        start := strings.Index(string(tc), prefix)
+        if start < 0 { t.Fatalf("TC %s missing", function) }
+        tail := string(tc)[start:]
+        end := strings.Index(tail, "\n}\n")
+        if end < 0 { t.Fatalf("TC %s missing closing brace", function) }
+        body := tail[:end]
+        fake := strings.Index(body, "must_intercept_fakeip(control, key)")
+        host := strings.Index(body, "host_destination(control, key)")
+        if fake < 0 || host < 0 || fake > host {
+            t.Fatalf("TC %s Fake-IP must precede HOST bypass: fake=%d host=%d", function, fake, host)
+        }
+    }
+}
