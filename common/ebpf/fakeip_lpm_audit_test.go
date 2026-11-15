@@ -65,3 +65,18 @@ func TestFakeIPLPMBypassPolicyIndependentOfFakeIPPrefix(t *testing.T) {
         t.Fatalf("Fake-IP compiled prefix changed unexpectedly: got %s want %s", policy.fakeIPIPv4, want)
     }
 }
+
+func TestFakeIPLPMMaskBoundaryLengths(t *testing.T) {
+    if got := prefixMask4(0); got != ([4]byte{}) {
+        t.Fatalf("IPv4 /0 mask = %v, want all zero", got)
+    }
+    if got := prefixMask4(32); got != ([4]byte{255,255,255,255}) {
+        t.Fatalf("IPv4 /32 mask = %v, want all ones", got)
+    }
+    if got := prefixMask16(0); got != ([16]byte{}) {
+        t.Fatalf("IPv6 /0 mask = %v, want all zero", got)
+    }
+    if got := prefixMask16(128); got != ([16]byte{255,255,255,255,255,255,255,255,255,255,255,255,255,255,255,255}) {
+        t.Fatalf("IPv6 /128 mask = %v, want all ones", got)
+    }
+}
