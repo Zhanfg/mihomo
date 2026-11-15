@@ -173,6 +173,8 @@ func main() {
 	}
 
 	if testConfig {
+		// Parsing only: do not start background Tailscale nodes against the live state directory.
+		C.SetConfigCheck(true)
 		if len(configBytes) != 0 {
 			if _, err := executor.ParseWithBytes(configBytes); err != nil {
 				log.Errorln("%s", err.Error())
