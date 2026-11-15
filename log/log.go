@@ -3,6 +3,7 @@ package log
 import (
 	"fmt"
 	"os"
+	"sync"
 	"sync/atomic"
 
 	"github.com/metacubex/mihomo/common/observable"
@@ -11,13 +12,17 @@ import (
 )
 
 var (
-	logCh  = make(chan Event)
-	source = observable.NewObservable[Event](logCh)
-	level  atomic.Int32
+	logCh             = make(chan Event)
+	source            = observable.NewLossyObservable[Event](logCh)
+	level             atomic.Int32
+	subscriberLevel   atomic.Int32
+	subscriberAccess  sync.Mutex
+	subscriberLevels  = make(map[observable.Subscription[Event]]LogLevel)
 )
 
 func init() {
 	level.Store(int32(INFO))
+	subscriberLevel.Store(int32(SILENT + 1))
 	log.SetOutput(os.Stdout)
 	log.SetLevel(log.DebugLevel)
 	log.SetFormatter(&log.TextFormatter{
@@ -38,20 +43,17 @@ func (e *Event) Type() string {
 
 func Infoln(format string, v ...any) {
 	event := newLog(INFO, format, v...)
-	logCh <- event
-	print(event)
+	publish(event)
 }
 
 func Warnln(format string, v ...any) {
 	event := newLog(WARNING, format, v...)
-	logCh <- event
-	print(event)
+	publish(event)
 }
 
 func Errorln(format string, v ...any) {
 	event := newLog(ERROR, format, v...)
-	logCh <- event
-	print(event)
+	publish(event)
 }
 
 func Debugln(format string, v ...any) {
@@ -64,8 +66,7 @@ func Debugln(format string, v ...any) {
 		return
 	}
 	event := newLog(DEBUG, format, v...)
-	logCh <- event
-	print(event)
+	publish(event)
 }
 
 func Fatalln(format string, v ...any) {
@@ -73,12 +74,48 @@ func Fatalln(format string, v ...any) {
 }
 
 func Subscribe() observable.Subscription[Event] {
+	return SubscribeLevel(DEBUG)
+}
+
+func SubscribeLevel(minimum LogLevel) observable.Subscription[Event] {
+	subscriberAccess.Lock()
+	defer subscriberAccess.Unlock()
 	sub, _ := source.Subscribe()
+	if sub != nil {
+		subscriberLevels[sub] = minimum
+		updateSubscriberLevel()
+	}
 	return sub
 }
 
 func UnSubscribe(sub observable.Subscription[Event]) {
+	subscriberAccess.Lock()
+	defer subscriberAccess.Unlock()
+	delete(subscriberLevels, sub)
+	updateSubscriberLevel()
 	source.UnSubscribe(sub)
+}
+
+func updateSubscriberLevel() {
+	minimum := SILENT + 1
+	for _, threshold := range subscriberLevels {
+		if threshold < minimum {
+			minimum = threshold
+		}
+	}
+	subscriberLevel.Store(int32(minimum))
+}
+
+func publish(event Event) {
+	if event.LogLevel >= LogLevel(subscriberLevel.Load()) {
+		logCh <- event
+	}
+	print(event)
+}
+
+// Enabled avoids optional event formatting when no printer or dashboard needs it.
+func Enabled(logLevel LogLevel) bool {
+	return Level() <= logLevel || LogLevel(subscriberLevel.Load()) <= logLevel
 }
 
 func Level() LogLevel {
@@ -93,7 +130,7 @@ func SetLevel(newLevel LogLevel) {
 // a live log subscriber. Callers can use it to defer expensive debug-only
 // formatting without changing the observable log stream.
 func DebugEnabled() bool {
-	return Level() <= DEBUG || source.HasSubscribers()
+	return Enabled(DEBUG)
 }
 
 func print(data Event) {

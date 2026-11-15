@@ -8,6 +8,7 @@ on:
       - integration/boxproxy-native-ebpf
       - 'fix/smart-*'
       - 'sync/p0-*'
+      - 'sync/p1-*'
     paths:
       - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - ".github/fixtures/boxproxy-ebpf-listener.yaml"
@@ -31,6 +32,19 @@ on:
       - "component/netchange/**"
       - "component/keepalive/**"
       - "component/dialer/**"
+      - "adapter/outbound/**"
+      - "adapter/outboundgroup/**"
+      - "listener/inbound/**"
+      - "listener/snell/**"
+      - "listener/sing_shadowsocks/**"
+      - "transport/snell/**"
+      - "tools/apply-sing-tun-p1-gro.mjs"
+      - "log/**"
+      - "common/observable/**"
+      - "hub/route/**"
+      - "component/geodata/**"
+      - "go.mod"
+      - "go.sum"
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
@@ -74,6 +88,9 @@ jobs:
 
       - name: Apply verified P0 WireGuard IPv6 receiver overlays
         run: node tools/prepare-wireguard-p0-overlay.mjs
+
+      - name: Backport pinned sing-tun single-packet GRO optimization
+        run: node tools/apply-sing-tun-p1-gro.mjs
 
       - name: IP-family capability regressions
         shell: bash

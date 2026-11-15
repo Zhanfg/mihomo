@@ -16,10 +16,17 @@ import (
 func connectionRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getConnections)
+	r.Get("/summary", getConnectionSummary)
 	r.Delete("/", closeAllConnections)
 	r.Delete("/{id}", closeConnection)
 	r.Delete("/smart/{id}", setSmartBlock)
 	return r
+}
+
+// Cheap dashboard polling path: no per-connection metadata snapshots,
+// chain iteration or JSON materialization for each status refresh.
+func getConnectionSummary(w http.ResponseWriter, r *http.Request) {
+	render.JSON(w, r, statistic.DefaultManager.Summary())
 }
 
 func getConnections(w http.ResponseWriter, r *http.Request) {

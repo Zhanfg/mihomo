@@ -47,11 +47,50 @@ type Manager struct {
 	rateWake    chan struct{}
 	trafficWake chan struct{}
 	rateActive  atomic.Bool
+
+	// Write callbacks only take the lock when the stalled sweep is sleeping.
+	uploadArmed atomic.Bool
+	uploadWaitMu sync.Mutex
+	uploadWait chan struct{}
 }
 
 func (m *Manager) Join(c Tracker) {
 	m.connections.Store(c.ID(), c)
 	m.joinSmartTarget(c)
+	if c.Info().LastUpload.Load() != 0 {
+		m.signalUpload()
+	}
+}
+
+// UploadSignal is closed by the next positive upload. The sweep must arm it
+// before it scans tracked sockets, so an upload cannot be lost between checks.
+func (m *Manager) UploadSignal() <-chan struct{} {
+	m.uploadWaitMu.Lock()
+	defer m.uploadWaitMu.Unlock()
+	if m.uploadWait == nil {
+		m.uploadWait = make(chan struct{})
+		m.uploadArmed.Store(true)
+	}
+	return m.uploadWait
+}
+
+func (m *Manager) noteUpload(stamp *atomic.Int64, n int64) {
+	noteTraffic(stamp, n)
+	if n > 0 {
+		m.signalUpload()
+	}
+}
+
+func (m *Manager) signalUpload() {
+	if !m.uploadArmed.Load() {
+		return
+	}
+	m.uploadWaitMu.Lock()
+	if m.uploadArmed.CompareAndSwap(true, false) {
+		close(m.uploadWait)
+		m.uploadWait = nil
+	}
+	m.uploadWaitMu.Unlock()
 }
 
 func (m *Manager) Leave(c Tracker) {
@@ -209,6 +248,24 @@ func (m *Manager) Snapshot() *Snapshot {
 		DownloadTotal: m.downloadTotal.Load(),
 		Connections:   connections,
 		Memory:        m.memory,
+	}
+}
+
+// TrafficSummary is intentionally independent of individual live tracker
+// details. A dashboard can poll it without copying all connection metadata.
+type TrafficSummary struct {
+	DownloadTotal   int64  `json:"downloadTotal"`
+	UploadTotal     int64  `json:"uploadTotal"`
+	ConnectionCount int    `json:"connectionCount"`
+	Memory          uint64 `json:"memory"`
+}
+
+func (m *Manager) Summary() TrafficSummary {
+	return TrafficSummary{
+		DownloadTotal: m.downloadTotal.Load(),
+		UploadTotal: m.uploadTotal.Load(),
+		ConnectionCount: m.connections.Size(),
+		Memory: m.Memory(),
 	}
 }
 

@@ -75,6 +75,13 @@ func (t *TrackerInfo) AwaitingReply(now time.Time, d time.Duration) bool {
 	return now.UnixNano()-sent >= int64(d)
 }
 
+// ReplyPending is true only when this socket has sent data without receiving
+// a later reply. Passive downloads and idle sockets cannot require a sweep.
+func (t *TrackerInfo) ReplyPending() bool {
+	sent := t.LastUpload.Load()
+	return sent != 0 && t.LastDownload.Load() < sent
+}
+
 func noteTraffic(stamp *atomic.Int64, n int64) {
 	if n > 0 {
 		stamp.Store(time.Now().UnixNano())
@@ -160,7 +167,7 @@ func (tt *tcpTracker) Write(b []byte) (int, error) {
 		tt.manager.PushUploaded(upload)
 	}
 	tt.UploadTotal.Add(upload)
-	noteTraffic(&tt.LastUpload, upload)
+	tt.manager.noteUpload(&tt.LastUpload, upload)
 	tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
 	return n, err
 }
@@ -172,7 +179,7 @@ func (tt *tcpTracker) WriteBuffer(buffer *buf.Buffer) (err error) {
 		tt.manager.PushUploaded(upload)
 	}
 	tt.UploadTotal.Add(upload)
-	noteTraffic(&tt.LastUpload, upload)
+	tt.manager.noteUpload(&tt.LastUpload, upload)
 	tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
 	return
 }
@@ -183,7 +190,7 @@ func (tt *tcpTracker) UnwrapWriter() (io.Writer, []N.CountFunc) {
 			tt.manager.PushUploaded(upload)
 		}
 		tt.UploadTotal.Add(upload)
-		noteTraffic(&tt.LastUpload, upload)
+		tt.manager.noteUpload(&tt.LastUpload, upload)
 		tt.TrackerInfo.MaxUploadRate.Store(tt.uploadBucketWindow.updateMaxRate(upload))
 	}}
 }
@@ -336,7 +343,7 @@ func (ut *udpTracker) WriteTo(b []byte, addr net.Addr) (int, error) {
 		ut.manager.PushUploaded(upload)
 	}
 	ut.UploadTotal.Add(upload)
-	noteTraffic(&ut.LastUpload, upload)
+	ut.manager.noteUpload(&ut.LastUpload, upload)
 	ut.TrackerInfo.MaxUploadRate.Store(ut.uploadBucketWindow.updateMaxRate(upload))
 	return n, err
 }
