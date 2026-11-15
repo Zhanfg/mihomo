@@ -28,7 +28,9 @@ func (t *Tailscale) TailscaleStatus(ctx context.Context) map[string]any {
 		"hostname":  t.option.Hostname,
 		"authKey":   t.option.AuthKey != "",
 		"ephemeral": t.option.Ephemeral,
-		"serve":     t.serveSummary(),
+	}
+	if len(t.option.Serve) != 0 {
+		out["serve"] = t.serveSummary()
 	}
 	if started {
 		out["state"] = state.String()
