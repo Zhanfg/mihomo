@@ -89,6 +89,9 @@ func DecryptBytes(data []byte, secretKeys ...string) ([]byte, error) {
 	}
 	var identities []age.Identity
 	for _, secretKey := range secretKeys {
+		if secretKey == "" { // a provider without a local key should use global identities
+			continue
+		}
 		identity, err := parseIdentities(secretKey)
 		if err != nil {
 			return nil, err
