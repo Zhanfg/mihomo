@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "heads": {
+    "official-alpha": "3c0d10a503f7b2fde3fe167d4d91dd05725d5268",
+    "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
+    "official-release": "v1.19.34",
+    "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
+    "smart-vernesong": "c4df732a2c00731ea1a7c414500d161f5810f20e",
+    "tun-metacubex": "ef2c0409a4db84554e1551be7da9eb960406ad64",
+    "tun-sagernet": "40bd6cff5647927af8db349bef9869809960a034",
+    "ebpf-cilium": "6951718af7885e1aeaf98624960ca88c86112303",
+    "chizi-sing-ebpf": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
+    "chizi-sing-box": "e74cfa228dfe3a9d9c80c3d39d1c109608bc1072"
+  },
+  "history": [],
+  "pending_ci": false,
+  "last_changed": null
+}
