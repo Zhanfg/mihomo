@@ -1,0 +1,47 @@
+name: P3 Windows i386 memory ABI compile
+
+on:
+  push:
+    branches: [sync/p3-windows-i386-20261115]
+    paths:
+      - component/memory/memory_windows.go
+      - component/memory/memory_windows_test.go
+      - .github/workflows/p3-win-i386-abi.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-abi:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ['386', 'amd64']
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - name: Compile memory package for Windows
+        shell: pwsh
+        env:
+          GOOS: windows
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+        run: |
+          go test -c ./component/memory -o "${{ runner.temp }}/memory-${{ matrix.arch }}.test.exe"
+          if ("${{ matrix.arch }}" -eq "amd64") {
+            go test ./component/memory -run '^TestProcessMemoryCountersWindowsABI$' -count=1
+          }
+      - name: Check Android ARM64 unaffected
+        if: matrix.arch == 'amd64'
+        shell: pwsh
+        env:
+          GOOS: android
+          GOARCH: arm64
+          CGO_ENABLED: '0'
+        run: go test -c ./component/memory -o "${{ runner.temp }}/memory-android-arm64.test"
