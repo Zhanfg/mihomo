@@ -80,3 +80,13 @@ func TestFakeIPLPMMaskBoundaryLengths(t *testing.T) {
         t.Fatalf("IPv6 /128 mask = %v, want all ones", got)
     }
 }
+
+func TestFakeIPLPMIPv4MappedBypassKeyCanonicalization(t *testing.T) {
+    ipv4, ipv6, err := compileBypassCIDRPolicy([]netip.Prefix{
+        netip.MustParsePrefix("::ffff:198.19.0.0/112"),
+    })
+    if err != nil { t.Fatal(err) }
+    if len(ipv4) != 1 || ipv4[0] != netip.MustParsePrefix("198.19.0.0/16") || len(ipv6) != 0 {
+        t.Fatalf("IPv4-mapped CIDR unexpectedly populated wrong trie: v4=%v v6=%v", ipv4, ipv6)
+    }
+}

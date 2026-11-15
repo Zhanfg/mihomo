@@ -5,7 +5,7 @@
 ## 结论与设计
 
 - **不建议新增动态 Fake-IP LPM Trie**：当前 DNS Fake-IP 每族发布一个 `netip.Prefix`，控制结构已使用前缀和位掩码直接匹配。新增第二套 Trie 会引入生命周期、状态一致性和 BPF ABI 风险，而没有证明能减少现有流的处理成本。
-- 现有 LPM Trie 服务于按目标 IP 的 bypass/host/按来源地址 include/exclude 规则，独立于 Fake-IP 前缀标志。`tc.go` 中的 map override 明确设置 `BPF_MAP_TYPE_LPM_TRIE` 以及 `BPF_F_NO_PREALLOC`。
+- 现有 LPM Trie 服务于目标 IPv4/IPv6 bypass 与来源地址 include/exclude CIDR，独立于 Fake-IP 前缀标志。HOST 地址映射为 Hash Map，并非 LPM Trie。`tc.go` 中的 map override 明确设置 `BPF_MAP_TYPE_LPM_TRIE` 以及 `BPF_F_NO_PREALLOC`。
 - Fake-IP 前缀进入 `PolicyConfig` 的 IPv4/IPv6 两个字段；`listener/sing_ebpf/fakeip.go` 检查必需安全地址并进行 `Masked()`，然后在控制记录写入匹配位和前缀。
 - 当前 Go 侧分别编码 TC、cgroup 与 shared packet-rewrite 的 Fake-IP 控制字段。共同 C helper 是 `native/fakeip_policy.h`。
 - DNS 变更经 `component/resolver/fakeip_range.go` 的串行观察者传播；监听器先注册回调再读取快照，失败通过 `fakeIPRangeNeedsRetry` 通知重试。
