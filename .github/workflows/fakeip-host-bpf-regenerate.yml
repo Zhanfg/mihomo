@@ -1,0 +1,56 @@
+name: Regenerate Fake-IP HOST eBPF Objects (P1 Draft)
+on:
+  push:
+    branches:
+      - 'sync/p1-fakeip-host-priority-20261115'
+    paths:
+      - 'common/ebpf/native/cgroup.bpf.c'
+      - 'common/ebpf/native/shared_network_policy.h'
+      - '.github/workflows/fakeip-host-bpf-regenerate.yml'
+permissions:
+  contents: write
+concurrency:
+  group: fakeip-host-regenerate
+  cancel-in-progress: false
+jobs:
+  generate:
+    if: github.repository == 'Zhanfg/mihomo' && github.ref == 'refs/heads/sync/p1-fakeip-host-priority-20261115'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26.x'
+          cache: true
+      - id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r29
+      - name: Apply pinned P0 WireGuard overlay
+        run: node tools/prepare-wireguard-p0-overlay.mjs
+      - name: Rebuild and verify eBPF objects with NDK r29 Clang 21
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk-path }}
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          make ebpf_generate
+          make ebpf_check
+          go test -tags 'with_gvisor with_ebpf' ./common/ebpf -run '^TestNativeFakeIPHostPrecedenceContract$' -count=1
+      - name: Commit regenerated objects only to candidate branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/sync/p1-fakeip-host-priority-20261115
+          git add common/ebpf/internal/bpfgen/
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo '::error::No generated changes despite source changes'
+            exit 1
+          fi
+          git diff --cached --name-only | grep -Eq '^common/ebpf/internal/bpfgen/(cgroup|shared_network)_bpf(el|eb)\.o$'
+          git diff --cached --name-only
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'build(ebpf): regenerate Fake-IP HOST policy objects with pinned NDK'
+          git push origin HEAD:refs/heads/sync/p1-fakeip-host-priority-20261115
+          git rev-parse HEAD

@@ -118,7 +118,7 @@ INLINE __u8 ipv4_policy(
         (SB_SHARED_FLAG_HOST_IPV4 | SB_SHARED_FLAG_BYPASS_IPV4);
     struct sb_lpm4_key key = {.prefixlen = 32U};
     __builtin_memcpy(key.addr, destination, 4U);
-    if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV4) != 0U &&
+    if (!force_fakeip && (map_policy_flags & SB_SHARED_FLAG_HOST_IPV4) != 0U &&
         map_lookup(&shared_host_ipv4, &key) != 0) return SB_SHARED_POLICY_BYPASS;
     if (force_fakeip) return SB_SHARED_POLICY_PROXY;
     if (map_policy_flags == 0U) return SB_SHARED_POLICY_PROXY;
@@ -147,7 +147,7 @@ INLINE __u8 ipv6_policy(
         (SB_SHARED_FLAG_HOST_IPV6 | SB_SHARED_FLAG_BYPASS_IPV6);
     struct sb_lpm6_key key = {.prefixlen = 128U};
     __builtin_memcpy(key.addr, destination, 16U);
-    if ((map_policy_flags & SB_SHARED_FLAG_HOST_IPV6) != 0U && map_lookup(&shared_host_ipv6, &key) != 0) {
+    if (!force_fakeip && (map_policy_flags & SB_SHARED_FLAG_HOST_IPV6) != 0U && map_lookup(&shared_host_ipv6, &key) != 0) {
         return SB_SHARED_POLICY_BYPASS;
     }
     if (force_fakeip) return SB_SHARED_POLICY_PROXY;
