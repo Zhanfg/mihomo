@@ -5,7 +5,7 @@
     "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
     "official-release": "v1.19.34",
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
-    "smart-vernesong": "c4df732a2c00731ea1a7c414500d161f5810f20e",
+    "smart-vernesong": "6a80483318c964efe400c92565038335c0c80e41",
     "tun-metacubex": "ef2c0409a4db84554e1551be7da9eb960406ad64",
     "tun-sagernet": "6bde9edf784f77144c56a906911de323c8d1a62c",
     "ebpf-cilium": "6951718af7885e1aeaf98624960ca88c86112303",
@@ -24,8 +24,14 @@
       "old": "d69ccb79defdf8ac050a341cc9fbcdab46c2bff8",
       "new": "6bde9edf784f77144c56a906911de323c8d1a62c",
       "time": "2026-11-17T11:08:23+00:00"
+    },
+    {
+      "name": "smart-vernesong",
+      "old": "c4df732a2c00731ea1a7c414500d161f5810f20e",
+      "new": "6a80483318c964efe400c92565038335c0c80e41",
+      "time": "2026-11-17T19:51:35+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-17T11:08:23+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-17T19:51:35+00:00"
 }
