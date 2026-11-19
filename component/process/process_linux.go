@@ -190,7 +190,8 @@ func resolveProcessNameByProcSearch(inode, uid uint32) (string, error) {
 
 		info, err := f.Info()
 		if err != nil {
-			return "", err
+			// A process may exit between ReadDir and Info; keep searching.
+			continue
 		}
 		if info.Sys().(*syscall.Stat_t).Uid != uid {
 			continue
