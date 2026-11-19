@@ -7,7 +7,7 @@
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
     "smart-vernesong": "6a80483318c964efe400c92565038335c0c80e41",
     "tun-metacubex": "ef2c0409a4db84554e1551be7da9eb960406ad64",
-    "tun-sagernet": "6bde9edf784f77144c56a906911de323c8d1a62c",
+    "tun-sagernet": "4486c14ba472e42f62d04e9b7b661690e62c78f8",
     "ebpf-cilium": "6951718af7885e1aeaf98624960ca88c86112303",
     "chizi-sing-ebpf": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
     "chizi-sing-box": "e74cfa228dfe3a9d9c80c3d39d1c109608bc1072"
@@ -36,8 +36,14 @@
       "old": "3c0d10a503f7b2fde3fe167d4d91dd05725d5268",
       "new": "2be2f0890978695637a61745ecb08b110d5e7719",
       "time": "2026-11-18T01:58:36+00:00"
+    },
+    {
+      "name": "tun-sagernet",
+      "old": "6bde9edf784f77144c56a906911de323c8d1a62c",
+      "new": "4486c14ba472e42f62d04e9b7b661690e62c78f8",
+      "time": "2026-11-19T08:00:31+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-18T01:58:36+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-19T08:00:31+00:00"
 }
