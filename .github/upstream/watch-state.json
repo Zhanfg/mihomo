@@ -1,7 +1,7 @@
 {
   "version": 1,
   "heads": {
-    "official-alpha": "2be2f0890978695637a61745ecb08b110d5e7719",
+    "official-alpha": "100ff73ae769c15562d6e174e88bf0da401ec4e2",
     "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
     "official-release": "v1.19.34",
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
@@ -54,8 +54,14 @@
       "old": "6951718af7885e1aeaf98624960ca88c86112303",
       "new": "862b60f0fc9352a90d8ea58a2521aebce619cf88",
       "time": "2026-11-19T17:17:49+00:00"
+    },
+    {
+      "name": "official-alpha",
+      "old": "2be2f0890978695637a61745ecb08b110d5e7719",
+      "new": "100ff73ae769c15562d6e174e88bf0da401ec4e2",
+      "time": "2026-11-20T04:20:00+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-19T17:17:49+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-20T04:20:00+00:00"
 }
