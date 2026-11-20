@@ -147,3 +147,19 @@ func TestValidateDialerProxies(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultFakeIPFilterWindowsNCSI(t *testing.T) {
+	filters := DefaultRawConfig().DNS.FakeIPFilter
+	required := []string{
+		"dns.msftncsi.com",
+		"www.msftncsi.com",
+		"www.msftconnecttest.com",
+	}
+	for _, hostname := range required {
+		t.Run(hostname, func(t *testing.T) {
+			assert.Contains(t, filters, hostname)
+		})
+	}
+	assert.NotContains(t, filters, "dns.msftnsci.com")
+	assert.NotContains(t, filters, "www.msftnsci.com")
+}
