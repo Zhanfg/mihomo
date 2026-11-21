@@ -297,13 +297,14 @@ func updateDNS(c *config.DNS, generalIPv6 bool) (releaseCache func()) {
 	// nameserver-policy whose rule sets are still empty reaches the cache.
 	r.HoldCache()
 	m := dns.NewEnhancer(dns.EnhancerConfig{
-		IPv6:          ipv6,
-		EnhancedMode:  c.EnhancedMode,
-		FakeIPPool:    c.FakeIPPool,
-		FakeIPPool6:   c.FakeIPPool6,
-		FakeIPSkipper: c.FakeIPSkipper,
-		FakeIPTTL:     c.FakeIPTTL,
-		UseHosts:      c.UseHosts,
+		IPv6:                 ipv6,
+		EnhancedMode:         c.EnhancedMode,
+		FakeIPPool:           c.FakeIPPool,
+		FakeIPPool6:          c.FakeIPPool6,
+		FakeIPSkipper:        c.FakeIPSkipper,
+		FakeIPTTL:            c.FakeIPTTL,
+		FakeIPDisableMapping: c.FakeIPDisableMapping,
+		UseHosts:             c.UseHosts,
 	})
 
 	// reuse cache of old host mapper
