@@ -8,9 +8,9 @@ import (
 
 func TestNormalizeDNSMode(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		input string
-		want string
+		want  string
 	}{
 		{name: "default", input: "", want: ""},
 		{name: "disabled", input: tun.DNSModeDisabled, want: tun.DNSModeDisabled},
