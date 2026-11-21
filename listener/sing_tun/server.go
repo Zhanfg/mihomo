@@ -38,6 +38,18 @@ import (
 	"golang.org/x/exp/slices"
 )
 
+// normalizeDNSMode keeps the default TUN DNS behavior when a stale or
+// unsupported dns-mode value is supplied. Valid modes remain unchanged.
+func normalizeDNSMode(mode string) string {
+	switch mode {
+	case "", tun.DNSModeDisabled, tun.DNSModeNative, tun.DNSModeHijack:
+		return mode
+	default:
+		log.Warnln("[TUN] ignored invalid dns-mode: %s", mode)
+		return ""
+	}
+}
+
 var InterfaceName = "Meta"
 var EnforceBindInterface = false
 
@@ -282,11 +294,7 @@ func New(options LC.Tun, tunnel C.Tunnel, additions ...inbound.Addition) (l *Lis
 		excludeMACAddress = append(excludeMACAddress, addr)
 	}
 
-	switch options.DNSMode {
-	case "", tun.DNSModeDisabled, tun.DNSModeNative, tun.DNSModeHijack:
-	default:
-		return nil, fmt.Errorf("invalid dns-mode: %s", options.DNSMode)
-	}
+	options.DNSMode = normalizeDNSMode(options.DNSMode)
 
 	var dnsAdds []netip.AddrPort
 
