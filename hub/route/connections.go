@@ -17,6 +17,7 @@ func connectionRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Get("/", getConnections)
 	r.Get("/summary", getConnectionSummary)
+	r.Get("/sources", getConnectionSources)
 	r.Delete("/", closeAllConnections)
 	r.Delete("/{id}", closeConnection)
 	r.Delete("/smart/{id}", setSmartBlock)
@@ -27,6 +28,12 @@ func connectionRouter() http.Handler {
 // chain iteration or JSON materialization for each status refresh.
 func getConnectionSummary(w http.ResponseWriter, r *http.Request) {
 	render.JSON(w, r, statistic.DefaultManager.Summary())
+}
+
+// getConnectionSources reports cumulative per-device bytes without scanning
+// the live connection table. Clients derive rates between snapshots.
+func getConnectionSources(writer http.ResponseWriter, request *http.Request) {
+	render.JSON(writer, request, render.M{"sources": statistic.DefaultManager.SourceTraffic()})
 }
 
 func getConnections(w http.ResponseWriter, r *http.Request) {
