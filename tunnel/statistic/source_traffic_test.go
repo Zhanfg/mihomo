@@ -3,6 +3,7 @@ package statistic
 import (
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -45,6 +46,41 @@ func TestSourceTrafficCountsOnlyManagerTrackers(t *testing.T) {
 	first.addDownload(5)
 	if got = m.SourceTraffic(); len(got) != 1 || got[0].Download != 5 {
 		t.Fatalf("counter held by a live connection stopped counting after reset: %+v", got)
+	}
+}
+
+func TestSourceTrafficConcurrentCapacityBound(t *testing.T) {
+	// Simulate a table with one slot left. Each key has its own map bucket,
+	// so the capacity check must be atomic across distinct Compute calls.
+	const workers = 128
+	m := &Manager{}
+	m.sourceCount.Store(maxTrackedSources - 1)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			source := netip.AddrFrom4([4]byte{10, 77, byte(i / 256), byte(i % 256)})
+			if m.sourceCounterFor(&C.Metadata{SrcIP: source}) != nil {
+				accepted.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("accepted %d new sources with one remaining slot; want 1", got)
+	}
+	if got := m.sourceCount.Load(); got != maxTrackedSources {
+		t.Fatalf("source count %d, want capped at %d", got, maxTrackedSources)
+	}
+	if got := m.sources.Size(); got != 1 {
+		t.Fatalf("stored %d new source entries, want 1", got)
 	}
 }
 

@@ -65,6 +65,20 @@ func (c *sourceCounter) release() {
 	c.refs.Add(-1)
 }
 
+// reserveSourceSlot accounts for a new entry before it becomes visible to
+// another source's Compute callback. Deletion releases the slot exactly once.
+func (m *Manager) reserveSourceSlot() bool {
+	for {
+		count := m.sourceCount.Load()
+		if count >= maxTrackedSources {
+			return false
+		}
+		if m.sourceCount.CompareAndSwap(count, count+1) {
+			return true
+		}
+	}
+}
+
 // sourceCounterFor returns the counter for the metadata's source address with
 // one reference taken (release it when the tracker closes), or nil when the
 // source is unknown or the table is full.
@@ -83,13 +97,15 @@ func (m *Manager) sourceCounterFor(metadata *C.Metadata) *sourceCounter {
 			old.refs.Add(1)
 			return old, xsync.CancelOp
 		}
-		if m.sourceCount.Load() >= maxTrackedSources {
+		// Different source keys can occupy different map buckets. Reserve
+		// capacity atomically across those buckets before creating a counter,
+		// otherwise concurrent new sources can overshoot the global cap.
+		if !m.reserveSourceSlot() {
 			return nil, xsync.CancelOp
 		}
 		counter := &sourceCounter{}
 		counter.refs.Store(1)
 		counter.idleSince.Store(time.Now().UnixNano())
-		m.sourceCount.Add(1)
 		return counter, xsync.UpdateOp
 	})
 	return counter
