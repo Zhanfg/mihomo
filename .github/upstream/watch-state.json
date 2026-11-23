@@ -80,6 +80,6 @@
       "time": "2026-11-23T13:42:56+00:00"
     }
   ],
-  "pending_ci": true,
+  "pending_ci": false,
   "last_changed": "2026-11-23T13:42:56+00:00"
 }
