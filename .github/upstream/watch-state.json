@@ -1,13 +1,13 @@
 {
   "version": 1,
   "heads": {
-    "official-alpha": "fc3bd70369129c2f28d9c8a248c1969d06f8983c",
+    "official-alpha": "c7af25cee0ef8f93b6922d9de4ba1b233ea0089c",
     "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
     "official-release": "v1.19.34",
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
     "smart-vernesong": "1348c4d2dee81f6941443b3d8b8a78a602b3d89c",
-    "tun-metacubex": "1e2ce55258fe398c325a5a31fc029c020c88392e",
-    "tun-sagernet": "695e0f7bfedfcd9a5fc096a8173296cb936e4aa7",
+    "tun-metacubex": "28b73db26483ea2360c2890c510d1737fc4bf5cc",
+    "tun-sagernet": "e6de6ac900993ba1f066b8b99d1a911d6cf4b374",
     "ebpf-cilium": "862b60f0fc9352a90d8ea58a2521aebce619cf88",
     "chizi-sing-ebpf": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
     "chizi-sing-box": "e74cfa228dfe3a9d9c80c3d39d1c109608bc1072"
@@ -90,8 +90,26 @@
       "old": "e13f0f187e0cea409b9cfc5a2373d6c87a57082c",
       "new": "fc3bd70369129c2f28d9c8a248c1969d06f8983c",
       "time": "2026-11-24T11:07:00+00:00"
+    },
+    {
+      "name": "official-alpha",
+      "old": "fc3bd70369129c2f28d9c8a248c1969d06f8983c",
+      "new": "c7af25cee0ef8f93b6922d9de4ba1b233ea0089c",
+      "time": "2026-11-24T21:09:35+00:00"
+    },
+    {
+      "name": "tun-metacubex",
+      "old": "1e2ce55258fe398c325a5a31fc029c020c88392e",
+      "new": "28b73db26483ea2360c2890c510d1737fc4bf5cc",
+      "time": "2026-11-24T21:09:35+00:00"
+    },
+    {
+      "name": "tun-sagernet",
+      "old": "695e0f7bfedfcd9a5fc096a8173296cb936e4aa7",
+      "new": "e6de6ac900993ba1f066b8b99d1a911d6cf4b374",
+      "time": "2026-11-24T21:09:35+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-24T11:07:00+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-24T21:09:35+00:00"
 }
