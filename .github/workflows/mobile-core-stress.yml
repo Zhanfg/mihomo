@@ -22,6 +22,7 @@ on:
       - "common/observable/**"
       - "hub/route/**"
       - "component/geodata/**"
+      - "rules/**"
       - "go.mod"
       - "go.sum"
       - "dns/**"
