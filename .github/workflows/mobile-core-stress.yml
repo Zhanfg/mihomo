@@ -7,9 +7,11 @@ on:
       - main
       - integration/boxproxy-native-ebpf
       - 'fix/smart-*'
+      - 'fix/p3-*'
       - 'sync/**'
     paths:
       - ".github/workflows/mobile-core-stress.yml"
+      - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - "adapter/**"
       - "component/smart/**"
       - "component/linkprofile/**"
