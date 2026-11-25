@@ -11,6 +11,7 @@ on:
       - 'sync/**'
     paths:
       - ".github/workflows/mobile-core-stress.yml"
+      - ".github/workflows/boxproxy-native-ebpf-android.yml"
       - "adapter/**"
       - "component/smart/**"
       - "component/linkprofile/**"
