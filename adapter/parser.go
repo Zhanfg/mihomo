@@ -232,21 +232,33 @@ func ParseProxy(mapping map[string]any, options ...ProxyOption) (C.Proxy, error)
 	}
 
 	if muxMapping, muxExist := mapping["smux"].(map[string]any); muxExist {
-		muxOption := &outbound.SingMuxOption{}
-		err = decoder.Decode(muxMapping, muxOption)
+		proxy, err = wrapProxyWithSingMux(proxy, muxMapping, decoder)
 		if err != nil {
 			return nil, err
-		}
-		if muxOption.Enabled {
-			proxy, err = outbound.NewSingMux(*muxOption, proxy)
-			if err != nil {
-				return nil, err
-			}
 		}
 	}
 
 	proxy = outbound.NewAutoCloseProxyAdapter(proxy)
 	return NewProxy(proxy), nil
+}
+
+// wrapProxyWithSingMux takes ownership of proxy. On failure it closes the
+// original adapter; on success ownership passes to the returned adapter.
+func wrapProxyWithSingMux(proxy outbound.ProxyAdapter, mapping map[string]any, decoder *structure.Decoder) (outbound.ProxyAdapter, error) {
+	var option outbound.SingMuxOption
+	if err := decoder.Decode(mapping, &option); err != nil {
+		_ = proxy.Close()
+		return nil, err
+	}
+	if !option.Enabled {
+		return proxy, nil
+	}
+	wrapped, err := outbound.NewSingMux(option, proxy)
+	if err != nil {
+		_ = proxy.Close()
+		return nil, err
+	}
+	return wrapped, nil
 }
 
 type proxyOption struct {
