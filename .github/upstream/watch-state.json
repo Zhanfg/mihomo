@@ -1,13 +1,13 @@
 {
   "version": 1,
   "heads": {
-    "official-alpha": "dd74780d4e1cea475b450715268d7c38d28dd014",
+    "official-alpha": "53f61d42915be657600ef6b81611d0012e816ffe",
     "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
     "official-release": "v1.19.34",
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
     "smart-vernesong": "1348c4d2dee81f6941443b3d8b8a78a602b3d89c",
     "tun-metacubex": "28b73db26483ea2360c2890c510d1737fc4bf5cc",
-    "tun-sagernet": "e6de6ac900993ba1f066b8b99d1a911d6cf4b374",
+    "tun-sagernet": "65d990ff86ec63bbf183b08817510881499539e8",
     "ebpf-cilium": "862b60f0fc9352a90d8ea58a2521aebce619cf88",
     "chizi-sing-ebpf": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
     "chizi-sing-box": "e74cfa228dfe3a9d9c80c3d39d1c109608bc1072"
@@ -114,8 +114,20 @@
       "old": "c7af25cee0ef8f93b6922d9de4ba1b233ea0089c",
       "new": "dd74780d4e1cea475b450715268d7c38d28dd014",
       "time": "2026-11-25T04:12:36+00:00"
+    },
+    {
+      "name": "official-alpha",
+      "old": "dd74780d4e1cea475b450715268d7c38d28dd014",
+      "new": "53f61d42915be657600ef6b81611d0012e816ffe",
+      "time": "2026-11-25T14:29:48+00:00"
+    },
+    {
+      "name": "tun-sagernet",
+      "old": "e6de6ac900993ba1f066b8b99d1a911d6cf4b374",
+      "new": "65d990ff86ec63bbf183b08817510881499539e8",
+      "time": "2026-11-25T14:29:48+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-25T04:12:36+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-25T14:29:48+00:00"
 }
