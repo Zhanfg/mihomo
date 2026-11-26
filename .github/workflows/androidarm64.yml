@@ -2,7 +2,7 @@ name: Build Android ARM64
 on:
   workflow_dispatch:
   push:
-    branches: ['sync/p0-*', 'sync/p1-*', 'sync/p3-*']
+    branches: ['sync/p0-*', 'sync/p1-*', 'sync/p2-*', 'sync/p3-*']
   pull_request:
     branches: [main]
 
@@ -96,6 +96,101 @@ jobs:
 
     - name: Backport pinned sing-tun single-packet GRO optimization
       run: node tools/apply-sing-tun-p1-gro.mjs
+
+    - name: Prepare isolated P2 TCP NAT candidate
+      run: node tools/prepare-sing-tun-p2-nat.mjs
+
+    - name: Verify exhausted TCP NAT mappings
+      run: go test -race github.com/metacubex/sing-tun -run '^TestTCPNatPortExhaustion
+
+    - name: Modify the Update Link
+      run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
+
+    - name: Update CA
+      run: |
+        sudo apt-get update && sudo apt-get install -y ca-certificates
+        sudo update-ca-certificates
+        cp -f /etc/ssl/certs/ca-certificates.crt component/ca/ca-certificates.crt
+
+    - name: Set variables
+      run: |
+        BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+        SHORT_HASH=$(git rev-parse --short HEAD)
+        VERSION="Zhanfg-${SHORT_HASH}"
+        VERSION="${VERSION//\//-}"
+        echo "VERSION=${VERSION}" >> $GITHUB_ENV
+        echo "BUILDTIME=$(date)" >> $GITHUB_ENV
+        echo "CGO_ENABLED=1" >> $GITHUB_ENV
+        echo "GOTOOLCHAIN=local" >> $GITHUB_ENV
+        echo "BUILDTAG=" >> $GITHUB_ENV
+
+    - name: Setup NDK
+      uses: nttld/setup-ndk@v1
+      id: setup-ndk
+      with:
+        # This job runs `make ebpf_generate`, whose toolchain guard accepts
+        # only the Clang build recorded in manifest.txt. r29-beta1 is a
+        # different one, so the job could never have got past it.
+        ndk-version: r29
+
+    - name: Set NDK environment
+      run: |
+        NDK_PATH=${{ steps.setup-ndk.outputs.ndk-path }}
+        echo "ANDROID_NDK_HOME=${NDK_PATH}" >> $GITHUB_ENV
+        echo "CC=${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang" >> $GITHUB_ENV
+        echo "CGO_ENABLED=1" >> $GITHUB_ENV
+        echo "GOOS=android" >> $GITHUB_ENV
+        echo "GOARCH=arm64" >> $GITHUB_ENV
+
+    - name: Record build metadata
+      run: |
+        mkdir -p dist build
+        git fetch --depth=1 https://github.com/MetaCubeX/mihomo.git Alpha
+        echo "$(git rev-parse FETCH_HEAD)" > build/UPSTREAM_SHA
+        echo "$(git rev-parse HEAD)" > build/COMMIT_SHA
+        echo "android/arm64" > build/PLATFORM
+        go version > build/GO_VERSION
+        echo "${VERSION}" > build/VERSION
+
+    - name: Build mihomo for Android arm64 (with patched sing-tun)
+      run: |
+        go clean -cache
+
+        make ebpf_generate
+
+        go build -v -tags "with_gvisor with_ebpf" -trimpath \
+          -ldflags "${BUILDTAG} -X 'github.com/metacubex/mihomo/constant.Version=${VERSION}' \
+                    -X 'github.com/metacubex/mihomo/constant.BuildTime=${BUILDTIME}' \
+                    -w -s -buildid=" \
+          -o mihomo
+
+    - name: Strip binary
+      run: |
+        NDK_PATH=${{ steps.setup-ndk.outputs.ndk-path }}
+        STRIP_PATH="${NDK_PATH}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+        $STRIP_PATH --strip-all mihomo
+        echo "Binary size after strip: $(du -h mihomo | cut -f1)"
+
+    - name: Compress binary
+      run: |
+        cp mihomo mihomo-android-arm64
+        gzip -c mihomo-android-arm64 > mihomo-android-arm64-${VERSION}.gz
+
+    - name: Checksum and copy metadata
+      run: |
+        sha256sum mihomo-android-arm64-*.gz > mihomo-android-arm64.sha256
+        cp build/* dist/ 2>/dev/null || true
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v7
+      with:
+        name: android-arm64
+        path: |
+          mihomo-android-arm64-*.gz
+          mihomo-android-arm64.sha256
+          dist/*
+          build/*
+ -count=1 -v
 
     - name: Modify the Update Link
       run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
