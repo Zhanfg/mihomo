@@ -2,7 +2,7 @@ name: Build Android ARM64
 on:
   workflow_dispatch:
   push:
-    branches: ['sync/p0-*', 'sync/p1-*', 'sync/p3-*']
+    branches: ['sync/p0-*', 'sync/p1-*', 'sync/p2-*', 'sync/p3-*']
   pull_request:
     branches: [main]
 
@@ -96,6 +96,12 @@ jobs:
 
     - name: Backport pinned sing-tun single-packet GRO optimization
       run: node tools/apply-sing-tun-p1-gro.mjs
+
+    - name: Prepare isolated P2 TCP NAT candidate
+      run: node tools/prepare-sing-tun-p2-nat.mjs
+
+    - name: Verify exhausted TCP NAT mappings
+      run: go test -race github.com/metacubex/sing-tun -run '^TestTCPNatPortExhaustion$' -count=1 -v
 
     - name: Modify the Update Link
       run: sed -i 's|github\.com/MetaCubeX/mihomo|github.com/Zhanfg/mihomo|g' ./component/updater/update_core.go
