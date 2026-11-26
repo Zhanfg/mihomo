@@ -13,12 +13,21 @@ import (
 // The Chrome version generator will suffer from deviation of a normal distribution.
 
 func ChromeVersion() int {
-	// Start from Chrome 144, released on 2026.1.13.
-	var startVersion int = 144
-	var timeStart int64 = time.Date(2026, 1, 13, 0, 0, 0, 0, time.UTC).Unix() / 86400
-	var timeCurrent int64 = time.Now().Unix() / 86400
-	var timeDiff int = int((timeCurrent - timeStart - 35)) - int(math.Floor(math.Pow(randv2.Float64(), 2)*105))
-	return startVersion + (timeDiff / 35) // It's 31.15 currently.
+	return chromeVersionAt(time.Now(), randv2.Float64())
+}
+
+// chromeVersionAt keeps the GREASE seed valid even when the device clock
+// predates the initial Chrome release (for example, before NTP sync).
+func chromeVersionAt(now time.Time, sample float64) int {
+	const startVersion = 144
+	timeStart := time.Date(2026, 1, 13, 0, 0, 0, 0, time.UTC).Unix() / 86400
+	timeCurrent := now.Unix() / 86400
+	timeDiff := timeCurrent - timeStart - 35 - int64(math.Floor(math.Pow(sample, 2)*105))
+	version := startVersion + timeDiff/35
+	if version < startVersion {
+		return startVersion
+	}
+	return int(version)
 }
 
 var safariMinorMap [25]int = [25]int{0, 0, 0, 1, 1,
