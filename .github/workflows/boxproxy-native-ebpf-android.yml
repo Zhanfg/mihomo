@@ -49,6 +49,8 @@ on:
       - "dns/connection_pool.go"
       - "hub/executor/concurrent_load_*.go"
       - "tunnel/statistic/**"
+      - "transport/xhttp/**"
+      - ".github/workflows/mobile-core-stress.yml"
 
 permissions:
   contents: write
