@@ -60,7 +60,7 @@ if (!patched.includes("if len(n.portMap) == tcpNatPortCount {") ||
 const remaining = flags.replace(modfilePattern, "").trim();
 const nextFlags = [remaining, "-modfile=" + alternateMod].filter(Boolean).join(" ");
 const nextEnv = { ...process.env, GOFLAGS: nextFlags };
-go(["mod", "edit", "-replace=" + moduleName + "=" + localDir], nextEnv);
+go(["mod", "edit", "-modfile=" + alternateMod, "-replace=" + moduleName + "=" + localDir], nextEnv);
 const selected = JSON.parse(go(["list", "-m", "-json", moduleName], nextEnv));
 if (!selected.Replace || selected.Replace.Dir !== localDir) {
   throw new Error("Build did not select the patched local sing-tun copy");
