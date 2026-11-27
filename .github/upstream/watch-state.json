@@ -1,7 +1,7 @@
 {
   "version": 1,
   "heads": {
-    "official-alpha": "53f61d42915be657600ef6b81611d0012e816ffe",
+    "official-alpha": "87e08489b701e919730594b0fa5300d2a9d1dc84",
     "official-main": "008b91bfe8c0e2daca0ab69061efd9ea1ad71bd2",
     "official-release": "v1.19.34",
     "smart-liuran": "574c6db4a5dbbb16a262ce382c78fce7d5c5a780",
@@ -9,8 +9,8 @@
     "tun-metacubex": "28b73db26483ea2360c2890c510d1737fc4bf5cc",
     "tun-sagernet": "1a13df1ac21f721794985aab631a56cf96683fef",
     "ebpf-cilium": "862b60f0fc9352a90d8ea58a2521aebce619cf88",
-    "chizi-sing-ebpf": "099d82746a43147f6348851256f6120d106d5fb0",
-    "chizi-sing-box": "ff38c07c0ee6c9e8967e6178df9482c0ed64de42"
+    "chizi-sing-ebpf": "1b82a41143ba050f9f7bf975c564c9714140cce1",
+    "chizi-sing-box": "b828824f0bd2468bf1777923ae7e824b3a77dc70"
   },
   "history": [
     {
@@ -156,8 +156,26 @@
       "old": "85a37217688debe88da4b14cacbcfdb63dbec6c8",
       "new": "ff38c07c0ee6c9e8967e6178df9482c0ed64de42",
       "time": "2026-11-27T07:32:09+00:00"
+    },
+    {
+      "name": "official-alpha",
+      "old": "53f61d42915be657600ef6b81611d0012e816ffe",
+      "new": "87e08489b701e919730594b0fa5300d2a9d1dc84",
+      "time": "2026-11-27T17:38:18+00:00"
+    },
+    {
+      "name": "chizi-sing-ebpf",
+      "old": "099d82746a43147f6348851256f6120d106d5fb0",
+      "new": "1b82a41143ba050f9f7bf975c564c9714140cce1",
+      "time": "2026-11-27T17:38:18+00:00"
+    },
+    {
+      "name": "chizi-sing-box",
+      "old": "ff38c07c0ee6c9e8967e6178df9482c0ed64de42",
+      "new": "b828824f0bd2468bf1777923ae7e824b3a77dc70",
+      "time": "2026-11-27T17:38:18+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-27T07:32:09+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-27T17:38:18+00:00"
 }
