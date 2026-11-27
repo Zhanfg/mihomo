@@ -9,8 +9,8 @@
     "tun-metacubex": "28b73db26483ea2360c2890c510d1737fc4bf5cc",
     "tun-sagernet": "1a13df1ac21f721794985aab631a56cf96683fef",
     "ebpf-cilium": "862b60f0fc9352a90d8ea58a2521aebce619cf88",
-    "chizi-sing-ebpf": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
-    "chizi-sing-box": "85a37217688debe88da4b14cacbcfdb63dbec6c8"
+    "chizi-sing-ebpf": "099d82746a43147f6348851256f6120d106d5fb0",
+    "chizi-sing-box": "ff38c07c0ee6c9e8967e6178df9482c0ed64de42"
   },
   "history": [
     {
@@ -144,8 +144,20 @@
       "old": "e74cfa228dfe3a9d9c80c3d39d1c109608bc1072",
       "new": "85a37217688debe88da4b14cacbcfdb63dbec6c8",
       "time": "2026-11-26T05:10:43+00:00"
+    },
+    {
+      "name": "chizi-sing-ebpf",
+      "old": "d2983dce11d84e0e02c2c5ea95212b74d91aa6d8",
+      "new": "099d82746a43147f6348851256f6120d106d5fb0",
+      "time": "2026-11-27T07:32:09+00:00"
+    },
+    {
+      "name": "chizi-sing-box",
+      "old": "85a37217688debe88da4b14cacbcfdb63dbec6c8",
+      "new": "ff38c07c0ee6c9e8967e6178df9482c0ed64de42",
+      "time": "2026-11-27T07:32:09+00:00"
     }
   ],
-  "pending_ci": false,
-  "last_changed": "2026-11-26T05:10:43+00:00"
+  "pending_ci": true,
+  "last_changed": "2026-11-27T07:32:09+00:00"
 }
