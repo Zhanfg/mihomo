@@ -182,6 +182,6 @@
       "time": "2026-11-28T17:09:09+00:00"
     }
   ],
-  "pending_ci": true,
+  "pending_ci": false,
   "last_changed": "2026-11-28T17:09:09+00:00"
 }
